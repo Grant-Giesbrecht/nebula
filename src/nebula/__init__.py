@@ -14,7 +14,15 @@ Core ideas:
 
 from nebula.refs import Ref, parse_ref, format_ref
 from nebula.registry import Registry, get_registry
-from nebula.session import Session, new, append_to, reopen, session
+from nebula.session import (
+    Session,
+    MissingMetadataError,
+    MissingMetadataWarning,
+    new,
+    append_to,
+    reopen,
+    session,
+)
 from nebula.sidecar import write_sidecar, read_sidecar
 from nebula import graph
 
@@ -25,6 +33,8 @@ __all__ = [
     "Registry",
     "get_registry",
     "Session",
+    "MissingMetadataError",
+    "MissingMetadataWarning",
     "new",
     "append_to",
     "reopen",

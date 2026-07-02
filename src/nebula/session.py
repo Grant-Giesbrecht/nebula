@@ -22,6 +22,7 @@ import os
 import re
 import subprocess
 import threading
+import warnings
 from pathlib import Path
 from typing import Dict, List, Optional
 
@@ -31,7 +32,10 @@ from nebula.sidecar import (
     ProducedBy,
     SessionMeta,
     SidecarMeta,
+    SESSION_FILE,
+    SIDECAR_SUFFIX,
     read_session_yaml,
+    sidecar_path_for,
     write_session_yaml,
     write_sidecar,
 )
@@ -39,6 +43,30 @@ from nebula.sidecar import (
 ID_WIDTH = 4  # S-0001 .. S-9999 before needing a width bump
 
 _lock = threading.Lock()  # guards folder creation / id allocation on this process
+
+# Absolute path to nebula's own source directory, used to skip nebula's
+# internal frames when auto-detecting which user script is the caller.
+_NEBULA_DIR = os.path.dirname(os.path.abspath(__file__))
+
+# Policies for what close() does about artifacts left without a sidecar.
+#   "stub+warn" -- auto-write a provenance stub AND warn (default): nothing
+#                  is ever left un-tracked, but you still hear about it so
+#                  the missing inputs/derived_from don't slip by unnoticed.
+#   "stub"      -- auto-write a provenance stub, silently.
+#   "warn"      -- warn only; the orphan stays an orphan.
+#   "raise"     -- fail the close() loudly.
+_MISSING_META_POLICIES = ("stub+warn", "stub", "warn", "raise")
+_DEFAULT_MISSING_META = "stub+warn"
+
+
+class MissingMetadataError(RuntimeError):
+    """Raised at close() when on_missing_meta='raise' and one or more
+    artifacts in the session folder have no sidecar."""
+
+
+class MissingMetadataWarning(UserWarning):
+    """Emitted at close() when on_missing_meta includes 'warn' and one or
+    more artifacts in the session folder have no sidecar."""
 
 
 # ---------------------------------------------------------------------
@@ -67,18 +95,45 @@ def _git(args: List[str], cwd: Path) -> Optional[str]:
         return None
 
 
-def capture_provenance(caller_frame_depth: int = 2) -> ProducedBy:
+def _caller_source_file(caller_frame_depth: Optional[int]) -> Optional[str]:
+    """Locate the user script that called into nebula.
+
+    If caller_frame_depth is an int, use that fixed offset into the stack
+    (the historical behaviour, cheap and predictable for callers a known
+    number of frames from the user script). If it is None, auto-detect by
+    walking outward to the first frame whose file lives outside nebula's
+    own source directory -- robust when the number of intervening frames
+    isn't fixed (e.g. the stub path invoked from close()).
+    """
+    stack = inspect.stack()
+    if caller_frame_depth is not None:
+        # +1 to skip this helper's own frame, so caller_frame_depth stays
+        # measured relative to capture_provenance (our caller), preserving
+        # the historical fixed-depth contract.
+        idx = caller_frame_depth + 1
+        if len(stack) > idx:
+            return stack[idx].filename
+        return None
+    for frame in stack[1:]:  # skip _caller_source_file itself
+        fn = frame.filename
+        if not fn or fn.startswith("<"):  # <string>, <frozen ...>, etc.
+            continue
+        if os.path.dirname(os.path.abspath(fn)) == _NEBULA_DIR:
+            continue
+        return fn
+    return None
+
+
+def capture_provenance(caller_frame_depth: Optional[int] = 2) -> ProducedBy:
     """Inspect the call stack to find the source file of whichever script
     called into nebula, then capture its repo/commit/dirty state.
 
     caller_frame_depth is tuned by callers of this function based on how
     many frames separate them from the actual user script; see Session
-    methods below for usage.
+    methods below for usage. Pass None to auto-detect the caller instead
+    of relying on a fixed frame offset.
     """
-    stack = inspect.stack()
-    caller_file = None
-    if len(stack) > caller_frame_depth:
-        caller_file = stack[caller_frame_depth].filename
+    caller_file = _caller_source_file(caller_frame_depth)
     if not caller_file or not os.path.exists(caller_file):
         return ProducedBy()
 
@@ -148,10 +203,22 @@ class Session:
     or the session() convenience context manager instead.
     """
 
-    def __init__(self, path: Path, meta: SessionMeta, archive: Optional[str] = None):
+    def __init__(
+        self,
+        path: Path,
+        meta: SessionMeta,
+        archive: Optional[str] = None,
+        on_missing_meta: str = _DEFAULT_MISSING_META,
+    ):
         self.path = Path(path)
         self.meta = meta
         self.archive = archive
+        if on_missing_meta not in _MISSING_META_POLICIES:
+            raise ValueError(
+                f"on_missing_meta must be one of {_MISSING_META_POLICIES!r}, "
+                f"got {on_missing_meta!r}"
+            )
+        self.on_missing_meta = on_missing_meta
         self._closed_cleanly = False
 
     @property
@@ -160,6 +227,44 @@ class Session:
 
     def artifact_path(self, filename: str) -> Path:
         return self.path / filename
+
+    def artifact(
+        self,
+        filename: str,
+        *,
+        derived_from: Optional[List["str | Ref"]] = None,
+        inputs: Optional[Dict] = None,
+        **extra,
+    ) -> "_ArtifactWriter":
+        """Context manager that pairs writing an artifact with writing its
+        sidecar, so the two can't drift apart:
+
+            with s.artifact("raw.tome", inputs={"gain": 10}) as fn:
+                dict_to_tome(data, fn)
+            # sidecar written automatically on block exit
+
+        Yields the path to write to. On clean exit it captures provenance
+        and writes the sidecar; if the file was never actually created it
+        raises, surfacing a silently-failed write instead of leaving an
+        un-tracked hole. On an exception it writes nothing and does not
+        suppress the error.
+
+        This is the preferred front door; artifact_path() +
+        write_meta_for() remain as a lower-level escape hatch (and the
+        close() audit still covers anything written that way).
+        """
+        # Capture provenance now, while the user script is the direct
+        # caller (fixed depth 2), rather than at block-exit time where the
+        # frame layout is murkier.
+        produced_by = capture_provenance(caller_frame_depth=2)
+        return _ArtifactWriter(
+            self,
+            self.artifact_path(filename),
+            produced_by=produced_by,
+            derived_from=derived_from,
+            inputs=inputs or {},
+            extra=extra,
+        )
 
     def write_meta_for(
         self,
@@ -194,7 +299,63 @@ class Session:
     def _save_meta(self) -> None:
         write_session_yaml(self.path, self.meta)
 
+    def find_orphan_artifacts(self) -> List[Path]:
+        """Return artifact files in the session folder that have no
+        sidecar. Excludes session.yaml, the sidecars themselves, hidden
+        files (including the temp files left by an interrupted atomic
+        write), and subdirectories."""
+        orphans = []
+        for entry in sorted(self.path.iterdir()):
+            if not entry.is_file():
+                continue
+            name = entry.name
+            if name.startswith("."):
+                continue
+            if name == SESSION_FILE or name.endswith(SIDECAR_SUFFIX):
+                continue
+            if not sidecar_path_for(entry).exists():
+                orphans.append(entry)
+        return orphans
+
+    def _reconcile_missing_meta(self) -> None:
+        """Apply the on_missing_meta policy to any artifacts left without a
+        sidecar. Called on clean close only -- a crashed session's orphans
+        are honest and shouldn't be papered over."""
+        orphans = self.find_orphan_artifacts()
+        if not orphans:
+            return
+
+        names = ", ".join(o.name for o in orphans)
+        policy = self.on_missing_meta
+
+        if policy == "raise":
+            raise MissingMetadataError(
+                f"session {self.id} has artifacts with no sidecar: {names}. "
+                f"Write metadata for them (s.artifact(...) or "
+                f"s.write_meta_for(...)), or open the session with "
+                f"on_missing_meta='stub' to auto-record provenance."
+            )
+
+        # "warn" and "stub+warn" both surface the orphans; only the stub
+        # variants also write the recovery sidecar.
+        if "warn" in policy:
+            warnings.warn(
+                f"session {self.id} has artifacts with no sidecar: {names}",
+                MissingMetadataWarning,
+                stacklevel=2,
+            )
+        if "stub" in policy:
+            # Write a provenance-only sidecar so nothing is left un-tracked.
+            # The rich inputs/derived_from are still missing, but a stub is
+            # recoverable (edit it later) where an orphan is invisible.
+            produced_by = capture_provenance(caller_frame_depth=None)
+            for orphan in orphans:
+                meta = SidecarMeta(created=_now_iso(), produced_by=produced_by)
+                meta.extra["auto_stub"] = True
+                write_sidecar(orphan, meta)
+
     def close(self) -> None:
+        self._reconcile_missing_meta()
         self.meta.status = "closed"
         self._save_meta()
         self._closed_cleanly = True
@@ -215,6 +376,52 @@ class Session:
         return None
 
 
+class _ArtifactWriter:
+    """Context manager returned by Session.artifact(). Yields the artifact
+    path on enter; on clean exit verifies the file exists and writes its
+    sidecar. Not constructed directly."""
+
+    def __init__(
+        self,
+        session: "Session",
+        path: Path,
+        *,
+        produced_by: ProducedBy,
+        derived_from: Optional[List["str | Ref"]],
+        inputs: Dict,
+        extra: Dict,
+    ):
+        self._session = session
+        self.path = path
+        self._produced_by = produced_by
+        self._derived_from = derived_from or []
+        self._inputs = inputs
+        self._extra = extra
+
+    def __enter__(self) -> Path:
+        return self.path
+
+    def __exit__(self, exc_type, exc, tb) -> None:
+        if exc_type is not None:
+            # The write failed; leave no sidecar and don't suppress.
+            return None
+        if not self.path.exists():
+            raise FileNotFoundError(
+                f"s.artifact({self.path.name!r}) block finished but no file "
+                f"was written to {self.path}; nothing to record metadata for"
+            )
+        meta = SidecarMeta(
+            created=_now_iso(),
+            produced_by=self._produced_by,
+            inputs=self._inputs,
+            extra=self._extra,
+        )
+        for ref in self._derived_from:
+            meta.add_derived_from(ref)
+        write_sidecar(self.path, meta)
+        return None
+
+
 def _now_iso() -> str:
     return datetime.datetime.now().astimezone().isoformat(timespec="seconds")
 
@@ -225,6 +432,7 @@ def new(
     tags: Optional[List[str]] = None,
     description: str = "",
     archive_name: Optional[str] = None,
+    on_missing_meta: str = _DEFAULT_MISSING_META,
 ) -> Session:
     """Create a brand-new session folder and return an open Session.
 
@@ -267,7 +475,7 @@ def new(
         description=description,
     )
     write_session_yaml(session_dir, meta)
-    return Session(session_dir, meta, archive=name)
+    return Session(session_dir, meta, archive=name, on_missing_meta=on_missing_meta)
 
 
 def _find_session_dir(archive_root: Path, run_id: str) -> Path:
@@ -283,7 +491,11 @@ def _find_session_dir(archive_root: Path, run_id: str) -> Path:
 
 
 def append_to(
-    archive: "str | Path", run_id: str, *, archive_name: Optional[str] = None
+    archive: "str | Path",
+    run_id: str,
+    *,
+    archive_name: Optional[str] = None,
+    on_missing_meta: str = _DEFAULT_MISSING_META,
 ) -> Session:
     """Reattach to an existing OPEN session to write more artifacts into
     it. Raises if the session is closed -- closed sessions are immutable
@@ -302,11 +514,15 @@ def append_to(
             f"Closed sessions are immutable by policy -- create a new "
             f"session and reference this one via related_runs instead."
         )
-    return Session(session_dir, meta, archive=name)
+    return Session(session_dir, meta, archive=name, on_missing_meta=on_missing_meta)
 
 
 def reopen(
-    archive: "str | Path", run_id: str, *, archive_name: Optional[str] = None
+    archive: "str | Path",
+    run_id: str,
+    *,
+    archive_name: Optional[str] = None,
+    on_missing_meta: str = _DEFAULT_MISSING_META,
 ) -> Session:
     """Explicitly reopen a session regardless of its current status (e.g.
     a crashed session resuming from a checkpoint after a machine reboot).
@@ -319,7 +535,7 @@ def reopen(
     meta = read_session_yaml(session_dir)
     meta.status = "open"
     write_session_yaml(session_dir, meta)
-    return Session(session_dir, meta, archive=name)
+    return Session(session_dir, meta, archive=name, on_missing_meta=on_missing_meta)
 
 
 @contextlib.contextmanager
@@ -330,6 +546,7 @@ def session(
     tags: Optional[List[str]] = None,
     description: str = "",
     archive_name: Optional[str] = None,
+    on_missing_meta: str = _DEFAULT_MISSING_META,
 ):
     """Convenience context manager: creates a new session if run_id is
     None, otherwise appends to the given (open) session. Closes/marks
@@ -342,9 +559,20 @@ def session(
     `archive` may be a registered archive name (str) or a literal Path.
     """
     if run_id is None:
-        s = new(archive, tags=tags, description=description, archive_name=archive_name)
+        s = new(
+            archive,
+            tags=tags,
+            description=description,
+            archive_name=archive_name,
+            on_missing_meta=on_missing_meta,
+        )
     else:
-        s = append_to(archive, run_id, archive_name=archive_name)
+        s = append_to(
+            archive,
+            run_id,
+            archive_name=archive_name,
+            on_missing_meta=on_missing_meta,
+        )
     try:
         yield s
     except BaseException:

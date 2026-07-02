@@ -259,6 +259,146 @@ def _year_month(archive, run_id):
     return ""
 
 
+def test_artifact_context_manager_writes_sidecar(tmp_path):
+    archive = tmp_path / "archive"
+    with nebula.session(archive, description="artifact ctx") as s:
+        with s.artifact("raw.csv", inputs={"gain": 10}) as fn:
+            fn.write_text("1,2,3\n")
+
+    session_dir = next(archive.rglob(f"{s.id}"))
+    meta = read_sidecar(session_dir / "raw.csv")
+    assert meta.inputs == {"gain": 10}
+    # No orphan stub marker -- this went through the front door.
+    assert meta.extra.get("auto_stub") is None
+
+
+def test_artifact_derived_from_via_context_manager(tmp_path):
+    archive = tmp_path / "archive"
+    with nebula.session(archive, description="derive ctx") as s:
+        with s.artifact("raw.csv") as fn:
+            fn.write_text("x")
+        with s.artifact("processed.graf", derived_from=["raw.csv"]) as fn:
+            fn.write_text("y")
+
+    session_dir = next(archive.rglob(f"{s.id}"))
+    refs = read_sidecar(session_dir / "processed.graf").derived_from_refs()
+    assert len(refs) == 1
+    assert refs[0].file == "raw.csv"
+
+
+def test_artifact_raises_if_nothing_written(tmp_path):
+    archive = tmp_path / "archive"
+    with nebula.session(archive, description="empty artifact") as s:
+        with pytest.raises(FileNotFoundError):
+            with s.artifact("never_written.csv"):
+                pass  # forgot to actually write the file
+        s.close()  # avoid the crash marker from the propagating error
+
+
+def test_artifact_exception_writes_no_sidecar(tmp_path):
+    from nebula.sidecar import sidecar_path_for
+
+    archive = tmp_path / "archive"
+    with pytest.raises(ValueError):
+        with nebula.session(archive, description="mid-write crash") as s:
+            with s.artifact("partial.csv") as fn:
+                fn.write_text("half")
+                raise ValueError("boom")
+
+    session_dir = next(archive.rglob(f"{s.id}"))
+    assert not sidecar_path_for(session_dir / "partial.csv").exists()
+
+
+def test_close_stubs_orphan_artifacts(tmp_path):
+    archive = tmp_path / "archive"
+    s = nebula.new(archive, description="orphan stub", on_missing_meta="stub")
+    # Write a file the low-level way and "forget" to document it.
+    (s.path / "forgotten.csv").write_text("x")
+    s.close()
+
+    session_dir = next(archive.rglob(f"{s.id}"))
+    meta = read_sidecar(session_dir / "forgotten.csv")
+    assert meta.extra.get("auto_stub") is True
+
+
+def test_default_policy_stubs_and_warns(tmp_path):
+    archive = tmp_path / "archive"
+    s = nebula.new(archive, description="default policy")
+    assert s.on_missing_meta == "stub+warn"
+    (s.path / "forgotten.csv").write_text("x")
+    with pytest.warns(nebula.MissingMetadataWarning):
+        s.close()
+
+    # ...and the stub is still written, so nothing is left un-tracked.
+    session_dir = next(archive.rglob(f"{s.id}"))
+    meta = read_sidecar(session_dir / "forgotten.csv")
+    assert meta.extra.get("auto_stub") is True
+
+
+def test_warn_only_policy_leaves_orphan(tmp_path):
+    from nebula.sidecar import sidecar_path_for
+
+    archive = tmp_path / "archive"
+    s = nebula.new(archive, description="warn only", on_missing_meta="warn")
+    (s.path / "forgotten.csv").write_text("x")
+    with pytest.warns(nebula.MissingMetadataWarning):
+        s.close()
+
+    # "warn" surfaces the orphan but does NOT stub it.
+    session_dir = next(archive.rglob(f"{s.id}"))
+    assert not sidecar_path_for(session_dir / "forgotten.csv").exists()
+
+
+def test_close_raise_policy_rejects_orphans(tmp_path):
+    archive = tmp_path / "archive"
+    s = nebula.new(archive, description="strict", on_missing_meta="raise")
+    (s.path / "forgotten.csv").write_text("x")
+    with pytest.raises(nebula.MissingMetadataError):
+        s.close()
+
+
+def test_close_warn_policy_emits_warning(tmp_path):
+    archive = tmp_path / "archive"
+    s = nebula.new(archive, description="warny", on_missing_meta="warn")
+    (s.path / "forgotten.csv").write_text("x")
+    with pytest.warns(nebula.MissingMetadataWarning):
+        s.close()
+
+
+def test_crashed_session_orphans_not_stubbed(tmp_path):
+    from nebula.sidecar import sidecar_path_for
+
+    archive = tmp_path / "archive"
+    run_id = None
+    with pytest.raises(ValueError):
+        with nebula.session(archive, description="crash keeps orphans") as s:
+            run_id = s.id
+            (s.path / "half.csv").write_text("x")
+            raise ValueError("boom")
+
+    session_dir = next(archive.rglob(f"{run_id}"))
+    # A crashed session is honest about its holes -- no stub written.
+    assert not sidecar_path_for(session_dir / "half.csv").exists()
+
+
+def test_documented_artifact_not_stubbed_at_close(tmp_path):
+    archive = tmp_path / "archive"
+    with nebula.session(archive, description="mixed") as s:
+        with s.artifact("good.csv", inputs={"n": 1}) as fn:
+            fn.write_text("x")
+
+    session_dir = next(archive.rglob(f"{s.id}"))
+    meta = read_sidecar(session_dir / "good.csv")
+    assert meta.inputs == {"n": 1}
+    assert meta.extra.get("auto_stub") is None
+
+
+def test_invalid_missing_meta_policy_rejected(tmp_path):
+    archive = tmp_path / "archive"
+    with pytest.raises(ValueError):
+        nebula.new(archive, description="bad policy", on_missing_meta="nonsense")
+
+
 def test_index_rebuild_and_query_by_registered_name(tmp_path, monkeypatch):
     import nebula.registry as registry_mod
     from nebula.registry import Registry
