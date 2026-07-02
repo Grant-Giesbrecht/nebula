@@ -126,12 +126,36 @@ def test_context_manager_marks_crashed_on_exception(tmp_path):
     assert meta.status == "crashed"
 
 
-def test_append_to_open_session_works(tmp_path):
+def test_append_to_same_day_closed_session_reactivates(tmp_path):
+    # A session closed earlier *today* is still appendable -- several
+    # scripts can pile related measurements into one day's folder.
     archive = tmp_path / "archive"
     s1 = nebula.new(archive, description="first step")
     s1.close()
+    s2 = nebula.append_to(archive, s1.id)  # same day -- allowed
+    assert s2.id == s1.id
+    assert s2.meta.status == "open"  # status flipped back to open on the folder
+    assert read_session_yaml(s2.path).status == "open"
+    s2.close()
+
+
+def test_append_to_previous_day_closed_session_refused(tmp_path):
+    import datetime
+    from nebula.sidecar import write_session_yaml, SessionMeta
+
+    archive = tmp_path / "archive"
+    ym = archive / "2020" / "01"
+    ym.mkdir(parents=True)
+    d = ym / "S-0001"
+    d.mkdir()
+    write_session_yaml(d, SessionMeta(
+        run_id="S-0001",
+        created=datetime.datetime(2020, 1, 1).astimezone().isoformat(),
+        status="closed",
+        description="last year",
+    ))
     with pytest.raises(RuntimeError):
-        nebula.append_to(archive, s1.id)  # closed -- should refuse
+        nebula.append_to(archive, "S-0001")  # prior-day closed -- frozen
 
 
 def test_append_to_still_open_session(tmp_path):

@@ -21,14 +21,21 @@ log = plf.LogPile()
 # dmm.set_trigger_type(DigitalMultimeter.TRIG_SINGLE)
 
 user_notes = input("What is the set voltage? how long has the DUT been powered on?: ")
-tags_input = input("Tags (comma-separated, optional): ")
-tags = [t.strip() for t in tags_input.split(",") if t.strip()]
 
-# nebula.session() creates a new S-XXXX folder (or, if you pass
-# run_id=..., appends to one you're already partway through). It closes
-# the session on normal exit and marks it "crashed" if an exception
-# propagates out of the with-block -- so a script you Ctrl+C out of
-# leaves an honest record rather than a folder claiming to be done.
+# input_tag() is like input() but tag-aware: the user can /list and
+# /search the tags already in this archive (and TAB-complete them), so
+# they reuse "warmup" instead of inventing "warm-up" / "warm_up". Press
+# Enter on an empty line when done.
+tags = nebula.input_tag(ARCHIVE)
+
+# nebula.session() with no run_id pops an interactive picker: it lists the
+# sessions you could append to (opened today, or still OPEN from before) so
+# you can add to a run in progress instead of spraying data across many
+# one-shot folders -- or type /new to start fresh. Pass new_session=True to
+# skip the prompt and always start clean, or run_id="S-0123" to append to a
+# specific one. It closes the session on normal exit and marks it "crashed"
+# if an exception propagates out of the with-block, so a script you Ctrl+C
+# out of leaves an honest record rather than a folder claiming to be done.
 with nebula.session(ARCHIVE, tags=tags, description="VCCS warm-up measurement") as s:
 
 	fn = s.artifact_path("vccs_warm_up.tome")

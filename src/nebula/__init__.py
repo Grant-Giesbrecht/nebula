@@ -22,8 +22,12 @@ from nebula.session import (
     append_to,
     reopen,
     session,
+    hold,
+    release,
 )
 from nebula.sidecar import write_sidecar, read_sidecar
+from nebula.tags import collect_tags, input_tag
+from nebula.session_select import select_session
 from nebula import graph
 
 __all__ = [
@@ -39,8 +43,13 @@ __all__ = [
     "append_to",
     "reopen",
     "session",
+    "hold",
+    "release",
+    "select_session",
     "write_sidecar",
     "read_sidecar",
+    "collect_tags",
+    "input_tag",
     "graph",
 ]
 

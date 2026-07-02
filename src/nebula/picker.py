@@ -37,9 +37,10 @@ _process_session_cache: dict = {}
 
 
 def _candidate_sessions(archive_root: Path, tags: Optional[List[str]] = None):
-    """Sessions eligible to append to: created today, OR still open
-    regardless of date. Closed sessions from prior days are excluded --
-    by policy they're immutable; reference them via related_runs instead."""
+    """Sessions eligible to append to: created today (even if already
+    closed -- same-day work can resume), OR still open regardless of date.
+    Sessions closed on a prior day are excluded here: they're frozen, and
+    extending one takes a deliberate reopen() rather than a casual pick."""
     conn = open_index(archive_root)
     today = datetime.date.today().isoformat()
     rows = conn.execute(

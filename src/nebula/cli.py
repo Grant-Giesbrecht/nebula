@@ -10,6 +10,8 @@ Usage:
     nebula rebuild <archive>
     nebula ls <archive> [--tag TAG] [--status open|closed|crashed] [--today]
     nebula show <archive> <run_id>
+    nebula hold <archive> <run_id> [DURATION]   # e.g. 2h; omit to hold until Ctrl-C
+    nebula release <archive> <run_id>           # (alias: close) clear a hold
     nebula upstream <archive> <run_id> <filename>
     nebula downstream <archive> <run_id> <filename> [--also-search ARCHIVE ...]
     nebula stale <archive> [--hours N]
@@ -23,11 +25,23 @@ import argparse
 import datetime
 import json
 import sys
+import time
 from pathlib import Path
 
 from nebula import graph, index
 from nebula.registry import get_registry
 from nebula.sidecar import read_session_yaml
+# Import from the submodule directly: `nebula.session` the *name* is the
+# session() context manager (re-exported in __init__), so `import nebula
+# .session as ...` would grab the function, not the module.
+from nebula.session import (
+    HOLD_FOREVER,
+    _find_session_dir,
+    _hold_value_active,
+    hold as hold_session,
+    parse_duration,
+    release as release_session,
+)
 
 
 def _resolve_archive_cli(text: str):
@@ -71,8 +85,9 @@ def cmd_ls(args):
         if args.tag and args.tag not in tags:
             continue
         tag_str = ",".join(tags) if tags else "-"
+        held = "  HELD" if _hold_value_active(row["hold_until"]) else ""
         print(f"{row['run_id']}  {row['created']}  [{row['status']:7}]  "
-              f"{tag_str:20}  {row['description']}")
+              f"{tag_str:20}  {row['description']}{held}")
 
 
 def cmd_show(args):
@@ -90,6 +105,12 @@ def cmd_show(args):
     print(f"  tags:        {', '.join(json.loads(session_row['tags']))}")
     print(f"  description: {session_row['description']}")
     print(f"  path:        {session_row['path']}")
+    hold_until = session_row["hold_until"]
+    if hold_until:
+        active = _hold_value_active(hold_until)
+        when = "indefinite" if hold_until == HOLD_FOREVER else hold_until
+        state = "active" if active else "expired"
+        print(f"  hold:        {when} ({state})")
 
     related = conn.execute(
         "SELECT ref_archive, ref_session, ref_file FROM related_runs WHERE run_id = ?",
@@ -128,6 +149,52 @@ def _fmt_ref_row(row) -> str:
     sess = row["ref_session"] or "(same session)"
     file = row["ref_file"] or "(whole session)"
     return f"{archive}|{sess}/{file}"
+
+
+def cmd_hold(args):
+    root, _ = _resolve_archive_cli(args.archive)
+    try:
+        _find_session_dir(root, args.run_id)
+    except FileNotFoundError:
+        print(f"no session {args.run_id!r} under {root}", file=sys.stderr)
+        sys.exit(1)
+
+    if args.duration:
+        try:
+            seconds = parse_duration(args.duration)
+        except ValueError:
+            print(f"bad duration {args.duration!r} (try 2h, 90m, 45s, 1d)",
+                  file=sys.stderr)
+            sys.exit(1)
+        until = hold_session(root, args.run_id, seconds=seconds)
+        print(f"holding {args.run_id} until {until}")
+        return
+
+    # No duration: hold indefinitely and block, so the hold lasts exactly
+    # as long as this command runs. The hold is also written to disk, so if
+    # this process is killed uncleanly the session stays held -- run
+    # `nebula release {id}` to clear a leftover hold.
+    hold_session(root, args.run_id, seconds=None)
+    print(f"holding {args.run_id} indefinitely. Press Ctrl-C to release.")
+    try:
+        while True:
+            time.sleep(3600)
+    except KeyboardInterrupt:
+        release_session(root, args.run_id)
+        print(f"\nreleased {args.run_id}")
+
+
+def cmd_release(args):
+    root, _ = _resolve_archive_cli(args.archive)
+    try:
+        had_hold = release_session(root, args.run_id)
+    except FileNotFoundError:
+        print(f"no session {args.run_id!r} under {root}", file=sys.stderr)
+        sys.exit(1)
+    if had_hold:
+        print(f"released hold on {args.run_id}")
+    else:
+        print(f"{args.run_id} had no hold")
 
 
 def cmd_upstream(args):
@@ -204,6 +271,28 @@ def main(argv=None):
     p.add_argument("archive", help="registered archive name, or a literal path")
     p.add_argument("run_id")
     p.set_defaults(func=cmd_show)
+
+    p = sub.add_parser(
+        "hold",
+        help="keep a session appendable past its start day (e.g. across midnight)",
+    )
+    p.add_argument("archive", help="registered archive name, or a literal path")
+    p.add_argument("run_id")
+    p.add_argument(
+        "duration",
+        nargs="?",
+        help="how long to hold, e.g. 2h / 90m / 45s / 1d. Omit to hold "
+             "until this command is stopped with Ctrl-C.",
+    )
+    p.set_defaults(func=cmd_hold)
+
+    p = sub.add_parser(
+        "release", aliases=["close"],
+        help="clear a hold placed with 'hold' (does not change open/closed status)",
+    )
+    p.add_argument("archive", help="registered archive name, or a literal path")
+    p.add_argument("run_id")
+    p.set_defaults(func=cmd_release)
 
     p = sub.add_parser("upstream", help="what did this artifact depend on")
     p.add_argument("archive", help="registered archive name, or a literal path")

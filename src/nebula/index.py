@@ -24,7 +24,8 @@ CREATE TABLE IF NOT EXISTS sessions (
     created TEXT NOT NULL,
     status TEXT NOT NULL,
     tags TEXT NOT NULL,        -- JSON list
-    description TEXT NOT NULL
+    description TEXT NOT NULL,
+    hold_until TEXT            -- NULL, "forever", or an ISO expiry timestamp
 );
 
 CREATE TABLE IF NOT EXISTS related_runs (
@@ -107,7 +108,7 @@ def rebuild(archive: "str | Path", index_path: Optional[Path] = None) -> Path:
 def _index_session(conn: sqlite3.Connection, session_dir: Path) -> None:
     meta = read_session_yaml(session_dir)
     conn.execute(
-        "INSERT OR REPLACE INTO sessions VALUES (?, ?, ?, ?, ?, ?)",
+        "INSERT OR REPLACE INTO sessions VALUES (?, ?, ?, ?, ?, ?, ?)",
         (
             meta.run_id,
             str(session_dir),
@@ -115,6 +116,7 @@ def _index_session(conn: sqlite3.Connection, session_dir: Path) -> None:
             meta.status,
             json.dumps(meta.tags),
             meta.description,
+            meta.hold_until,
         ),
     )
     conn.execute("DELETE FROM related_runs WHERE run_id = ?", (meta.run_id,))

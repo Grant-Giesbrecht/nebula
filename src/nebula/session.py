@@ -490,6 +490,92 @@ def _find_session_dir(archive_root: Path, run_id: str) -> Path:
     raise FileNotFoundError(f"no session {run_id!r} found under {archive_root}")
 
 
+def _created_today(meta: SessionMeta) -> bool:
+    """True if the session's recorded start date is today. A session
+    guarantees *when it was started*, not that only one script ever wrote
+    to it -- so same-day work can keep flowing into it."""
+    today = datetime.date.today().isoformat()
+    return (meta.created or "")[:10] == today
+
+
+# ---------------------------------------------------------------------
+# Holds: keeping a session appendable past its creation day
+# ---------------------------------------------------------------------
+
+HOLD_FOREVER = "forever"  # sentinel stored in hold_until for indefinite holds
+
+_DURATION_UNITS = {"s": 1, "m": 60, "h": 3600, "d": 86400}
+
+
+def parse_duration(text: str) -> float:
+    """Parse a hold duration like '2h', '90m', '45s', '1.5d', or a bare
+    number of seconds, into seconds. Raises ValueError on anything else."""
+    text = text.strip().lower()
+    if not text:
+        raise ValueError("empty duration")
+    if text[-1] in _DURATION_UNITS:
+        return float(text[:-1]) * _DURATION_UNITS[text[-1]]
+    return float(text)  # bare number = seconds
+
+
+def _hold_value_active(hold_until: Optional[str], *, now: Optional[datetime.datetime] = None) -> bool:
+    """True if a hold_until value represents a currently-active hold. Works
+    off the raw stored value, so callers with an index row (not a full
+    SessionMeta) can use it too."""
+    if not hold_until:
+        return False
+    if hold_until == HOLD_FOREVER:
+        return True
+    now = now or datetime.datetime.now().astimezone()
+    try:
+        return now < datetime.datetime.fromisoformat(hold_until)
+    except ValueError:
+        return False  # a garbled timestamp is treated as no hold
+
+
+def _hold_active(meta: SessionMeta, *, now: Optional[datetime.datetime] = None) -> bool:
+    """True if the session currently has an unexpired hold."""
+    return _hold_value_active(meta.hold_until, now=now)
+
+
+def hold(
+    archive: "str | Path",
+    run_id: str,
+    *,
+    seconds: Optional[float] = None,
+) -> str:
+    """Place a hold on a session so it stays appendable across day
+    boundaries (e.g. a run of related measurements spanning midnight),
+    even after a script closes it. Pass seconds=None for an indefinite
+    hold, or a number of seconds for a timed one. Returns the stored
+    hold_until value ("forever" or an ISO timestamp).
+
+    Release it with release(); a hold does not otherwise change the
+    session's open/closed status."""
+    archive_root, _ = resolve_archive(archive)
+    session_dir = _find_session_dir(archive_root, run_id)
+    meta = read_session_yaml(session_dir)
+    if seconds is None:
+        meta.hold_until = HOLD_FOREVER
+    else:
+        until = datetime.datetime.now().astimezone() + datetime.timedelta(seconds=seconds)
+        meta.hold_until = until.isoformat(timespec="seconds")
+    write_session_yaml(session_dir, meta)
+    return meta.hold_until
+
+
+def release(archive: "str | Path", run_id: str) -> bool:
+    """Clear any hold on a session. Returns True if there had been one.
+    Safe to call when no hold is set."""
+    archive_root, _ = resolve_archive(archive)
+    session_dir = _find_session_dir(archive_root, run_id)
+    meta = read_session_yaml(session_dir)
+    had_hold = meta.hold_until is not None
+    meta.hold_until = None
+    write_session_yaml(session_dir, meta)
+    return had_hold
+
+
 def append_to(
     archive: "str | Path",
     run_id: str,
@@ -497,10 +583,17 @@ def append_to(
     archive_name: Optional[str] = None,
     on_missing_meta: str = _DEFAULT_MISSING_META,
 ) -> Session:
-    """Reattach to an existing OPEN session to write more artifacts into
-    it. Raises if the session is closed -- closed sessions are immutable
-    by policy; use related_runs / derived_from to link new work to old
-    sessions instead of reopening them.
+    """Reattach to a session to write more artifacts into it, so several
+    related measurements can share one folder.
+
+    A session's guarantee is the date it was *started*, not single-writer
+    exclusivity. So appending is allowed when the session is still OPEN,
+    when it was CREATED TODAY (even if a previous script already closed
+    it -- reopening same-day work is free, and the status flips back to
+    open), or when it has an active HOLD (see hold(), for work spanning
+    midnight). A session CLOSED ON A PREVIOUS DAY with no hold is frozen:
+    this raises, and you must reopen() it deliberately (the picker's
+    /reopen --force).
 
     `archive` follows the same str-name-vs-Path-literal resolution as
     new()."""
@@ -508,12 +601,19 @@ def append_to(
     name = archive_name or resolved_name or "local"
     session_dir = _find_session_dir(archive_root, run_id)
     meta = read_session_yaml(session_dir)
-    if meta.status != "open":
+    if meta.status != "open" and not _created_today(meta) and not _hold_active(meta):
         raise RuntimeError(
-            f"session {run_id!r} is {meta.status!r}, not open. "
-            f"Closed sessions are immutable by policy -- create a new "
-            f"session and reference this one via related_runs instead."
+            f"session {run_id!r} is {meta.status!r} and was started on "
+            f"{(meta.created or '?')[:10]}, not today. Sessions closed on a "
+            f"previous day are frozen -- put a hold on it (nebula hold "
+            f"{run_id}) before midnight, reopen() it explicitly, or use the "
+            f"picker's /reopen {run_id} --force."
         )
+    if meta.status != "open":
+        # Same-day resume: the session is active again, so record that
+        # honestly rather than leaving a folder that claims to be done.
+        meta.status = "open"
+        write_session_yaml(session_dir, meta)
     return Session(session_dir, meta, archive=name, on_missing_meta=on_missing_meta)
 
 
@@ -543,22 +643,42 @@ def session(
     archive: "str | Path",
     *,
     run_id: Optional[str] = None,
+    new_session: bool = False,
     tags: Optional[List[str]] = None,
     description: str = "",
     archive_name: Optional[str] = None,
     on_missing_meta: str = _DEFAULT_MISSING_META,
 ):
-    """Convenience context manager: creates a new session if run_id is
-    None, otherwise appends to the given (open) session. Closes/marks
-    crashed automatically on exit.
+    """Convenience context manager. Closes/marks crashed automatically on
+    exit.
 
         with nebula.session("postdoc", tags=["RP23D"], description="...") as s:
             ...
             s.write_meta_for("raw.graf", derived_from=["scope_trace.csv"])
 
+    Which session it opens:
+      - run_id given         -> append to that (open) session;
+      - new_session=True     -> create a fresh session, no questions asked;
+      - otherwise            -> present the interactive CLI session picker
+                                (nebula.session_select.select_session), so
+                                the user can append to a session in progress
+                                instead of accidentally spraying data across
+                                many one-shot sessions. In a non-interactive
+                                context the picker just makes a new session.
+
+    Pass new_session=True in unattended scripts that should always start
+    clean without prompting.
+
     `archive` may be a registered archive name (str) or a literal Path.
     """
-    if run_id is None:
+    if run_id is not None:
+        s = append_to(
+            archive,
+            run_id,
+            archive_name=archive_name,
+            on_missing_meta=on_missing_meta,
+        )
+    elif new_session:
         s = new(
             archive,
             tags=tags,
@@ -567,9 +687,14 @@ def session(
             on_missing_meta=on_missing_meta,
         )
     else:
-        s = append_to(
+        # Imported lazily: select_session imports back from this module, and
+        # it pulls in the terminal-UI helpers that batch code needn't load.
+        from nebula.session_select import select_session
+
+        s = select_session(
             archive,
-            run_id,
+            tags=tags,
+            description=description,
             archive_name=archive_name,
             on_missing_meta=on_missing_meta,
         )

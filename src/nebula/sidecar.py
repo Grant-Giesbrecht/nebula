@@ -139,6 +139,10 @@ class SessionMeta:
     tags: List[str] = field(default_factory=list)
     description: str = ""
     related_runs: List[Dict[str, Optional[str]]] = field(default_factory=list)
+    # A "hold" keeps a session appendable across day boundaries even after
+    # it's been closed (see session.hold()). None = no hold; the sentinel
+    # "forever" = indefinite; otherwise an ISO 8601 expiry timestamp.
+    hold_until: Optional[str] = None
 
     def to_dict(self) -> Dict[str, Any]:
         return asdict(self)
@@ -152,6 +156,7 @@ class SessionMeta:
             tags=d.get("tags", []),
             description=d.get("description", ""),
             related_runs=d.get("related_runs", []),
+            hold_until=d.get("hold_until"),
         )
 
     def related_run_refs(self) -> List[Ref]:

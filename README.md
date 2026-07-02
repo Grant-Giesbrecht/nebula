@@ -21,11 +21,15 @@ depend on" months later without a rigid, ever-breaking folder taxonomy.
   applies to which file.
 - **`session.yaml` is the one human-edited file** — tags, description,
   open/closed status. Everything else is machine-written and atomic.
-- **Sessions are single-day by creation, immutable once closed.** A
-  script that starts before midnight and finishes after is fine — it's
-  one continuous invocation, so it keeps writing into the same session.
-  What's not allowed is casually reopening an old, closed session; link
-  to it instead via `related_runs` / `derived_from`.
+- **A session's fixed guarantee is the date it was started, not
+  single-writer exclusivity.** Several scripts can pile related
+  measurements into one day's session for readability: appending is
+  allowed while a session is still open, *and* to any session created
+  today even if a previous script already closed it (that just reopens it
+  and flips the status back to open). The one thing kept frozen is a
+  session **closed on a previous day** — reopening one takes a deliberate
+  `nebula.reopen()` (or the picker's `/reopen <id> --force`), so you can't
+  silently rewrite last week's record by reflex.
 - **Multiple independent archives** (e.g. a postdoc data archive and a
   separate personal/startup archive) can cross-reference each other via a
   small registry (`~/.nebula/archives.yaml`) and an `archive|session/file`
@@ -44,23 +48,51 @@ with nebula.session("postdoc", tags=["RP23D"], description="S21 characterization
     save_csv(scope_data, s.artifact_path("scope_trace_raw.csv"))
     s.write_meta_for("scope_trace_raw.csv", inputs={"bias_current_mA": {"start": 0, "stop": 10, "step": 0.5}})
     run_id = s.id
-# session closes here -- once closed it's immutable by policy.
+# session closes here.
 ```
 
 A later, separate script step in the *same session* (e.g. a conversion
-pass run right after acquisition, before the session closes) uses
-`append_to` / passes `run_id=` instead of leaving the `with` block:
+pass, or a second related measurement) uses `append_to` / passes
+`run_id=` instead of leaving the `with` block. This works whether the
+session is still open or was already closed earlier the same day:
 
 ```python
-with nebula.session("postdoc", run_id="S-0300") as s:  # session must still be OPEN
+with nebula.session("postdoc", run_id="S-0300") as s:  # today's session, open or closed
     graf_data = convert(s.artifact_path("scope_trace_raw.csv"))
     save_graf(graf_data, s.artifact_path("raw.graf"))
     s.write_meta_for("raw.graf", derived_from=["scope_trace_raw.csv"])
 ```
 
-If the earlier session already closed, don't reopen it -- start a new
-session and link back with `related_runs` / `derived_from` instead
+If the target session was closed on a *previous* day, `append_to` refuses
+it. Either reopen it deliberately with `nebula.reopen("postdoc", "S-0300")`
+if you really mean to extend it, or start a new session and link back with
+`related_runs` / `derived_from` instead
 (`s.write_meta_for("raw.graf", derived_from=["postdoc|S-0300/scope_trace_raw.csv"])`).
+
+Calling `nebula.session(...)` with **no** `run_id` pops an interactive CLI
+picker listing the sessions you can append to (today's, plus anything
+still open), so you can add to a run in progress or type `/new` to start
+fresh. Pass `new_session=True` to skip the prompt and always start clean.
+
+### Holding a session open across midnight
+
+A run of related measurements sometimes spans midnight, but each script
+invocation closes the session on exit — and a session closed on a
+*previous* day is frozen. A **hold** keeps a session appendable regardless
+of date until it expires or you release it, independent of its open/closed
+status:
+
+```
+nebula hold <archive> S-0300 2h     # hold for 2 hours, then exit
+nebula hold <archive> S-0300        # hold until you stop the command (Ctrl-C)
+nebula release <archive> S-0300     # clear the hold  (alias: nebula close)
+```
+
+The hold is recorded in `session.yaml`, so it survives across separate
+script runs (and reboots). `nebula show` / `nebula ls` flag a held session,
+and it shows up in the interactive picker even after its start day. The
+same thing is available programmatically as `nebula.hold(archive, run_id,
+seconds=...)` and `nebula.release(archive, run_id)`.
 
 Rebuilding the index and checking for crashed/abandoned sessions:
 
