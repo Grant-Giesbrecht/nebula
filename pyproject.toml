@@ -1,0 +1,20 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "nebula"
+version = "0.1.0"
+description = "Provenance and session organization for measurement scripts and data"
+readme = "README.md"
+requires-python = ">=3.9"
+dependencies = [
+    "pyyaml>=6.0",
+]
+
+[project.optional-dependencies]
+gui = ["PyQt5>=5.15"]
+dev = ["pytest>=7.0"]
+
+[tool.setuptools.packages.find]
+where = ["src"]
