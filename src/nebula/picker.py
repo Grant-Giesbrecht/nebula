@@ -30,17 +30,17 @@ except ImportError:
     HAVE_QT = False
 
 
-# Per-process cache: once a session is chosen for a given store, reuse it
+# Per-process cache: once a session is chosen for a given archive, reuse it
 # silently within the same process (e.g. repeated cells in a notebook)
 # instead of popping the dialog again.
 _process_session_cache: dict = {}
 
 
-def _candidate_sessions(store_root: Path, tags: Optional[List[str]] = None):
+def _candidate_sessions(archive_root: Path, tags: Optional[List[str]] = None):
     """Sessions eligible to append to: created today, OR still open
     regardless of date. Closed sessions from prior days are excluded --
     by policy they're immutable; reference them via related_runs instead."""
-    conn = open_index(store_root)
+    conn = open_index(archive_root)
     today = datetime.date.today().isoformat()
     rows = conn.execute(
         "SELECT run_id, created, status, tags, description FROM sessions "
@@ -65,16 +65,16 @@ class SessionPickerDialog:
     tree construction so the selection logic is testable without a
     display."""
 
-    def __init__(self, store_root: Path, tags: Optional[List[str]] = None):
+    def __init__(self, archive_root: Path, tags: Optional[List[str]] = None):
         if not HAVE_QT:
             raise RuntimeError(
                 "PyQt5 is not installed. Install it, or bypass the picker "
                 "by calling nebula.new(...) / nebula.append_to(...) with "
                 "an explicit run_id."
             )
-        self.store_root = Path(store_root)
+        self.archive_root = Path(archive_root)
         self.tags = tags
-        self.candidates = _candidate_sessions(store_root, tags)
+        self.candidates = _candidate_sessions(archive_root, tags)
         self.result_run_id: Optional[str] = None
         self.create_new = False
         self.new_tags: List[str] = tags or []
@@ -132,29 +132,29 @@ class SessionPickerDialog:
 
 
 def pick_session(
-    store_root: Path,
+    archive_root: Path,
     *,
     tags: Optional[List[str]] = None,
     description: str = "",
     non_interactive_run_id: Optional[str] = None,
-    store: Optional[str] = None,
+    archive: Optional[str] = None,
 ) -> Session:
     """The main entry point scripts call.
 
     - If non_interactive_run_id is given, skips the GUI entirely and
       appends to that session (for scheduled/batch jobs).
     - If a session was already chosen earlier in this process for this
-      store_root, reuse it silently (Jupyter-cell-rerun case).
+      archive_root, reuse it silently (Jupyter-cell-rerun case).
     - Otherwise, pop the picker dialog.
     """
-    cache_key = str(Path(store_root))
+    cache_key = str(Path(archive_root))
 
     if non_interactive_run_id:
-        return append_to(store_root, non_interactive_run_id, store=store)
+        return append_to(archive_root, non_interactive_run_id, archive=archive)
 
     if cache_key in _process_session_cache:
         cached_id = _process_session_cache[cache_key]
-        return append_to(store_root, cached_id, store=store)
+        return append_to(archive_root, cached_id, archive=archive)
 
     if not HAVE_QT:
         # No display available and no explicit run_id -- fail loudly
@@ -165,13 +165,13 @@ def pick_session(
         )
 
     app = QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
-    picker = SessionPickerDialog(store_root, tags=tags)
+    picker = SessionPickerDialog(archive_root, tags=tags)
     chosen = picker.exec_()
 
     if picker.create_new:
-        s = new(store_root, tags=tags, description=description, store=store)
+        s = new(archive_root, tags=tags, description=description, archive=archive)
     elif chosen:
-        s = append_to(store_root, chosen, store=store)
+        s = append_to(archive_root, chosen, archive=archive)
     else:
         raise RuntimeError("session selection cancelled")
 

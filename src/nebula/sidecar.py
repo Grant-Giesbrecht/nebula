@@ -69,9 +69,9 @@ class SidecarMeta:
         )
 
     def derived_from_refs(self) -> List[Ref]:
-        """Decode the stored dicts back into Ref objects."""
+        """Decode the stored ref dicts back into Ref objects."""
         return [
-            Ref(file=r.get("file"), session=r.get("session"), store=r.get("store"))
+            Ref(file=r.get("file"), session=r.get("session"), archive=r.get("archive"))
             for r in self.derived_from
         ]
 
@@ -81,7 +81,7 @@ class SidecarMeta:
         if isinstance(ref, str):
             ref = parse_ref(ref)
         self.derived_from.append(
-            {"store": ref.store, "session": ref.session, "file": ref.file}
+            {"archive": ref.archive, "session": ref.session, "file": ref.file}
         )
 
 
@@ -156,14 +156,14 @@ class SessionMeta:
 
     def related_run_refs(self) -> List[Ref]:
         return [
-            Ref(file=r.get("file"), session=r.get("session"), store=r.get("store"))
+            Ref(file=r.get("file"), session=r.get("session"), archive=r.get("archive"))
             for r in self.related_runs
         ]
 
     def add_related_run(self, ref: "str | Ref") -> None:
         if isinstance(ref, str):
             ref = parse_ref(ref)
-        entry = {"store": ref.store, "session": ref.session, "file": ref.file}
+        entry = {"archive": ref.archive, "session": ref.session, "file": ref.file}
         if entry not in self.related_runs:
             self.related_runs.append(entry)
 

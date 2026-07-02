@@ -1,5 +1,5 @@
 """
-Disposable SQLite index over a store's sessions and artifacts.
+Disposable SQLite index over an archive's sessions and artifacts.
 
 This is a cache, not a database of record: it is always rebuilt from
 scratch by walking session.yaml + *.meta.json files, never written to
@@ -14,6 +14,7 @@ import sqlite3
 from pathlib import Path
 from typing import Iterator, Optional
 
+from nebula.registry import resolve_archive
 from nebula.sidecar import SESSION_FILE, SIDECAR_SUFFIX, read_session_yaml
 
 SCHEMA = """
@@ -28,7 +29,7 @@ CREATE TABLE IF NOT EXISTS sessions (
 
 CREATE TABLE IF NOT EXISTS related_runs (
     run_id TEXT NOT NULL,
-    ref_store TEXT,
+    ref_archive TEXT,
     ref_session TEXT,
     ref_file TEXT
 );
@@ -49,7 +50,7 @@ CREATE TABLE IF NOT EXISTS artifacts (
 CREATE TABLE IF NOT EXISTS derived_from (
     run_id TEXT NOT NULL,
     filename TEXT NOT NULL,
-    ref_store TEXT,
+    ref_archive TEXT,
     ref_session TEXT,
     ref_file TEXT
 );
@@ -59,11 +60,11 @@ CREATE INDEX IF NOT EXISTS idx_derived_from_run ON derived_from(run_id, filename
 """
 
 
-def _iter_session_dirs(store_root: Path) -> Iterator[Path]:
-    store_root = Path(store_root)
-    if not store_root.exists():
+def _iter_session_dirs(archive_root: Path) -> Iterator[Path]:
+    archive_root = Path(archive_root)
+    if not archive_root.exists():
         return
-    for year_dir in sorted(store_root.iterdir()):
+    for year_dir in sorted(archive_root.iterdir()):
         if not year_dir.is_dir():
             continue
         for month_dir in sorted(year_dir.iterdir()):
@@ -74,11 +75,15 @@ def _iter_session_dirs(store_root: Path) -> Iterator[Path]:
                     yield session_dir
 
 
-def rebuild(store_root: Path, index_path: Optional[Path] = None) -> Path:
-    """Walk store_root and rebuild the SQLite index from scratch.
-    Returns the path to the index file."""
-    store_root = Path(store_root)
-    index_path = Path(index_path) if index_path else store_root / "index.db"
+def rebuild(archive: "str | Path", index_path: Optional[Path] = None) -> Path:
+    """Walk the archive and rebuild the SQLite index from scratch.
+
+    `archive` follows the same resolution rule as nebula.session(): a str
+    is looked up as a registered archive name (KeyError if unknown), a
+    Path is used literally. Returns the path to the index file.
+    """
+    archive_root, _ = resolve_archive(archive)
+    index_path = Path(index_path) if index_path else archive_root / "index.db"
 
     # Build into a temp file then swap in, so a reader querying the old
     # index mid-rebuild never sees a half-written database.
@@ -89,7 +94,7 @@ def rebuild(store_root: Path, index_path: Optional[Path] = None) -> Path:
     conn = sqlite3.connect(tmp_path)
     try:
         conn.executescript(SCHEMA)
-        for session_dir in _iter_session_dirs(store_root):
+        for session_dir in _iter_session_dirs(archive_root):
             _index_session(conn, session_dir)
         conn.commit()
     finally:
@@ -116,7 +121,7 @@ def _index_session(conn: sqlite3.Connection, session_dir: Path) -> None:
     for r in meta.related_runs:
         conn.execute(
             "INSERT INTO related_runs VALUES (?, ?, ?, ?)",
-            (meta.run_id, r.get("store"), r.get("session"), r.get("file")),
+            (meta.run_id, r.get("archive"), r.get("session"), r.get("file")),
         )
 
     for sidecar_path in sorted(session_dir.glob(f"*{SIDECAR_SUFFIX}")):
@@ -145,16 +150,18 @@ def _index_session(conn: sqlite3.Connection, session_dir: Path) -> None:
         for r in data.get("derived_from", []):
             conn.execute(
                 "INSERT INTO derived_from VALUES (?, ?, ?, ?, ?)",
-                (meta.run_id, filename, r.get("store"), r.get("session"), r.get("file")),
+                (meta.run_id, filename, r.get("archive"), r.get("session"), r.get("file")),
             )
 
 
-def open_index(store_root: Path, index_path: Optional[Path] = None) -> sqlite3.Connection:
+def open_index(archive: "str | Path", index_path: Optional[Path] = None) -> sqlite3.Connection:
     """Open the index read-only-ish (no schema assumptions beyond what
     rebuild() creates). Does NOT rebuild automatically -- call rebuild()
-    explicitly (e.g. on a schedule or on demand) to refresh it."""
-    store_root = Path(store_root)
-    index_path = Path(index_path) if index_path else store_root / "index.db"
+    explicitly (e.g. on a schedule or on demand) to refresh it.
+
+    `archive` follows the same resolution rule as nebula.session()."""
+    archive_root, _ = resolve_archive(archive)
+    index_path = Path(index_path) if index_path else archive_root / "index.db"
     if not index_path.exists():
         raise FileNotFoundError(
             f"no index at {index_path}; call nebula.index.rebuild() first"

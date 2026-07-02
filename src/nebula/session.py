@@ -1,9 +1,9 @@
 """
 Session lifecycle: creating, appending to, and closing S-XXXX folders.
 
-A session is a directory: <store_root>/<year>/<month>/S-XXXX/
+A session is a directory: <archive_root>/<year>/<month>/S-XXXX/
 The numeric id is a bare, zero-padded, monotonically increasing decimal
-counter, global to the store (not per-day). The folder's location in the
+counter, global to the archive (not per-day). The folder's location in the
 year/month hierarchy records its creation date; the id itself carries no
 date information, so it stays short in derived_from/related_runs refs.
 
@@ -26,6 +26,7 @@ from pathlib import Path
 from typing import Dict, List, Optional
 
 from nebula.refs import Ref, format_ref, parse_ref, SESSION_PREFIX
+from nebula.registry import Registry, resolve_archive
 from nebula.sidecar import (
     ProducedBy,
     SessionMeta,
@@ -109,11 +110,11 @@ def _format_id(n: int) -> str:
     return f"{SESSION_PREFIX}{n:0{ID_WIDTH}d}"
 
 
-def _existing_ids(store_root: Path) -> List[int]:
+def _existing_ids(archive_root: Path) -> List[int]:
     ids = []
-    if not store_root.exists():
+    if not archive_root.exists():
         return ids
-    for year_dir in store_root.iterdir():
+    for year_dir in archive_root.iterdir():
         if not year_dir.is_dir():
             continue
         for month_dir in year_dir.iterdir():
@@ -126,13 +127,13 @@ def _existing_ids(store_root: Path) -> List[int]:
     return ids
 
 
-def _allocate_new_id(store_root: Path) -> str:
-    """Scan the store for the highest existing id and return the next one.
+def _allocate_new_id(archive_root: Path) -> str:
+    """Scan the archive for the highest existing id and return the next one.
     The folder listing is the source of truth -- no separate counter file
     to keep in sync. Collisions (e.g. two processes racing) are resolved
     by retrying with the next id if folder creation fails because the
     target already exists; see Session.new()."""
-    existing = _existing_ids(store_root)
+    existing = _existing_ids(archive_root)
     return _format_id((max(existing) + 1) if existing else 1)
 
 
@@ -147,10 +148,10 @@ class Session:
     or the session() convenience context manager instead.
     """
 
-    def __init__(self, path: Path, meta: SessionMeta, store: Optional[str] = None):
+    def __init__(self, path: Path, meta: SessionMeta, archive: Optional[str] = None):
         self.path = Path(path)
         self.meta = meta
-        self.store = store
+        self.archive = archive
         self._closed_cleanly = False
 
     @property
@@ -219,23 +220,33 @@ def _now_iso() -> str:
 
 
 def new(
-    store_root: Path,
+    archive: "str | Path",
     *,
     tags: Optional[List[str]] = None,
     description: str = "",
-    store: Optional[str] = None,
+    archive_name: Optional[str] = None,
 ) -> Session:
-    """Create a brand-new session folder under store_root and return an
-    open Session. store_root is the top-level directory for this store
-    (e.g. /nas/nist-data), not including the year/month/id path."""
-    store_root = Path(store_root)
+    """Create a brand-new session folder and return an open Session.
+
+    `archive` is either a registered archive name (str) -- looked up in
+    ~/.nebula/archives.yaml -- or a literal filesystem root (Path), not
+    including the year/month/id path. See registry.resolve_archive() for
+    the exact resolution rule.
+
+    archive_name overrides the label recorded on the returned Session
+    (e.g. to give an unregistered/ad hoc Path a friendly name); normally
+    you don't need this -- a registered name resolves its own label.
+    """
+    archive_root, resolved_name = resolve_archive(archive)
+    name = archive_name or resolved_name or "local"
+
     now = datetime.datetime.now().astimezone()
-    year_month_dir = store_root / f"{now.year:04d}" / f"{now.month:02d}"
+    year_month_dir = archive_root / f"{now.year:04d}" / f"{now.month:02d}"
     year_month_dir.mkdir(parents=True, exist_ok=True)
 
     with _lock:
         for _ in range(10):  # small retry budget for cross-process races
-            run_id = _allocate_new_id(store_root)
+            run_id = _allocate_new_id(archive_root)
             session_dir = year_month_dir / run_id
             try:
                 session_dir.mkdir(parents=False, exist_ok=False)
@@ -245,7 +256,7 @@ def new(
         else:
             raise RuntimeError(
                 "could not allocate a unique session id after 10 attempts; "
-                "check for a stale/broken folder in the store"
+                "check for a stale/broken folder in the archive"
             )
 
     meta = SessionMeta(
@@ -256,27 +267,34 @@ def new(
         description=description,
     )
     write_session_yaml(session_dir, meta)
-    return Session(session_dir, meta, store=store)
+    return Session(session_dir, meta, archive=name)
 
 
-def _find_session_dir(store_root: Path, run_id: str) -> Path:
-    store_root = Path(store_root)
-    for year_dir in store_root.iterdir() if store_root.exists() else []:
+def _find_session_dir(archive_root: Path, run_id: str) -> Path:
+    archive_root = Path(archive_root)
+    for year_dir in archive_root.iterdir() if archive_root.exists() else []:
         if not year_dir.is_dir():
             continue
         for month_dir in year_dir.iterdir():
             candidate = month_dir / run_id
             if candidate.is_dir() and (candidate / "session.yaml").exists():
                 return candidate
-    raise FileNotFoundError(f"no session {run_id!r} found under {store_root}")
+    raise FileNotFoundError(f"no session {run_id!r} found under {archive_root}")
 
 
-def append_to(store_root: Path, run_id: str, *, store: Optional[str] = None) -> Session:
+def append_to(
+    archive: "str | Path", run_id: str, *, archive_name: Optional[str] = None
+) -> Session:
     """Reattach to an existing OPEN session to write more artifacts into
     it. Raises if the session is closed -- closed sessions are immutable
     by policy; use related_runs / derived_from to link new work to old
-    sessions instead of reopening them."""
-    session_dir = _find_session_dir(store_root, run_id)
+    sessions instead of reopening them.
+
+    `archive` follows the same str-name-vs-Path-literal resolution as
+    new()."""
+    archive_root, resolved_name = resolve_archive(archive)
+    name = archive_name or resolved_name or "local"
+    session_dir = _find_session_dir(archive_root, run_id)
     meta = read_session_yaml(session_dir)
     if meta.status != "open":
         raise RuntimeError(
@@ -284,43 +302,49 @@ def append_to(store_root: Path, run_id: str, *, store: Optional[str] = None) -> 
             f"Closed sessions are immutable by policy -- create a new "
             f"session and reference this one via related_runs instead."
         )
-    return Session(session_dir, meta, store=store)
+    return Session(session_dir, meta, archive=name)
 
 
-def reopen(store_root: Path, run_id: str, *, store: Optional[str] = None) -> Session:
+def reopen(
+    archive: "str | Path", run_id: str, *, archive_name: Optional[str] = None
+) -> Session:
     """Explicitly reopen a session regardless of its current status (e.g.
     a crashed session resuming from a checkpoint after a machine reboot).
     Distinct from append_to() so that 'accidentally reopening a closed
     session' requires deliberate intent, not just a typo'd status check.
     """
-    session_dir = _find_session_dir(store_root, run_id)
+    archive_root, resolved_name = resolve_archive(archive)
+    name = archive_name or resolved_name or "local"
+    session_dir = _find_session_dir(archive_root, run_id)
     meta = read_session_yaml(session_dir)
     meta.status = "open"
     write_session_yaml(session_dir, meta)
-    return Session(session_dir, meta, store=store)
+    return Session(session_dir, meta, archive=name)
 
 
 @contextlib.contextmanager
 def session(
-    store_root: Path,
+    archive: "str | Path",
     *,
     run_id: Optional[str] = None,
     tags: Optional[List[str]] = None,
     description: str = "",
-    store: Optional[str] = None,
+    archive_name: Optional[str] = None,
 ):
     """Convenience context manager: creates a new session if run_id is
     None, otherwise appends to the given (open) session. Closes/marks
     crashed automatically on exit.
 
-        with nebula.session(ROOT, tags=["RP23D"], description="...") as s:
+        with nebula.session("postdoc", tags=["RP23D"], description="...") as s:
             ...
             s.write_meta_for("raw.graf", derived_from=["scope_trace.csv"])
+
+    `archive` may be a registered archive name (str) or a literal Path.
     """
     if run_id is None:
-        s = new(store_root, tags=tags, description=description, store=store)
+        s = new(archive, tags=tags, description=description, archive_name=archive_name)
     else:
-        s = append_to(store_root, run_id, store=store)
+        s = append_to(archive, run_id, archive_name=archive_name)
     try:
         yield s
     except BaseException:

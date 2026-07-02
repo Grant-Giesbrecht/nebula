@@ -24,8 +24,8 @@ def _init_fake_repo(repo_dir: Path) -> Path:
 
 
 def test_new_session_creates_folder_and_yaml(tmp_path):
-    store = tmp_path / "store"
-    s = nebula.new(store, tags=["RP23D"], description="test session")
+    archive = tmp_path / "archive"
+    s = nebula.new(archive, tags=["RP23D"], description="test session")
     assert s.id.startswith("S-")
     assert s.path.exists()
     assert (s.path / "session.yaml").exists()
@@ -41,52 +41,103 @@ def test_new_session_creates_folder_and_yaml(tmp_path):
 
 
 def test_session_ids_increment(tmp_path):
-    store = tmp_path / "store"
-    s1 = nebula.new(store, description="first")
+    archive = tmp_path / "archive"
+    s1 = nebula.new(archive, description="first")
     s1.close()
-    s2 = nebula.new(store, description="second")
+    s2 = nebula.new(archive, description="second")
     s2.close()
     assert s1.id == "S-0001"
     assert s2.id == "S-0002"
 
 
+def test_session_by_registered_name(tmp_path):
+    from nebula.registry import Registry, resolve_archive
+
+    archive_root = tmp_path / "actual-data"
+    reg = Registry(path=tmp_path / "registry.yaml")
+    reg.register("postdoc", archive_root)
+
+    root, name = resolve_archive("postdoc", registry=reg)
+    assert root == archive_root
+    assert name == "postdoc"
+
+
+def test_new_delegates_to_registry_via_env_override(tmp_path, monkeypatch):
+    import nebula.registry as registry_mod
+
+    archive_root = tmp_path / "actual-data"
+    registry_path = tmp_path / "registry.yaml"
+    from nebula.registry import Registry
+
+    Registry(path=registry_path).register("postdoc", archive_root)
+
+    monkeypatch.setenv("NEBULA_REGISTRY", str(registry_path))
+    registry_mod._default_registry = None  # force reload with the new env var
+
+    s = nebula.new("postdoc", description="via registered name")
+    assert s.archive == "postdoc"
+    assert s.path.is_relative_to(archive_root)
+    s.close()
+
+    registry_mod._default_registry = None  # don't leak state to other tests
+
+
+def test_unknown_registered_name_raises(tmp_path):
+    with pytest.raises(KeyError):
+        nebula.new("definitely-not-a-registered-archive", description="oops")
+
+
+def test_path_argument_defaults_archive_label_to_local(tmp_path):
+    archive = tmp_path / "archive"
+    s = nebula.new(archive, description="path based")
+    assert s.archive == "local"
+    s.close()
+
+
+def test_archive_name_override(tmp_path):
+    archive = tmp_path / "archive"
+    s = nebula.new(archive, description="custom label", archive_name="scratch")
+    assert s.archive == "scratch"
+    s.close()
+
+
 def test_context_manager_closes_on_success(tmp_path):
-    store = tmp_path / "store"
-    with nebula.session(store, description="ctx test") as s:
+    archive = tmp_path / "archive"
+    with nebula.session(archive, description="ctx test") as s:
         run_id = s.id
-    meta = read_session_yaml(store / str(_year_month(store, run_id)) / run_id) \
+    meta = read_session_yaml(archive / str(_year_month(archive, run_id)) / run_id) \
         if False else None  # placeholder, real lookup below
     # find it via glob since we don't want the test to know the path scheme
-    found = list(store.rglob(f"{run_id}/session.yaml"))
+    found = list(archive.rglob(f"{run_id}/session.yaml"))
     assert len(found) == 1
     meta = read_session_yaml(found[0].parent)
     assert meta.status == "closed"
 
 
 def test_context_manager_marks_crashed_on_exception(tmp_path):
-    store = tmp_path / "store"
+    archive = tmp_path / "archive"
     run_id = None
     with pytest.raises(ValueError):
-        with nebula.session(store, description="will crash") as s:
+        with nebula.session(archive, description="will crash") as s:
             run_id = s.id
             raise ValueError("boom")
-    found = list(store.rglob(f"{run_id}/session.yaml"))
+    found = list(archive.rglob(f"{run_id}/session.yaml"))
     meta = read_session_yaml(found[0].parent)
     assert meta.status == "crashed"
 
 
 def test_append_to_open_session_works(tmp_path):
-    store = tmp_path / "store"
-    s1 = nebula.new(store, description="first step")
+    archive = tmp_path / "archive"
+    s1 = nebula.new(archive, description="first step")
     s1.close()
     with pytest.raises(RuntimeError):
-        nebula.append_to(store, s1.id)  # closed -- should refuse
+        nebula.append_to(archive, s1.id)  # closed -- should refuse
 
 
 def test_append_to_still_open_session(tmp_path):
-    store = tmp_path / "store"
-    s1 = nebula.new(store, description="multi-step")
-    s2 = nebula.append_to(store, s1.id)
+    archive = tmp_path / "archive"
+    s1 = nebula.new(archive, description="multi-step")
+    s2 = nebula.append_to(archive, s1.id)
     assert s2.id == s1.id
     s2.close()
 
@@ -95,7 +146,7 @@ def test_sidecar_written_with_provenance(tmp_path):
     repo_dir = tmp_path / "repo"
     script_path = _init_fake_repo(repo_dir)
 
-    store = tmp_path / "store"
+    archive = tmp_path / "archive"
 
     # Simulate the script itself calling into nebula by executing a
     # subprocess that imports nebula and writes a sidecar -- this way
@@ -107,8 +158,9 @@ def test_sidecar_written_with_provenance(tmp_path):
 import sys
 sys.path.insert(0, {str((Path(__file__).parents[1] / "src")).__repr__()})
 import nebula
+from pathlib import Path
 
-with nebula.session({str(store)!r}, description="prov test") as s:
+with nebula.session(Path({str(archive)!r}), description="prov test") as s:
     (s.path / "data.csv").write_text("1,2,3\\n")
     s.write_meta_for("data.csv", inputs={{"gain": 10}})
     print(s.id)
@@ -120,7 +172,7 @@ with nebula.session({str(store)!r}, description="prov test") as s:
     assert result.returncode == 0, result.stderr
     run_id = result.stdout.strip().splitlines()[-1]
 
-    session_dir = next(store.rglob(f"{run_id}"))
+    session_dir = next(archive.rglob(f"{run_id}"))
     meta = read_sidecar(session_dir / "data.csv")
     assert meta.produced_by.repo == "repo"
     assert meta.produced_by.commit is not None
@@ -131,14 +183,14 @@ with nebula.session({str(store)!r}, description="prov test") as s:
 
 
 def test_derived_from_round_trips(tmp_path):
-    store = tmp_path / "store"
-    with nebula.session(store, description="derive test") as s:
+    archive = tmp_path / "archive"
+    with nebula.session(archive, description="derive test") as s:
         (s.path / "raw.csv").write_text("x")
         s.write_meta_for("raw.csv")
         (s.path / "processed.graf").write_text("y")
         s.write_meta_for("processed.graf", derived_from=["raw.csv"])
 
-    session_dir = next(store.rglob(f"{s.id}"))
+    session_dir = next(archive.rglob(f"{s.id}"))
     meta = read_sidecar(session_dir / "processed.graf")
     refs = meta.derived_from_refs()
     assert len(refs) == 1
@@ -147,15 +199,15 @@ def test_derived_from_round_trips(tmp_path):
 
 
 def test_index_rebuild_and_query(tmp_path):
-    store = tmp_path / "store"
-    with nebula.session(store, tags=["RP23D"], description="idx test") as s:
+    archive = tmp_path / "archive"
+    with nebula.session(archive, tags=["RP23D"], description="idx test") as s:
         (s.path / "a.csv").write_text("x")
         s.write_meta_for("a.csv")
         (s.path / "b.graf").write_text("y")
         s.write_meta_for("b.graf", derived_from=["a.csv"])
 
-    index.rebuild(store)
-    conn = index.open_index(store)
+    index.rebuild(archive)
+    conn = index.open_index(archive)
 
     sessions = conn.execute("SELECT * FROM sessions").fetchall()
     assert len(sessions) == 1
@@ -180,8 +232,8 @@ def test_flag_stale_open_sessions(tmp_path):
     import datetime
     from nebula.sidecar import write_session_yaml, SessionMeta
 
-    store = tmp_path / "store"
-    year_month = store / "2020" / "01"
+    archive = tmp_path / "archive"
+    year_month = archive / "2020" / "01"
     year_month.mkdir(parents=True)
     session_dir = year_month / "S-0001"
     session_dir.mkdir()
@@ -194,14 +246,39 @@ def test_flag_stale_open_sessions(tmp_path):
     )
     write_session_yaml(session_dir, old_meta)
 
-    index.rebuild(store)
-    conn = index.open_index(store)
+    index.rebuild(archive)
+    conn = index.open_index(archive)
     stale = index.flag_stale_open_sessions(conn, older_than_hours=1)
     assert len(stale) == 1
     assert stale[0]["run_id"] == "S-0001"
     conn.close()
 
 
-def _year_month(store, run_id):
+def _year_month(archive, run_id):
     # helper retained for readability at call site; unused fallback
     return ""
+
+
+def test_index_rebuild_and_query_by_registered_name(tmp_path, monkeypatch):
+    import nebula.registry as registry_mod
+    from nebula.registry import Registry
+    from nebula import index
+
+    archive_root = tmp_path / "actual-data"
+    registry_path = tmp_path / "registry.yaml"
+    Registry(path=registry_path).register("postdoc", archive_root)
+    monkeypatch.setenv("NEBULA_REGISTRY", str(registry_path))
+    registry_mod._default_registry = None
+
+    with nebula.session("postdoc", description="via name") as s:
+        (s.path / "a.csv").write_text("x")
+        s.write_meta_for("a.csv")
+
+    index.rebuild("postdoc")
+    conn = index.open_index("postdoc")
+    rows = conn.execute("SELECT run_id FROM sessions").fetchall()
+    assert len(rows) == 1
+    assert rows[0]["run_id"] == s.id
+    conn.close()
+
+    registry_mod._default_registry = None
