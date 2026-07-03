@@ -25,7 +25,8 @@ CREATE TABLE IF NOT EXISTS sessions (
     status TEXT NOT NULL,
     tags TEXT NOT NULL,        -- JSON list
     description TEXT NOT NULL,
-    hold_until TEXT            -- NULL, "forever", or an ISO expiry timestamp
+    hold_until TEXT,           -- NULL, "forever", or an ISO expiry timestamp
+    history TEXT               -- JSON list of manual-operation entries
 );
 
 CREATE TABLE IF NOT EXISTS related_runs (
@@ -45,6 +46,9 @@ CREATE TABLE IF NOT EXISTS artifacts (
     dirty INTEGER,
     entry_point TEXT,
     inputs TEXT,                -- JSON
+    source TEXT,                -- "script" or "external"
+    origin TEXT,                -- free-text provenance for external files
+    sha256 TEXT,
     PRIMARY KEY (run_id, filename)
 );
 
@@ -108,7 +112,7 @@ def rebuild(archive: "str | Path", index_path: Optional[Path] = None) -> Path:
 def _index_session(conn: sqlite3.Connection, session_dir: Path) -> None:
     meta = read_session_yaml(session_dir)
     conn.execute(
-        "INSERT OR REPLACE INTO sessions VALUES (?, ?, ?, ?, ?, ?, ?)",
+        "INSERT OR REPLACE INTO sessions VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
         (
             meta.run_id,
             str(session_dir),
@@ -117,6 +121,7 @@ def _index_session(conn: sqlite3.Connection, session_dir: Path) -> None:
             json.dumps(meta.tags),
             meta.description,
             meta.hold_until,
+            json.dumps(meta.history),
         ),
     )
     conn.execute("DELETE FROM related_runs WHERE run_id = ?", (meta.run_id,))
@@ -132,7 +137,7 @@ def _index_session(conn: sqlite3.Connection, session_dir: Path) -> None:
             data = json.load(f)
         produced_by = data.get("produced_by", {})
         conn.execute(
-            "INSERT OR REPLACE INTO artifacts VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "INSERT OR REPLACE INTO artifacts VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (
                 meta.run_id,
                 filename,
@@ -143,6 +148,9 @@ def _index_session(conn: sqlite3.Connection, session_dir: Path) -> None:
                 int(bool(produced_by.get("dirty"))) if produced_by.get("dirty") is not None else None,
                 produced_by.get("entry_point"),
                 json.dumps(data.get("inputs", {})),
+                produced_by.get("source"),
+                produced_by.get("origin"),
+                data.get("sha256"),
             ),
         )
         conn.execute(

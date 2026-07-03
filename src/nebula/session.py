@@ -196,6 +196,24 @@ def _allocate_new_id(archive_root: Path) -> str:
 # Session
 # ---------------------------------------------------------------------
 
+def orphan_artifacts_in(session_dir: Path) -> List[Path]:
+    """Artifact files in a session folder that have no sidecar. Excludes
+    session.yaml, the sidecars themselves, hidden files (including temp
+    files left by an interrupted atomic write), and subdirectories."""
+    orphans = []
+    for entry in sorted(Path(session_dir).iterdir()):
+        if not entry.is_file():
+            continue
+        name = entry.name
+        if name.startswith("."):
+            continue
+        if name == SESSION_FILE or name.endswith(SIDECAR_SUFFIX):
+            continue
+        if not sidecar_path_for(entry).exists():
+            orphans.append(entry)
+    return orphans
+
+
 class Session:
     """A handle to an open (or reopened) session folder.
 
@@ -300,22 +318,9 @@ class Session:
         write_session_yaml(self.path, self.meta)
 
     def find_orphan_artifacts(self) -> List[Path]:
-        """Return artifact files in the session folder that have no
-        sidecar. Excludes session.yaml, the sidecars themselves, hidden
-        files (including the temp files left by an interrupted atomic
-        write), and subdirectories."""
-        orphans = []
-        for entry in sorted(self.path.iterdir()):
-            if not entry.is_file():
-                continue
-            name = entry.name
-            if name.startswith("."):
-                continue
-            if name == SESSION_FILE or name.endswith(SIDECAR_SUFFIX):
-                continue
-            if not sidecar_path_for(entry).exists():
-                orphans.append(entry)
-        return orphans
+        """Return artifact files in this session folder that have no
+        sidecar. See the module-level orphan_artifacts_in()."""
+        return orphan_artifacts_in(self.path)
 
     def _reconcile_missing_meta(self) -> None:
         """Apply the on_missing_meta policy to any artifacts left without a

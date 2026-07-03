@@ -28,6 +28,12 @@ from nebula.session import (
 from nebula.sidecar import write_sidecar, read_sidecar
 from nebula.tags import collect_tags, input_tag
 from nebula.session_select import select_session
+from nebula.manual import (
+    import_file,
+    import_new,
+    adopt_file,
+    find_orphan_files,
+)
 from nebula import graph
 
 __all__ = [
@@ -50,6 +56,10 @@ __all__ = [
     "read_sidecar",
     "collect_tags",
     "input_tag",
+    "import_file",
+    "import_new",
+    "adopt_file",
+    "find_orphan_files",
     "graph",
 ]
 

@@ -10,6 +10,9 @@ Usage:
     nebula rebuild <archive>
     nebula ls <archive> [--tag TAG] [--status open|closed|crashed] [--today]
     nebula show <archive> <run_id>
+    nebula import <archive> <run_id> FILE... [--from NOTE] [--as NAME] [--move] [--reopen]
+    nebula import-new <archive> FILE... [--tags a,b] [--description D] [--from NOTE] [--move]
+    nebula reconcile <archive> [run_id]         # write sidecars for hand-added files
     nebula hold <archive> <run_id> [DURATION]   # e.g. 2h; omit to hold until Ctrl-C
     nebula release <archive> <run_id>           # (alias: close) clear a hold
     nebula upstream <archive> <run_id> <filename>
@@ -28,7 +31,7 @@ import sys
 import time
 from pathlib import Path
 
-from nebula import graph, index
+from nebula import graph, index, manual
 from nebula.registry import get_registry
 from nebula.sidecar import read_session_yaml
 # Import from the submodule directly: `nebula.session` the *name* is the
@@ -65,7 +68,7 @@ def cmd_rebuild(args):
 def cmd_ls(args):
     root, _ = _resolve_archive_cli(args.archive)
     conn = index.open_index(root)
-    query = "SELECT run_id, created, status, tags, description FROM sessions"
+    query = "SELECT run_id, created, status, tags, description, hold_until FROM sessions"
     clauses = []
     params = []
     if args.status:
@@ -122,18 +125,20 @@ def cmd_show(args):
             print(f"    - {_fmt_ref_row(r)}")
 
     artifacts = conn.execute(
-        "SELECT filename, repo, commit_hash, dirty, entry_point FROM artifacts "
-        "WHERE run_id = ? ORDER BY filename",
+        "SELECT filename, repo, commit_hash, dirty, entry_point, source, origin "
+        "FROM artifacts WHERE run_id = ? ORDER BY filename",
         (args.run_id,),
     ).fetchall()
     print("  artifacts:")
     for a in artifacts:
-        dirty_flag = " (dirty)" if a["dirty"] else ""
-        commit_short = (a["commit_hash"] or "")[:8]
-        print(
-            f"    - {a['filename']:30} "
-            f"{a['repo'] or '-'}@{commit_short or '-'}{dirty_flag}"
-        )
+        if a["source"] == "external":
+            # No git commit to show -- report where it actually came from.
+            prov = f"external: {a['origin'] or '(no origin recorded)'}"
+        else:
+            dirty_flag = " (dirty)" if a["dirty"] else ""
+            commit_short = (a["commit_hash"] or "")[:8]
+            prov = f"{a['repo'] or '-'}@{commit_short or '-'}{dirty_flag}"
+        print(f"    - {a['filename']:30} {prov}")
         derived = conn.execute(
             "SELECT ref_archive, ref_session, ref_file FROM derived_from "
             "WHERE run_id = ? AND filename = ?",
@@ -141,6 +146,15 @@ def cmd_show(args):
         ).fetchall()
         for d in derived:
             print(f"        <- {_fmt_ref_row(d)}")
+
+    history = json.loads(session_row["history"] or "[]")
+    if history:
+        print("  history:")
+        for h in history:
+            note = f" -- {h['note']}" if h.get("note") else ""
+            by = f" by {h['by']}" if h.get("by") else ""
+            print(f"    - {h.get('at', '?')}  {h.get('action')} {h.get('file') or ''}"
+                  f"{by}{note}")
     conn.close()
 
 
@@ -149,6 +163,72 @@ def _fmt_ref_row(row) -> str:
     sess = row["ref_session"] or "(same session)"
     file = row["ref_file"] or "(whole session)"
     return f"{archive}|{sess}/{file}"
+
+
+def cmd_import(args):
+    root, _ = _resolve_archive_cli(args.archive)
+    if args.dest_name and len(args.files) != 1:
+        print("--as can only be used with a single file", file=sys.stderr)
+        sys.exit(1)
+    try:
+        for f in args.files:
+            dest = manual.import_file(
+                root, args.run_id, f,
+                dest_name=args.dest_name, origin=args.origin,
+                derived_from=args.derived_from, move=args.move,
+                allow_frozen=args.reopen,
+            )
+            print(f"imported {f} -> {dest}")
+    except (FileNotFoundError, FileExistsError, RuntimeError) as e:
+        print(f"error: {e}", file=sys.stderr)
+        sys.exit(1)
+    index.rebuild(root)
+
+
+def cmd_import_new(args):
+    root, _ = _resolve_archive_cli(args.archive)
+    tags = [t.strip() for t in (args.tags or "").split(",") if t.strip()]
+    try:
+        s = manual.import_new(
+            root, args.files, tags=tags, description=args.description,
+            origin=args.origin, move=args.move,
+        )
+    except (FileNotFoundError, FileExistsError) as e:
+        print(f"error: {e}", file=sys.stderr)
+        sys.exit(1)
+    print(f"created {s.id} with {len(args.files)} file(s) at {s.path}")
+    index.rebuild(root)
+
+
+def cmd_reconcile(args):
+    root, _ = _resolve_archive_cli(args.archive)
+    orphans = manual.find_orphan_files(root, args.run_id)
+    if not orphans:
+        print("no orphan files -- everything has a sidecar")
+        return
+    print(f"found {len(orphans)} file(s) without a sidecar:")
+    for p in orphans:
+        print(f"  {p}")
+    choice = input(
+        "\n(A) auto-stub all, (B) fill in each manually, (C) cancel? "
+    ).strip().lower()
+
+    if choice == "a":
+        for p in orphans:
+            manual.adopt_file(p, origin="reconciled: found without sidecar")
+            print(f"  stubbed {p.name}")
+    elif choice == "b":
+        for p in orphans:
+            print(f"\n{p}")
+            origin = input("  origin / notes (where did this come from?): ").strip()
+            df = input("  derived from (comma-separated refs, optional): ").strip()
+            derived = [x.strip() for x in df.split(",") if x.strip()]
+            manual.adopt_file(p, origin=origin or None, derived_from=derived)
+            print(f"  wrote sidecar for {p.name}")
+    else:
+        print("cancelled")
+        return
+    index.rebuild(root)
 
 
 def cmd_hold(args):
@@ -271,6 +351,33 @@ def main(argv=None):
     p.add_argument("archive", help="registered archive name, or a literal path")
     p.add_argument("run_id")
     p.set_defaults(func=cmd_show)
+
+    p = sub.add_parser("import", help="add external file(s) to an existing session")
+    p.add_argument("archive", help="registered archive name, or a literal path")
+    p.add_argument("run_id")
+    p.add_argument("files", nargs="+", help="file(s) to import")
+    p.add_argument("--from", dest="origin", help="free-text note on where it came from")
+    p.add_argument("--as", dest="dest_name", help="rename the file (single file only)")
+    p.add_argument("--move", action="store_true", help="move instead of copy")
+    p.add_argument("--reopen", action="store_true",
+                   help="allow importing into a session closed on a previous day")
+    p.add_argument("--derived-from", nargs="*", dest="derived_from",
+                   help="ref(s) this file was derived from")
+    p.set_defaults(func=cmd_import)
+
+    p = sub.add_parser("import-new", help="create a new session seeded with external files")
+    p.add_argument("archive", help="registered archive name, or a literal path")
+    p.add_argument("files", nargs="+", help="file(s) to seed the session with")
+    p.add_argument("--from", dest="origin", help="free-text note on where it came from")
+    p.add_argument("--tags", help="comma-separated tags")
+    p.add_argument("--description", default="")
+    p.add_argument("--move", action="store_true", help="move instead of copy")
+    p.set_defaults(func=cmd_import_new)
+
+    p = sub.add_parser("reconcile", help="write sidecars for files added to a session by hand")
+    p.add_argument("archive", help="registered archive name, or a literal path")
+    p.add_argument("run_id", nargs="?", help="limit to one session (default: whole archive)")
+    p.set_defaults(func=cmd_reconcile)
 
     p = sub.add_parser(
         "hold",
