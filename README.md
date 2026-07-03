@@ -94,6 +94,56 @@ and it shows up in the interactive picker even after its start day. The
 same thing is available programmatically as `nebula.hold(archive, run_id,
 seconds=...)` and `nebula.release(archive, run_id)`.
 
+### Manual operations: importing, editing, and checking data
+
+Not all data comes from a tracked script — a coworker emails you a dataset,
+or you export a file from an instrument by hand. Bringing files in through
+nebula (rather than a bare `cp`) writes a proper sidecar with **honest
+`external` provenance** (a free-text origin, the importing user, and a
+sha256), so a hand-added file is a first-class citizen, not an orphan:
+
+```
+nebula import <archive> S-0300 report.csv --from "emailed by Jane 2026-07-01"
+nebula import-new <archive> a.csv b.csv --tags shared --description "coworker dataset"
+nebula reconcile <archive> [S-0300]    # adopt files you already copied in by hand
+```
+
+Editing existing data is soft and audited. Deletes move the file (and its
+sidecar) to a `.trash/` inside the session — nothing is hard-removed — and
+every change is logged to the session's `history`. Deletes refuse to break
+a `derived_from` link unless you `--force`:
+
+```
+nebula rm <archive> S-0300 bad.csv --reason "failed calibration"
+nebula replace <archive> S-0300 raw.csv rescanned.csv --reason "rescan"
+nebula rm-session <archive> S-0300 --reason "duplicate"   # whole folder -> archive .trash/
+```
+
+Because the filesystem is the source of truth and can be edited outside
+nebula, `nebula check` (fsck) verifies an archive is internally consistent
+and **suggests the command to fix each problem it finds**. It reports
+orphans, sidecars whose artifact is gone (and vice-versa), **sha256 drift**,
+unreadable sidecars / `session.yaml`, dangling or self-referential
+`derived_from`, dangling `related_runs`, `run_id`/folder mismatches, invalid
+status, garbled holds, duplicate ids, and (as info) cross-archive refs it
+can't reach. It exits non-zero if any *error*-level problem is found:
+
+```
+$ nebula check <archive>
+[error] checksum_mismatch S-0001/raw.csv: sha256 314cbe44... != recorded 7a8988e9...
+    fix: if the edit was intentional: 'nebula reseal <archive> S-0001 raw.csv'; otherwise restore the original bytes
+[error] orphan S-0001/notes.dat: file has no sidecar
+    fix: nebula reconcile <archive> S-0001
+```
+
+`nebula reseal <archive> <run_id> <file>` re-records an artifact's checksum
+from its current bytes — the blessed fix when a checksum mismatch is an
+edit you meant to make.
+
+All of these are also available programmatically: `nebula.import_file`,
+`import_new`, `adopt_file`, `delete_file`, `replace_file`, `reseal`,
+`delete_session`, `find_orphan_files`, and `nebula.check_archive`.
+
 Rebuilding the index and checking for crashed/abandoned sessions:
 
 ```python

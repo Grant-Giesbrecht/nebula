@@ -18,11 +18,13 @@ This module holds the reusable functions; the CLI (`nebula import`,
 
 from __future__ import annotations
 
+import datetime
 import getpass
 import shutil
 from pathlib import Path
 from typing import Dict, List, Optional
 
+from nebula.check import dependents_of, inbound_to_session
 from nebula.registry import resolve_archive
 from nebula.session import (
     Session,
@@ -37,6 +39,8 @@ from nebula.sidecar import (
     ProducedBy,
     SidecarMeta,
     read_session_yaml,
+    read_sidecar,
+    sha256_file,
     sidecar_path_for,
     write_session_yaml,
     write_sidecar,
@@ -230,6 +234,210 @@ def adopt_file(
         path.parent, "reconcile", file=path.name, note=origin, by=imported_by,
     )
     return path
+
+
+# ---------------------------------------------------------------------
+# delete / replace  (soft-delete to a per-session .trash/)
+# ---------------------------------------------------------------------
+
+TRASH_DIRNAME = ".trash"
+
+
+def _timestamp_slug() -> str:
+    return datetime.datetime.now().astimezone().strftime("%Y%m%d-%H%M%S")
+
+
+def _move_to_trash(trash_dir: Path, path: Path, stamp: str) -> Path:
+    """Move a file into trash under a timestamp-prefixed name, dodging
+    collisions if the same name is trashed twice in one second."""
+    trash_dir.mkdir(exist_ok=True)
+    dest = trash_dir / f"{stamp}-{path.name}"
+    n = 1
+    while dest.exists():
+        dest = trash_dir / f"{stamp}-{n}-{path.name}"
+        n += 1
+    shutil.move(str(path), str(dest))
+    return dest
+
+
+def delete_file(
+    archive: "str | Path",
+    run_id: str,
+    filename: str,
+    *,
+    reason: Optional[str] = None,
+    by: Optional[str] = None,
+    force: bool = False,
+) -> Path:
+    """Soft-delete an artifact: move it (and its sidecar) into the
+    session's .trash/, and log the deletion. Refuses if another artifact
+    still derives from it, unless force=True. Returns the trashed path."""
+    archive_root, _ = resolve_archive(archive)
+    session_dir = _find_session_dir(archive_root, run_id)
+    target = session_dir / filename
+    sidecar = sidecar_path_for(target)
+    # Tolerate a stray sidecar with no artifact (the "missing_artifact" case
+    # from check) so `rm` can clear it -- but require that *something* exists.
+    if not target.is_file() and not sidecar.exists():
+        raise FileNotFoundError(f"no artifact or sidecar {filename!r} in {run_id}")
+
+    deps = dependents_of(archive_root, run_id, filename)
+    if deps and not force:
+        raise RuntimeError(
+            f"{filename!r} is still derived from by: {', '.join(deps)}. "
+            f"Delete/repoint those first, or pass force=True to break the link."
+        )
+
+    by = by or _default_user()
+    if sidecar.exists():
+        old_sha = read_sidecar(target).sha256
+    elif target.is_file():
+        old_sha = sha256_file(target)
+    else:
+        old_sha = None
+    trash = session_dir / TRASH_DIRNAME
+    stamp = _timestamp_slug()
+    trashed = None
+    if target.is_file():
+        trashed = _move_to_trash(trash, target, stamp)
+    if sidecar.exists():
+        moved_sidecar = _move_to_trash(trash, sidecar, stamp)
+        trashed = trashed or moved_sidecar
+    _record_history(
+        session_dir, "delete", file=filename, note=reason, by=by,
+        sha256=old_sha, trashed_to=trashed.name,
+        broke_links=deps or None,
+    )
+    return trashed
+
+
+def replace_file(
+    archive: "str | Path",
+    run_id: str,
+    filename: str,
+    new_src: "str | Path",
+    *,
+    reason: Optional[str] = None,
+    origin: Optional[str] = None,
+    by: Optional[str] = None,
+    move: bool = False,
+) -> Path:
+    """Replace an artifact's bytes with a new file, keeping the same name
+    and its derived_from/inputs. The old version is soft-deleted to
+    .trash/, and the swap is logged with both checksums. The new sidecar is
+    marked external (a human, not a script, put these bytes here)."""
+    archive_root, _ = resolve_archive(archive)
+    session_dir = _find_session_dir(archive_root, run_id)
+    target = session_dir / filename
+    new_src = Path(new_src)
+    if not target.is_file():
+        raise FileNotFoundError(f"no artifact {filename!r} in {run_id} to replace")
+    if not new_src.is_file():
+        raise FileNotFoundError(f"no such replacement file: {new_src}")
+
+    by = by or _default_user()
+    sidecar = sidecar_path_for(target)
+    old_meta = read_sidecar(target) if sidecar.exists() else None
+    old_sha = old_meta.sha256 if old_meta else sha256_file(target)
+
+    trash = session_dir / TRASH_DIRNAME
+    stamp = _timestamp_slug()
+    _move_to_trash(trash, target, stamp)
+    if sidecar.exists():
+        _move_to_trash(trash, sidecar, stamp)
+
+    if move:
+        shutil.move(str(new_src), str(target))
+    else:
+        shutil.copy2(str(new_src), str(target))
+
+    produced_by = ProducedBy(
+        source="external", origin=origin or reason,
+        imported_by=by, imported_at=_now_iso(),
+    )
+    meta = SidecarMeta(
+        created=_now_iso(),
+        produced_by=produced_by,
+        derived_from=(old_meta.derived_from if old_meta else []),
+        inputs=(old_meta.inputs if old_meta else {}),
+        extra={"replaced_sha256": old_sha, "replaced_at": _now_iso()},
+    )
+    write_sidecar(target, meta)  # fills new sha256
+    _record_history(
+        session_dir, "replace", file=filename, note=reason, by=by,
+        old_sha256=old_sha, new_sha256=meta.sha256,
+    )
+    return target
+
+
+def reseal(
+    archive: "str | Path",
+    run_id: str,
+    filename: str,
+    *,
+    by: Optional[str] = None,
+) -> str:
+    """Re-record an artifact's checksum from its current bytes -- the
+    blessed fix for a `check` checksum_mismatch when the edit was
+    intentional. Logs the reseal (old -> new sha256). Returns the new hash.
+    Raises if there's no sidecar (use reconcile to create one first)."""
+    archive_root, _ = resolve_archive(archive)
+    session_dir = _find_session_dir(archive_root, run_id)
+    target = session_dir / filename
+    if not target.is_file():
+        raise FileNotFoundError(f"no artifact {filename!r} in {run_id}")
+    if not sidecar_path_for(target).exists():
+        raise FileNotFoundError(
+            f"{filename!r} has no sidecar; run 'nebula reconcile' to create one"
+        )
+    meta = read_sidecar(target)
+    old_sha = meta.sha256
+    new_sha = sha256_file(target)
+    if new_sha == old_sha:
+        return new_sha  # already sealed to the current bytes; nothing to do
+    meta.sha256 = new_sha
+    write_sidecar(target, meta)
+    _record_history(
+        session_dir, "reseal", file=filename, by=by or _default_user(),
+        old_sha256=old_sha, new_sha256=new_sha,
+    )
+    return new_sha
+
+
+def delete_session(
+    archive: "str | Path",
+    run_id: str,
+    *,
+    reason: Optional[str] = None,
+    by: Optional[str] = None,
+    force: bool = False,
+) -> Path:
+    """Soft-delete a whole session: record a tombstone in its history, then
+    move the entire folder to an archive-level .trash/. Refuses if another
+    session still references it (derived_from / related_runs) unless
+    force=True. Returns the trashed folder path."""
+    archive_root, _ = resolve_archive(archive)
+    session_dir = _find_session_dir(archive_root, run_id)
+
+    inbound = inbound_to_session(archive_root, run_id)
+    if inbound and not force:
+        raise RuntimeError(
+            f"session {run_id!r} is still referenced by: {', '.join(inbound)}. "
+            f"Repoint those first, or pass force=True to delete anyway."
+        )
+
+    by = by or _default_user()
+    # Write the tombstone into the session's own history before it moves,
+    # so the trashed folder carries the record of why it was removed.
+    _record_history(
+        session_dir, "delete-session", note=reason, by=by,
+        broke_links=inbound or None,
+    )
+    archive_trash = archive_root / TRASH_DIRNAME
+    archive_trash.mkdir(parents=True, exist_ok=True)
+    dest = archive_trash / f"{run_id}-{_timestamp_slug()}"
+    shutil.move(str(session_dir), str(dest))
+    return dest
 
 
 def find_orphan_files(

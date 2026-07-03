@@ -33,7 +33,12 @@ from nebula.manual import (
     import_new,
     adopt_file,
     find_orphan_files,
+    delete_file,
+    replace_file,
+    reseal,
+    delete_session,
 )
+from nebula.check import check as check_archive
 from nebula import graph
 
 __all__ = [
@@ -60,6 +65,11 @@ __all__ = [
     "import_new",
     "adopt_file",
     "find_orphan_files",
+    "delete_file",
+    "replace_file",
+    "reseal",
+    "delete_session",
+    "check_archive",
     "graph",
 ]
 

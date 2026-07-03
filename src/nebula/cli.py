@@ -13,6 +13,11 @@ Usage:
     nebula import <archive> <run_id> FILE... [--from NOTE] [--as NAME] [--move] [--reopen]
     nebula import-new <archive> FILE... [--tags a,b] [--description D] [--from NOTE] [--move]
     nebula reconcile <archive> [run_id]         # write sidecars for hand-added files
+    nebula rm <archive> <run_id> <file> [--reason R] [--force]
+    nebula replace <archive> <run_id> <file> <new_file> [--reason R] [--from NOTE]
+    nebula rm-session <archive> <run_id> [--reason R] [--force]
+    nebula reseal <archive> <run_id> <file>     # re-record checksum after an intended edit
+    nebula check <archive> [--no-checksums]     # integrity report (fsck), with fix hints
     nebula hold <archive> <run_id> [DURATION]   # e.g. 2h; omit to hold until Ctrl-C
     nebula release <archive> <run_id>           # (alias: close) clear a hold
     nebula upstream <archive> <run_id> <filename>
@@ -31,6 +36,7 @@ import sys
 import time
 from pathlib import Path
 
+from nebula import check as check_mod
 from nebula import graph, index, manual
 from nebula.registry import get_registry
 from nebula.sidecar import read_session_yaml
@@ -231,6 +237,77 @@ def cmd_reconcile(args):
     index.rebuild(root)
 
 
+def cmd_rm(args):
+    root, _ = _resolve_archive_cli(args.archive)
+    try:
+        trashed = manual.delete_file(
+            root, args.run_id, args.file,
+            reason=args.reason, force=args.force,
+        )
+    except (FileNotFoundError, RuntimeError) as e:
+        print(f"error: {e}", file=sys.stderr)
+        sys.exit(1)
+    print(f"deleted {args.file} (moved to {trashed})")
+    index.rebuild(root)
+
+
+def cmd_replace(args):
+    root, _ = _resolve_archive_cli(args.archive)
+    try:
+        dest = manual.replace_file(
+            root, args.run_id, args.file, args.new_file,
+            reason=args.reason, origin=args.origin, move=args.move,
+        )
+    except (FileNotFoundError, RuntimeError) as e:
+        print(f"error: {e}", file=sys.stderr)
+        sys.exit(1)
+    print(f"replaced {args.file} (old version in {dest.parent / manual.TRASH_DIRNAME})")
+    index.rebuild(root)
+
+
+def cmd_rm_session(args):
+    root, _ = _resolve_archive_cli(args.archive)
+    try:
+        trashed = manual.delete_session(
+            root, args.run_id, reason=args.reason, force=args.force,
+        )
+    except (FileNotFoundError, RuntimeError) as e:
+        print(f"error: {e}", file=sys.stderr)
+        sys.exit(1)
+    print(f"deleted session {args.run_id} (moved to {trashed})")
+    index.rebuild(root)
+
+
+def cmd_reseal(args):
+    root, _ = _resolve_archive_cli(args.archive)
+    try:
+        new_sha = manual.reseal(root, args.run_id, args.file)
+    except FileNotFoundError as e:
+        print(f"error: {e}", file=sys.stderr)
+        sys.exit(1)
+    print(f"resealed {args.file} -> sha256 {new_sha[:12]}...")
+    index.rebuild(root)
+
+
+def cmd_check(args):
+    root, _ = _resolve_archive_cli(args.archive)
+    # Pass the archive as the user typed it so suggested fixes are copy-pasteable.
+    issues = check_mod.check(root, verify_checksums=not args.no_checksums,
+                             archive_label=args.archive)
+    if not issues:
+        print("ok -- no integrity problems found")
+        return
+    for issue in issues:
+        print(str(issue))
+        if issue.fix:
+            print(f"    fix: {issue.fix}")
+    errors = [i for i in issues if i.severity == "error"]
+    info = len(issues) - len(errors)
+    print(f"\n{len(errors)} error(s), {info} info", file=sys.stderr)
+    if errors:
+        sys.exit(1)
+
+
 def cmd_hold(args):
     root, _ = _resolve_archive_cli(args.archive)
     try:
@@ -378,6 +455,45 @@ def main(argv=None):
     p.add_argument("archive", help="registered archive name, or a literal path")
     p.add_argument("run_id", nargs="?", help="limit to one session (default: whole archive)")
     p.set_defaults(func=cmd_reconcile)
+
+    p = sub.add_parser("rm", help="soft-delete an artifact (moves it to the session's .trash/)")
+    p.add_argument("archive", help="registered archive name, or a literal path")
+    p.add_argument("run_id")
+    p.add_argument("file")
+    p.add_argument("--reason", help="why it's being deleted (recorded in history)")
+    p.add_argument("--force", action="store_true",
+                   help="delete even if another artifact derives from it")
+    p.set_defaults(func=cmd_rm)
+
+    p = sub.add_parser("replace", help="replace an artifact's bytes, trashing the old version")
+    p.add_argument("archive", help="registered archive name, or a literal path")
+    p.add_argument("run_id")
+    p.add_argument("file")
+    p.add_argument("new_file", help="file whose bytes replace the artifact")
+    p.add_argument("--reason", help="why it's being replaced (recorded in history)")
+    p.add_argument("--from", dest="origin", help="free-text note on where the new bytes came from")
+    p.add_argument("--move", action="store_true", help="move instead of copy the new file")
+    p.set_defaults(func=cmd_replace)
+
+    p = sub.add_parser("rm-session", help="soft-delete a whole session (moves it to the archive .trash/)")
+    p.add_argument("archive", help="registered archive name, or a literal path")
+    p.add_argument("run_id")
+    p.add_argument("--reason", help="why it's being deleted (recorded in history)")
+    p.add_argument("--force", action="store_true",
+                   help="delete even if another session references it")
+    p.set_defaults(func=cmd_rm_session)
+
+    p = sub.add_parser("reseal", help="re-record an artifact's checksum after an intended edit")
+    p.add_argument("archive", help="registered archive name, or a literal path")
+    p.add_argument("run_id")
+    p.add_argument("file")
+    p.set_defaults(func=cmd_reseal)
+
+    p = sub.add_parser("check", help="report integrity problems in an archive (fsck)")
+    p.add_argument("archive", help="registered archive name, or a literal path")
+    p.add_argument("--no-checksums", action="store_true",
+                   help="skip re-hashing files (faster on large archives)")
+    p.set_defaults(func=cmd_check)
 
     p = sub.add_parser(
         "hold",
