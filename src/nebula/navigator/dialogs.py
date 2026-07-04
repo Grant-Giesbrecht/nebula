@@ -51,31 +51,40 @@ class ImportDialog:
         self._frozen_ids = {s.run_id for s in self._frozen}
 
         # --- target: existing session vs new -----------------------------
-        self.mode = ft.RadioGroup(
-            value="existing" if self._sessions else "new",
-            on_change=lambda _: self._sync_enabled(),
-            content=ft.Column(tight=True, spacing=2, controls=[
-                ft.Radio(value="existing", label="Add to existing session",
-                         disabled=not self._sessions),
-                ft.Radio(value="new", label="Create a new session"),
-            ]),
-        )
-
+        # The dropdown + frozen checkbox sit directly under the "existing"
+        # radio (indented) so the control they govern is next to its option;
+        # the "new" radio follows.
         self.session_dropdown = ft.Dropdown(label="Session", options=[])
         # Reveals frozen (previous-day-closed) sessions as targets; picking one
         # imports with a deliberate reopen.
-        self.frozen_check = ft.Checkbox(
-            label="Show sessions closed on a previous day (reopen to import)",
-            visible=bool(self._frozen),
-            on_change=lambda _: self._rebuild_options(),
+        self.frozen_check = ft.CupertinoSwitch(
+            value=False, on_change=lambda _: self._rebuild_options())
+        frozen_row = ft.Row(
+            spacing=8, visible=bool(self._frozen),
+            tooltip="Sessions closed on an earlier day; importing reopens them",
+            controls=[self.frozen_check,
+                      ft.Text("Include previously-closed sessions", size=13)])
+        self.mode = ft.RadioGroup(
+            value="existing" if self._sessions else "new",
+            on_change=lambda _: self._sync_enabled(),
+            content=ft.Column(tight=True, spacing=8, controls=[
+                ft.CupertinoRadio(value="existing", label="Add to existing session",
+                                  disabled=not self._sessions),
+                ft.Container(padding=ft.Padding.only(left=32),
+                             content=ft.Column(tight=True, spacing=8, controls=[
+                                 self.session_dropdown,
+                                 frozen_row,
+                             ])),
+                ft.CupertinoRadio(value="new", label="Create a new session"),
+            ]),
         )
-        self.tags_edit = ft.TextField(label="Tags",
-                                      hint_text="comma-separated, optional")
-        self.desc_edit = ft.TextField(label="Description",
-                                      hint_text="session description, optional")
-        self.origin_edit = ft.TextField(
-            label="Origin (where did these come from?)",
-            hint_text="e.g. emailed by Jane, 2026-07-02")
+
+        self.tags_edit = ft.CupertinoTextField(
+            placeholder_text="comma-separated, optional")
+        self.desc_edit = ft.CupertinoTextField(
+            placeholder_text="session description, optional")
+        self.origin_edit = ft.CupertinoTextField(
+            placeholder_text="where did these come from? e.g. emailed by Jane")
 
         self._rebuild_options()
         if preselect_run_id is not None and any(
@@ -83,28 +92,41 @@ class ImportDialog:
             self.session_dropdown.value = preselect_run_id
 
         file_names = ft.Column(
-            tight=True, spacing=1, scroll=ft.ScrollMode.AUTO, height=90,
+            tight=True, spacing=1, scroll=ft.ScrollMode.AUTO, height=60,
             controls=[ft.Text(f.name, size=12) for f in self._files])
 
+        # Bounded, scrollable content so a tall body scrolls internally rather
+        # than growing the dialog until it overlaps the Cancel/Import row.
         self.dialog = ft.AlertDialog(
             modal=True,
             title=ft.Text(f"Import {len(self._files)} file(s)"),
-            content=ft.Container(width=440, content=ft.Column(tight=True, spacing=10, controls=[
-                file_names,
-                ft.Divider(),
-                self.mode,
-                self.session_dropdown,
-                self.frozen_check,
-                self.tags_edit,
-                self.desc_edit,
-                self.origin_edit,
-            ])),
+            content=ft.Container(width=460, height=460, content=ft.Column(
+                tight=True, spacing=12, scroll=ft.ScrollMode.AUTO,
+                controls=[
+                    file_names,
+                    ft.Divider(),
+                    self.mode,
+                    self._labeled("Tags", self.tags_edit),
+                    self._labeled("Description", self.desc_edit),
+                    self._labeled("Origin", self.origin_edit),
+                ])),
             actions=[
-                ft.TextButton("Cancel", on_click=lambda _: self._close()),
-                ft.FilledButton("Import", on_click=lambda _: self._confirm()),
+                ft.CupertinoButton(content=ft.Text("Cancel"),
+                                   on_click=lambda _: self._close()),
+                ft.CupertinoFilledButton(content=ft.Text("Import"),
+                                         on_click=lambda _: self._confirm()),
             ],
         )
         self._sync_enabled()
+
+    @staticmethod
+    def _labeled(label: str, field: ft.Control) -> ft.Control:
+        """A Cupertino text field with a small caption above it (iOS forms put
+        the label over the field rather than floating inside it)."""
+        return ft.Column(tight=True, spacing=3, controls=[
+            ft.Text(label, size=12, color=ft.Colors.ON_SURFACE_VARIANT),
+            field,
+        ])
 
     def show(self) -> None:
         self._shown = True

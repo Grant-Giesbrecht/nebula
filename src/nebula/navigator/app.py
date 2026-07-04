@@ -63,6 +63,9 @@ _EXT_ICON = {
 }
 _DEFAULT_FILE_ICON = ft.Icons.INSERT_DRIVE_FILE
 
+# Tint used to mark the selected session / item across both views.
+_SEL_BG = ft.Colors.with_opacity(0.14, ft.Colors.PRIMARY)
+
 
 def _ext_icon(name: str) -> str:
     return _EXT_ICON.get(Path(name).suffix.lower(), _DEFAULT_FILE_ICON)
@@ -102,6 +105,12 @@ class Navigator:
         page.window.min_width = 720
         page.window.min_height = 460
         page.padding = 0
+        # macOS-native (Cupertino) styling: an iOS-blue accent flows into the
+        # Material bits (dividers, dropdown) so they match the Cupertino
+        # controls, and iOS page transitions round out the feel.
+        page.platform = ft.PagePlatform.MACOS
+        page.theme = ft.Theme(color_scheme_seed=ft.Colors.BLUE)
+        page.dark_theme = ft.Theme(color_scheme_seed=ft.Colors.BLUE)
 
         # --- shared state -------------------------------------------------
         self.sessions: List[model.SessionInfo] = []
@@ -111,6 +120,7 @@ class Navigator:
         self.selected_is_sidecar = False
         self.list_view_mode = True   # list view is the default
         self.verify = False
+        self.show_metadata = True    # show the nested sidecar rows in list view
         self._tiles: List[tuple] = []  # (item, is_sidecar, container) for grid/list
 
         # File picker used by the "Import files..." action.
@@ -132,24 +142,30 @@ class Navigator:
                 self.session_list,
             ]))
 
-        # Toolbar.
-        self.view_toggle = ft.IconButton(
-            icon=ft.Icons.VIEW_LIST, selected_icon=ft.Icons.GRID_VIEW,
-            tooltip="Switch between a sortable list and the icon grid",
-            selected=self.list_view_mode, on_click=self._toggle_view)
-        self.verify_check = ft.Checkbox(
-            label="Verify checksums", value=False,
-            tooltip="Re-hash each file to detect silent edits (slower)",
-            on_change=self._toggle_verify)
-        toolbar = ft.Row(spacing=6, controls=[
-            ft.IconButton(ft.Icons.REFRESH, tooltip="Refresh",
-                          on_click=lambda _: self.reload()),
+        # Toolbar (Cupertino controls: a sliding segmented control for the
+        # view switch, iOS switches for the toggles, Cupertino buttons).
+        self.view_toggle = ft.CupertinoSlidingSegmentedButton(
+            selected_index=0 if self.list_view_mode else 1,
+            padding=ft.Padding.symmetric(horizontal=8, vertical=4),
+            controls=[ft.Text("List"), ft.Text("Grid")],
+            on_change=self._toggle_view)
+        self.verify_check = ft.CupertinoSwitch(
+            value=False, on_change=self._toggle_verify)
+        self.metadata_check = ft.CupertinoSwitch(
+            value=True, on_change=self._toggle_metadata)
+        toolbar = ft.Row(spacing=10, controls=[
+            ft.CupertinoButton(icon=ft.Icons.REFRESH, tooltip="Refresh",
+                               padding=8, on_click=lambda _: self.reload()),
             self.view_toggle,
             ft.VerticalDivider(),
-            self.verify_check,
+            ft.Row([ft.Text("Verify", size=13), self.verify_check], spacing=4,
+                   tooltip="Re-hash each file to detect silent edits (slower)"),
+            ft.Row([ft.Text("Metadata", size=13), self.metadata_check], spacing=4,
+                   tooltip="Show the nested sidecar (metadata) rows in the list"),
             ft.Container(expand=True),
-            ft.OutlinedButton("Import files…", icon=ft.Icons.UPLOAD_FILE,
-                              on_click=self._pick_import),
+            ft.CupertinoFilledButton(
+                content=ft.Text("Import files…"), icon=ft.Icons.UPLOAD_FILE,
+                on_click=self._pick_import),
         ])
 
         # Main item area (grid or list swapped into this container).
@@ -158,14 +174,18 @@ class Navigator:
         # Details bar with per-item action buttons.
         self.details_text = ft.Text("Select an item to see its provenance.",
                                     selectable=True, size=12)
-        self.open_artifact_btn = ft.TextButton(
-            "Open artefact", icon=ft.Icons.OPEN_IN_NEW, disabled=True,
+        _btn_pad = ft.Padding.symmetric(horizontal=10, vertical=6)
+        self.open_artifact_btn = ft.CupertinoButton(
+            content=ft.Text("Open artefact", size=13), icon=ft.Icons.OPEN_IN_NEW,
+            padding=_btn_pad, disabled=True,
             on_click=lambda _: self._open_artifact(self.selected_item))
-        self.open_sidecar_btn = ft.TextButton(
-            "Open sidecar", icon=ft.Icons.INFO_OUTLINE, disabled=True,
+        self.open_sidecar_btn = ft.CupertinoButton(
+            content=ft.Text("Open sidecar", size=13), icon=ft.Icons.INFO_OUTLINE,
+            padding=_btn_pad, disabled=True,
             on_click=lambda _: self._open_sidecar_panel(self.selected_item))
-        self.edit_sidecar_btn = ft.TextButton(
-            "Open sidecar in editor", icon=ft.Icons.EDIT, disabled=True,
+        self.edit_sidecar_btn = ft.CupertinoButton(
+            content=ft.Text("Open sidecar in editor", size=13), icon=ft.Icons.EDIT,
+            padding=_btn_pad, disabled=True,
             on_click=lambda _: self._open_sidecar_editor(self.selected_item))
         details_bar = ft.Container(
             padding=ft.Padding.symmetric(horizontal=10, vertical=6),
@@ -193,8 +213,9 @@ class Navigator:
             bgcolor=ft.Colors.with_opacity(0.04, ft.Colors.ON_SURFACE),
             content=ft.Column(expand=True, spacing=0, controls=[
                 ft.Row([self.sidecar_title, ft.Container(expand=True),
-                        ft.IconButton(ft.Icons.CLOSE, tooltip="Close",
-                                      on_click=self._close_sidecar_panel)],
+                        ft.CupertinoButton(icon=ft.Icons.CLOSE, tooltip="Close",
+                                           padding=6,
+                                           on_click=self._close_sidecar_panel)],
                        ),
                 ft.Divider(height=1),
                 ft.Container(expand=True, padding=10,
@@ -240,21 +261,17 @@ class Navigator:
             line2 += f"  {s.n_problems} ⚠"
         selected = self.current_session is not None and \
             s.run_id == self.current_session.run_id
-        tile = ft.Container(
-            border_radius=6, padding=8, ink=True,
-            bgcolor=ft.Colors.with_opacity(0.10, ft.Colors.PRIMARY)
-            if selected else None,
-            on_click=lambda _, sess=s: self._select_session(sess),
-            content=ft.Row(spacing=8, controls=[
-                ft.Icon(ft.Icons.FOLDER, color=ft.Colors.AMBER),
-                ft.Column(spacing=1, tight=True, expand=True, controls=[
-                    ft.Text(f"{s.run_id}   {s.description}".rstrip(),
-                            size=13, max_lines=1, overflow=ft.TextOverflow.ELLIPSIS),
-                    ft.Text(line2, size=11,
-                            color=ft.Colors.ON_SURFACE_VARIANT),
-                ]),
-            ]))
-        return tile
+        return ft.CupertinoListTile(
+            leading=ft.Icon(ft.Icons.FOLDER, color=ft.Colors.AMBER),
+            title=ft.Text(f"{s.run_id}   {s.description}".rstrip(),
+                          size=13, max_lines=1, overflow=ft.TextOverflow.ELLIPSIS),
+            subtitle=ft.Text(line2, size=11, color=ft.Colors.ON_SURFACE_VARIANT),
+            trailing=ft.CupertinoButton(
+                icon=ft.Icons.FOLDER_OPEN, icon_color=ft.Colors.PRIMARY,
+                padding=4, tooltip=f"Open in {osutil.file_manager_name()}",
+                on_click=lambda _, sess=s: osutil.open_path(sess.path)),
+            bgcolor=_SEL_BG if selected else None,
+            on_click=lambda _, sess=s: self._select_session(sess))
 
     def _select_session(self, session: "model.SessionInfo") -> None:
         self.current_session = session
@@ -311,52 +328,58 @@ class Navigator:
     # -- list view --------------------------------------------------------
 
     def _build_list(self) -> ft.Control:
-        rows: List[ft.DataRow] = []
+        rows: List[ft.Control] = []
         for item in self.items:
             created = (item.timestamp or "")[:19].replace("T", " ")
-            rows.append(self._data_row(item, item.name, created,
+            rows.append(self._list_row(item, item.name, created,
                                        item.status_label, is_sidecar=False))
-            if item.has_sidecar:
-                rows.append(self._data_row(
-                    item, "    ↳ " + item.name + SIDECAR_SUFFIX, created,
+            if item.has_sidecar and self.show_metadata:
+                rows.append(self._list_row(
+                    item, item.name + SIDECAR_SUFFIX, created,
                     "metadata", is_sidecar=True))
-        table = ft.DataTable(
-            expand=True,
-            columns=[ft.DataColumn(ft.Text("Name")),
-                     ft.DataColumn(ft.Text("Created")),
-                     ft.DataColumn(ft.Text("Status"))],
-            rows=rows)
-        return ft.Column([table], scroll=ft.ScrollMode.AUTO, expand=True)
+        return ft.Column(rows, scroll=ft.ScrollMode.AUTO, expand=True, spacing=0)
 
-    def _data_row(self, item, name, created, status, *, is_sidecar) -> ft.DataRow:
-        icon = (ft.Icon(ft.Icons.DATA_OBJECT, size=20,
-                        color=ft.Colors.BLUE_GREY_400)
-                if is_sidecar else compose_icon(item, 28))
-        row = ft.DataRow(
-            cells=[
-                ft.DataCell(ft.Row([icon, ft.Text(name)], spacing=8,
-                                   tight=True)),
-                ft.DataCell(ft.Text(created)),
-                ft.DataCell(ft.Text(status)),
-            ],
-            on_select_change=lambda _, it=item, sc=is_sidecar:
-                self._select(it, sc))
-        self._tiles.append((item, is_sidecar, row))
-        return row
+    def _list_row(self, item, name, created, status, *, is_sidecar) -> ft.Control:
+        # Nested sidecar rows are indented and carry a plain JSON icon; artefact
+        # rows show the composed status badge. iOS list styling: title + gray
+        # subtitle, with the status as "additional info" before the trailing.
+        if is_sidecar:
+            leading = ft.Container(
+                padding=ft.Padding.only(left=24),
+                content=ft.Icon(ft.Icons.DATA_OBJECT, size=22,
+                                color=ft.Colors.BLUE_GREY_400))
+        else:
+            leading = compose_icon(item, 30)
+        tile = ft.CupertinoListTile(
+            leading=leading,
+            title=ft.Text(name, size=13),
+            subtitle=ft.Text(created, size=11, color=ft.Colors.ON_SURFACE_VARIANT),
+            additional_info=ft.Text(status, size=12,
+                                    color=ft.Colors.ON_SURFACE_VARIANT),
+            on_click=lambda _, it=item, sc=is_sidecar: self._list_click(it, sc))
+        self._tiles.append((item, is_sidecar, tile))
+        return tile
+
+    def _list_click(self, item, is_sidecar) -> None:
+        """List rows select on click (opening a data file is left to the
+        action buttons); clicking a metadata row also reveals its sidecar."""
+        self._select(item, is_sidecar)
+        if is_sidecar:
+            self._open_sidecar_panel(item)
 
     # -- selection & activation ------------------------------------------
 
     def _select(self, item, is_sidecar) -> None:
         self.selected_item = item
         self.selected_is_sidecar = is_sidecar
-        # Highlight the matching grid tile (list rows manage their own state).
+        # Highlight the matching tile: grid tiles get a border, list rows a fill.
         for it, sc, ctrl in self._tiles:
-            if isinstance(ctrl, ft.Container):
-                on = it is item and sc == is_sidecar
+            on = it is item and sc == is_sidecar
+            if isinstance(ctrl, ft.CupertinoListTile):
+                ctrl.bgcolor = _SEL_BG if on else None
+            elif isinstance(ctrl, ft.Container):
                 ctrl.border = ft.Border.all(
                     2, ft.Colors.PRIMARY if on else ft.Colors.TRANSPARENT)
-            elif isinstance(ctrl, ft.DataRow):
-                ctrl.selected = it is item and sc == is_sidecar
         self._update_details()
         self.page.update()
 
@@ -382,13 +405,18 @@ class Navigator:
     # -- toolbar handlers -------------------------------------------------
 
     def _toggle_view(self, e) -> None:
-        self.list_view_mode = not self.list_view_mode
-        self.view_toggle.selected = self.list_view_mode
+        # Segment 0 = list, segment 1 = grid.
+        self.list_view_mode = self.view_toggle.selected_index == 0
         self._reload_items()
         self.page.update()
 
     def _toggle_verify(self, e) -> None:
         self.verify = bool(self.verify_check.value)
+        self._reload_items()
+        self.page.update()
+
+    def _toggle_metadata(self, e) -> None:
+        self.show_metadata = bool(self.metadata_check.value)
         self._reload_items()
         self.page.update()
 
