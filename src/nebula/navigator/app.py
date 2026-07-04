@@ -1,44 +1,41 @@
 """
-Nebula Navigator -- PySide6 view.
+Nebula Navigator -- Flet view.
 
 A Finder-like browser over an archive. The left column lists sessions (like
-folders); the main area shows one icon per logical artefact: the operating
-system's native file-type icon (via QFileIconProvider) with a small status
-badge in the corner reflecting the artefact ↔ sidecar pairing:
+folders); the main area shows one entry per logical artefact with a small
+status badge reflecting the artefact <-> sidecar pairing:
 
     file icon + sidecar_good.png    -- paired, no issues
     file icon + sidecar_warn.png    -- an issue (e.g. sha256 drift)
     file icon + sidecar_error.png   -- the sidecar is missing (orphan)
     missing_artefact.png + warn     -- the sidecar exists but the data file is gone
 
-This module imports PySide6; the model layer (navigator.model) does not, so
-it stays importable/testable without a GUI.
+Unlike the old PySide view there is no OS QFileIconProvider, so the base
+graphic is a Material file-type icon chosen by extension rather than the
+platform's native icon. This module imports Flet; the model layer
+(navigator.model) does not, so it stays importable/testable without a GUI.
 """
 
 from __future__ import annotations
 
 import sys
 from pathlib import Path
-from typing import Optional
+from typing import List, Optional
 
-from PySide6 import QtCore, QtGui, QtWidgets
+import flet as ft
 
 from nebula import manual
 from nebula.navigator import model, osutil
 from nebula.navigator.dialogs import ImportDialog
 from nebula.sidecar import SIDECAR_SUFFIX
 
-# Model item roles.
-_ROLE_ITEM = QtCore.Qt.UserRole            # the model.Item for this row's group
-_ROLE_IS_SIDECAR = QtCore.Qt.UserRole + 1  # True on the nested .meta.json row
-
 APP_NAME = "Nebula Navigator"
 
-_ICON_SIZE = 80
 _ASSET_DIR = Path(__file__).resolve().parent / "assets"
+_ICON_SIZE = 64
 
 # Badge overlaid on the file icon, chosen by the pair status. STRAY also
-# swaps the base image for missing_artefact.png (see _base_pixmap).
+# swaps the base image for missing_artefact.png (see _base_control).
 _BADGE_FOR_STATUS = {
     model.PAIRED: "sidecar_good.png",
     model.DRIFTED: "sidecar_warn.png",
@@ -47,416 +44,401 @@ _BADGE_FOR_STATUS = {
 }
 _MISSING_ARTEFACT = "missing_artefact.png"
 
-# Caches so a session full of same-type files doesn't re-query the OS or
-# re-decode the badge PNGs.
-_icon_provider = None
-_ext_icon_cache: dict = {}
-_asset_cache: dict = {}
+# Material file-type icon by extension. Falls back to a plain document icon.
+_EXT_ICON = {
+    ".csv": ft.Icons.TABLE_CHART, ".tsv": ft.Icons.TABLE_CHART,
+    ".json": ft.Icons.DATA_OBJECT, ".yaml": ft.Icons.DATA_OBJECT,
+    ".yml": ft.Icons.DATA_OBJECT,
+    ".txt": ft.Icons.DESCRIPTION, ".log": ft.Icons.DESCRIPTION,
+    ".md": ft.Icons.DESCRIPTION,
+    ".png": ft.Icons.IMAGE, ".jpg": ft.Icons.IMAGE, ".jpeg": ft.Icons.IMAGE,
+    ".gif": ft.Icons.IMAGE, ".bmp": ft.Icons.IMAGE, ".svg": ft.Icons.IMAGE,
+    ".pdf": ft.Icons.PICTURE_AS_PDF,
+    ".py": ft.Icons.CODE, ".ipynb": ft.Icons.CODE,
+    ".graf": ft.Icons.SHOW_CHART,
+    ".h5": ft.Icons.STORAGE, ".hdf5": ft.Icons.STORAGE, ".npy": ft.Icons.STORAGE,
+    ".npz": ft.Icons.STORAGE, ".mat": ft.Icons.STORAGE, ".dat": ft.Icons.STORAGE,
+    ".zip": ft.Icons.FOLDER_ZIP, ".tar": ft.Icons.FOLDER_ZIP,
+    ".gz": ft.Icons.FOLDER_ZIP,
+}
+_DEFAULT_FILE_ICON = ft.Icons.INSERT_DRIVE_FILE
 
 
-def _provider():
-    global _icon_provider
-    if _icon_provider is None:
-        # QFileIconProvider moved between QtWidgets and QtGui across Qt
-        # versions; take whichever this PySide6 build exposes.
-        cls = getattr(QtGui, "QFileIconProvider", None) \
-            or getattr(QtWidgets, "QFileIconProvider")
-        _icon_provider = cls()
-    return _icon_provider
+def _ext_icon(name: str) -> str:
+    return _EXT_ICON.get(Path(name).suffix.lower(), _DEFAULT_FILE_ICON)
 
 
-def _asset(name: str) -> QtGui.QPixmap:
-    pm = _asset_cache.get(name)
-    if pm is None:
-        pm = QtGui.QPixmap(str(_ASSET_DIR / name))
-        _asset_cache[name] = pm
-    return pm
-
-
-def _scaled(pm: QtGui.QPixmap, size: int) -> QtGui.QPixmap:
-    return pm.scaled(size, size, QtCore.Qt.KeepAspectRatio,
-                     QtCore.Qt.SmoothTransformation)
-
-
-def _generic_file_icon():
-    prov = _provider()
-    icon_type = getattr(type(prov), "IconType", None)
-    file_enum = (getattr(icon_type, "File", None) if icon_type is not None
-                 else getattr(type(prov), "File", None))
-    return prov.icon(file_enum) if file_enum is not None else QtGui.QIcon()
-
-
-def _file_icon_pixmap(name_or_path, size: int) -> QtGui.QPixmap:
-    """Native OS icon for a file *type*, cached by extension.
-
-    We deliberately look the icon up by a synthetic name carrying only the
-    extension (not the real file) so macOS returns the generic file-type
-    icon rather than a QuickLook thumbnail/preview of this particular
-    file's contents. Falls back to the plain document icon for types the OS
-    has nothing for, and scales up to fill the canvas (OS icons often come
-    back at 32px and would otherwise look tiny)."""
-    ext = Path(name_or_path).suffix.lower()
-    icon = _ext_icon_cache.get(ext)
-    if icon is None:
-        icon = _provider().icon(QtCore.QFileInfo("nebula-type-probe" + ext))
-        if icon.isNull() or icon.pixmap(size, size).isNull():
-            icon = _generic_file_icon()
-        _ext_icon_cache[ext] = icon
-    pm = icon.pixmap(size, size)
-    return _scaled(pm, size) if not pm.isNull() else pm
-
-
-def _base_pixmap(item: "model.Item", size: int) -> QtGui.QPixmap:
+def compose_icon(item: "model.Item", size: int = _ICON_SIZE) -> ft.Control:
+    """The file-type icon (or the missing-artefact graphic) with a corner
+    status badge overlaid, as a Flet Stack."""
     if item.status == model.STRAY:
-        # No data file to draw -- use the "missing artefact" graphic instead.
-        return _scaled(_asset(_MISSING_ARTEFACT), size)
-    # Use the real path when present so the OS can pick the exact icon; fall
-    # back to the name (extension is enough for a type icon).
-    return _file_icon_pixmap(item.artifact_path or item.name, size)
+        base = ft.Image(src=_MISSING_ARTEFACT, width=size, height=size,
+                        fit=ft.BoxFit.CONTAIN)
+    else:
+        base = ft.Icon(icon=_ext_icon(item.name), size=size,
+                       color=ft.Colors.BLUE_GREY_400)
+    layers: List[ft.Control] = [
+        ft.Container(content=base, alignment=ft.Alignment.CENTER,
+                     width=size, height=size),
+    ]
+    badge_name = _BADGE_FOR_STATUS.get(item.status)
+    if badge_name:
+        badge = round(size * 0.42)
+        layers.append(ft.Container(
+            content=ft.Image(src=badge_name, width=badge, height=badge),
+            alignment=ft.Alignment.BOTTOM_RIGHT, width=size, height=size))
+    return ft.Stack(controls=layers, width=size, height=size)
 
 
-def compose_icon(item: "model.Item", size: int = _ICON_SIZE) -> QtGui.QIcon:
-    """The OS file icon (or the missing-artefact graphic) with a corner
-    status badge overlaid."""
-    canvas = QtGui.QPixmap(size, size)
-    canvas.fill(QtCore.Qt.transparent)
-    p = QtGui.QPainter(canvas)
-    p.setRenderHint(QtGui.QPainter.SmoothPixmapTransform)
-    try:
-        base = _base_pixmap(item, size)
-        if not base.isNull():
-            p.drawPixmap((size - base.width()) // 2,
-                         (size - base.height()) // 2, base)
-        badge_name = _BADGE_FOR_STATUS.get(item.status)
-        if badge_name:
-            badge = _scaled(_asset(badge_name), round(size * 0.45))
-            p.drawPixmap(size - badge.width(), size - badge.height(), badge)
-    finally:
-        p.end()
-    return QtGui.QIcon(canvas)
-
-
-_sidecar_icon_cache = None
-
-
-def sidecar_icon() -> QtGui.QIcon:
-    """A plain JSON file icon (no status badge) for the nested sidecar row."""
-    global _sidecar_icon_cache
-    if _sidecar_icon_cache is None:
-        pm = _file_icon_pixmap("sidecar.json", _ICON_SIZE)
-        _sidecar_icon_cache = QtGui.QIcon(pm) if not pm.isNull() else QtGui.QIcon()
-    return _sidecar_icon_cache
-
-
-class Navigator(QtWidgets.QMainWindow):
-    def __init__(self, archive, archive_label: Optional[str] = None):
-        super().__init__()
+class Navigator:
+    def __init__(self, page: ft.Page, archive, archive_label: Optional[str] = None):
+        self.page = page
         # Resolve leniently (registered name or path) once, up front.
         self.archive_root, label = model.resolve(archive)
-        self.setWindowTitle(f"{APP_NAME} — {archive_label or label}")
-        self.resize(940, 620)
-        self.setAcceptDrops(True)  # drop files anywhere on the window to import
 
-        self.session_list = QtWidgets.QListWidget()
-        self.session_list.setMinimumWidth(240)
-        self.session_list.setMaximumWidth(340)
-        self.session_list.currentItemChanged.connect(lambda *_: self._reload_items())
-        self.session_list.setContextMenuPolicy(QtCore.Qt.CustomContextMenu)
-        self.session_list.customContextMenuRequested.connect(self._session_menu)
+        page.title = f"{APP_NAME} — {archive_label or label}"
+        page.window.width = 1000
+        page.window.height = 660
+        page.window.min_width = 720
+        page.window.min_height = 460
+        page.padding = 0
 
-        # One model, two views: a Finder-like icon grid and a sortable
-        # multi-column list. Both show the same status icon on the left.
-        self.item_model = QtGui.QStandardItemModel(self)
+        # --- shared state -------------------------------------------------
+        self.sessions: List[model.SessionInfo] = []
+        self.items: List[model.Item] = []
+        self.current_session: Optional[model.SessionInfo] = None
+        self.selected_item: Optional[model.Item] = None
+        self.selected_is_sidecar = False
+        self.list_view_mode = True   # list view is the default
+        self.verify = False
+        self._tiles: List[tuple] = []  # (item, is_sidecar, container) for grid/list
 
-        self.icon_view = QtWidgets.QListView()
-        self.icon_view.setModel(self.item_model)
-        self.icon_view.setViewMode(QtWidgets.QListView.IconMode)
-        self.icon_view.setIconSize(QtCore.QSize(_ICON_SIZE, _ICON_SIZE))
-        self.icon_view.setGridSize(QtCore.QSize(_ICON_SIZE + 60, _ICON_SIZE + 44))
-        self.icon_view.setResizeMode(QtWidgets.QListView.Adjust)
-        self.icon_view.setMovement(QtWidgets.QListView.Static)
-        self.icon_view.setWordWrap(True)
-        self.icon_view.setEditTriggers(QtWidgets.QAbstractItemView.NoEditTriggers)
+        # File picker used by the "Import files..." action.
+        self.file_picker = ft.FilePicker()
+        page.services.append(self.file_picker)
 
-        self.list_view = QtWidgets.QTreeView()
-        self.list_view.setModel(self.item_model)
-        self.list_view.setRootIsDecorated(True)   # show the artefact→sidecar nesting
-        self.list_view.setSortingEnabled(True)
-        self.list_view.setUniformRowHeights(True)
-        self.list_view.setAllColumnsShowFocus(True)
-        self.list_view.setIconSize(QtCore.QSize(28, 28))
-        self.list_view.setSelectionBehavior(QtWidgets.QAbstractItemView.SelectRows)
-        self.list_view.setEditTriggers(QtWidgets.QAbstractItemView.NoEditTriggers)
-        # Share a single selection across both views so toggling keeps context.
-        self.list_view.setSelectionModel(self.icon_view.selectionModel())
-
-        for view in (self.icon_view, self.list_view):
-            view.setContextMenuPolicy(QtCore.Qt.CustomContextMenu)
-            view.customContextMenuRequested.connect(
-                lambda pos, v=view: self._item_menu(v, pos))
-            view.doubleClicked.connect(self._on_item_activated)
-        self.icon_view.selectionModel().currentChanged.connect(self._on_current_changed)
-
-        self.view_stack = QtWidgets.QStackedWidget()
-        self.view_stack.addWidget(self.icon_view)   # index 0 = grid
-        self.view_stack.addWidget(self.list_view)    # index 1 = list
-
-        self.details = QtWidgets.QLabel("Select an item to see its provenance.")
-        self.details.setWordWrap(True)
-        self.details.setTextInteractionFlags(QtCore.Qt.TextSelectableByMouse)
-        self.details.setStyleSheet("color:#444; padding:6px;")
-        self.details.setMinimumHeight(64)
-        self.details.setAlignment(QtCore.Qt.AlignTop)
-
-        right = QtWidgets.QWidget()
-        rl = QtWidgets.QVBoxLayout(right)
-        rl.setContentsMargins(0, 0, 0, 0)
-        rl.addWidget(self.view_stack, 1)
-        rl.addWidget(self.details, 0)
-
-        splitter = QtWidgets.QSplitter()
-        splitter.addWidget(self.session_list)
-        splitter.addWidget(right)
-        splitter.setStretchFactor(1, 1)
-        self.setCentralWidget(splitter)
-
-        # Side panel for "Open sidecar": a dockable, closable pane showing the
-        # sidecar JSON. Hidden until the user opens a sidecar.
-        self.sidecar_panel = QtWidgets.QPlainTextEdit()
-        self.sidecar_panel.setReadOnly(True)
-        self.sidecar_panel.setFont(QtGui.QFontDatabase.systemFont(
-            QtGui.QFontDatabase.FixedFont))
-        self.sidecar_dock = QtWidgets.QDockWidget("Sidecar", self)
-        self.sidecar_dock.setWidget(self.sidecar_panel)
-        self.sidecar_dock.setAllowedAreas(QtCore.Qt.RightDockWidgetArea |
-                                          QtCore.Qt.LeftDockWidgetArea)
-        self.addDockWidget(QtCore.Qt.RightDockWidgetArea, self.sidecar_dock)
-        self.sidecar_dock.hide()
-
-        self._build_toolbar()
+        self._build()
         self.reload()
 
-    def _build_toolbar(self) -> None:
-        tb = self.addToolBar("main")
-        tb.setMovable(False)
-        refresh = QtGui.QAction("Refresh", self)
-        refresh.triggered.connect(self.reload)
-        tb.addAction(refresh)
-        tb.addSeparator()
+    # -- layout -----------------------------------------------------------
 
-        self.list_toggle = QtGui.QAction("List view", self)
-        self.list_toggle.setCheckable(True)
-        self.list_toggle.setToolTip("Switch between a sortable list and the icon grid")
-        self.list_toggle.toggled.connect(
-            lambda on: self.view_stack.setCurrentIndex(1 if on else 0))
-        tb.addAction(self.list_toggle)
-        self.list_toggle.setChecked(True)  # list view is the default
-        tb.addSeparator()
+    def _build(self) -> None:
+        self.session_list = ft.ListView(expand=True, spacing=2, padding=6)
+        session_panel = ft.Container(
+            width=280, bgcolor=ft.Colors.with_opacity(0.04, ft.Colors.ON_SURFACE),
+            content=ft.Column(spacing=0, controls=[
+                ft.Container(padding=10, content=ft.Text("Sessions",
+                             weight=ft.FontWeight.BOLD)),
+                self.session_list,
+            ]))
 
-        self.verify_cb = QtWidgets.QCheckBox("Verify checksums")
-        self.verify_cb.setToolTip("Re-hash each file to detect silent edits (slower)")
-        self.verify_cb.stateChanged.connect(lambda *_: self._reload_items())
-        tb.addWidget(self.verify_cb)
+        # Toolbar.
+        self.view_toggle = ft.IconButton(
+            icon=ft.Icons.VIEW_LIST, selected_icon=ft.Icons.GRID_VIEW,
+            tooltip="Switch between a sortable list and the icon grid",
+            selected=self.list_view_mode, on_click=self._toggle_view)
+        self.verify_check = ft.Checkbox(
+            label="Verify checksums", value=False,
+            tooltip="Re-hash each file to detect silent edits (slower)",
+            on_change=self._toggle_verify)
+        toolbar = ft.Row(spacing=6, controls=[
+            ft.IconButton(ft.Icons.REFRESH, tooltip="Refresh",
+                          on_click=lambda _: self.reload()),
+            self.view_toggle,
+            ft.VerticalDivider(),
+            self.verify_check,
+            ft.Container(expand=True),
+            ft.OutlinedButton("Import files…", icon=ft.Icons.UPLOAD_FILE,
+                              on_click=self._pick_import),
+        ])
 
-    # -- data loading -------------------------------------------------
+        # Main item area (grid or list swapped into this container).
+        self.item_area = ft.Container(expand=True, padding=8)
+
+        # Details bar with per-item action buttons.
+        self.details_text = ft.Text("Select an item to see its provenance.",
+                                    selectable=True, size=12)
+        self.open_artifact_btn = ft.TextButton(
+            "Open artefact", icon=ft.Icons.OPEN_IN_NEW, disabled=True,
+            on_click=lambda _: self._open_artifact(self.selected_item))
+        self.open_sidecar_btn = ft.TextButton(
+            "Open sidecar", icon=ft.Icons.INFO_OUTLINE, disabled=True,
+            on_click=lambda _: self._open_sidecar_panel(self.selected_item))
+        self.edit_sidecar_btn = ft.TextButton(
+            "Open sidecar in editor", icon=ft.Icons.EDIT, disabled=True,
+            on_click=lambda _: self._open_sidecar_editor(self.selected_item))
+        details_bar = ft.Container(
+            padding=ft.Padding.symmetric(horizontal=10, vertical=6),
+            bgcolor=ft.Colors.with_opacity(0.03, ft.Colors.ON_SURFACE),
+            content=ft.Column(spacing=2, tight=True, controls=[
+                ft.Row([self.open_artifact_btn, self.open_sidecar_btn,
+                        self.edit_sidecar_btn], spacing=4),
+                self.details_text,
+            ]))
+
+        main_panel = ft.Column(expand=True, spacing=0, controls=[
+            ft.Container(padding=8, content=toolbar),
+            ft.Divider(height=1),
+            self.item_area,
+            ft.Divider(height=1),
+            details_bar,
+        ])
+
+        # Sidecar side panel, hidden until "Open sidecar" is used.
+        self.sidecar_title = ft.Text("Sidecar", weight=ft.FontWeight.BOLD)
+        self.sidecar_text = ft.Text("", selectable=True, size=12,
+                                    font_family="monospace")
+        self.sidecar_panel = ft.Container(
+            width=340, visible=False,
+            bgcolor=ft.Colors.with_opacity(0.04, ft.Colors.ON_SURFACE),
+            content=ft.Column(expand=True, spacing=0, controls=[
+                ft.Row([self.sidecar_title, ft.Container(expand=True),
+                        ft.IconButton(ft.Icons.CLOSE, tooltip="Close",
+                                      on_click=self._close_sidecar_panel)],
+                       ),
+                ft.Divider(height=1),
+                ft.Container(expand=True, padding=10,
+                             content=ft.Column([self.sidecar_text],
+                                               scroll=ft.ScrollMode.AUTO,
+                                               expand=True)),
+            ]))
+
+        self.status_text = ft.Text("", size=11, color=ft.Colors.ON_SURFACE_VARIANT)
+
+        page = self.page
+        page.add(ft.Column(expand=True, spacing=0, controls=[
+            ft.Row(expand=True, spacing=0, controls=[
+                session_panel,
+                ft.VerticalDivider(width=1),
+                main_panel,
+                ft.VerticalDivider(width=1),
+                self.sidecar_panel,
+            ]),
+            ft.Container(padding=ft.Padding.symmetric(horizontal=10, vertical=4),
+                         content=self.status_text),
+        ]))
+
+    # -- data loading -----------------------------------------------------
 
     def reload(self) -> None:
-        self.session_list.clear()
-        folder = self.style().standardIcon(QtWidgets.QStyle.SP_DirIcon)
-        sessions = model.list_sessions(self.archive_root)
-        for s in sessions:
-            line2 = s.status
-            if s.held:
-                line2 += "  HELD"
-            if s.n_problems:
-                line2 += f"  {s.n_problems} ⚠"
-            item = QtWidgets.QListWidgetItem(
-                folder, f"{s.run_id}   {s.description}\n{line2}")
-            item.setData(QtCore.Qt.UserRole, s)
-            self.session_list.addItem(item)
-        if self.session_list.count():
-            self.session_list.setCurrentRow(0)
+        self.sessions = model.list_sessions(self.archive_root)
+        self.session_list.controls = [
+            self._session_tile(s) for s in self.sessions]
+        if self.sessions:
+            self._select_session(self.sessions[0])
         else:
-            self.item_model.clear()
-        self.statusBar().showMessage(f"{len(sessions)} session(s)")
+            self.current_session = None
+            self._reload_items()
+        self.status_text.value = f"{len(self.sessions)} session(s)"
+        self.page.update()
 
-    def _current_session(self) -> Optional["model.SessionInfo"]:
-        it = self.session_list.currentItem()
-        return it.data(QtCore.Qt.UserRole) if it else None
+    def _session_tile(self, s: "model.SessionInfo") -> ft.Control:
+        line2 = s.status
+        if s.held:
+            line2 += "  HELD"
+        if s.n_problems:
+            line2 += f"  {s.n_problems} ⚠"
+        selected = self.current_session is not None and \
+            s.run_id == self.current_session.run_id
+        tile = ft.Container(
+            border_radius=6, padding=8, ink=True,
+            bgcolor=ft.Colors.with_opacity(0.10, ft.Colors.PRIMARY)
+            if selected else None,
+            on_click=lambda _, sess=s: self._select_session(sess),
+            content=ft.Row(spacing=8, controls=[
+                ft.Icon(ft.Icons.FOLDER, color=ft.Colors.AMBER),
+                ft.Column(spacing=1, tight=True, expand=True, controls=[
+                    ft.Text(f"{s.run_id}   {s.description}".rstrip(),
+                            size=13, max_lines=1, overflow=ft.TextOverflow.ELLIPSIS),
+                    ft.Text(line2, size=11,
+                            color=ft.Colors.ON_SURFACE_VARIANT),
+                ]),
+            ]))
+        return tile
 
-    @staticmethod
-    def _row(icon, name, created, status, item, *, is_sidecar):
-        """Build a [name, created, status] row of QStandardItems."""
-        c_name = QtGui.QStandardItem(icon, name)
-        c_name.setData(item, _ROLE_ITEM)
-        c_name.setData(is_sidecar, _ROLE_IS_SIDECAR)
-        c_created = QtGui.QStandardItem(created)
-        c_status = QtGui.QStandardItem(status)
-        cells = [c_name, c_created, c_status]
-        for cell in cells:
-            cell.setEditable(False)
-        return cells
+    def _select_session(self, session: "model.SessionInfo") -> None:
+        self.current_session = session
+        # Repaint sidebar highlights.
+        self.session_list.controls = [
+            self._session_tile(s) for s in self.sessions]
+        self._reload_items()
+        self.page.update()
 
     def _reload_items(self) -> None:
-        self.item_model.clear()
-        self.item_model.setHorizontalHeaderLabels(["Name", "Created", "Status"])
-        session = self._current_session()
-        if session is None:
+        self.selected_item = None
+        self.selected_is_sidecar = False
+        self._tiles = []
+        self._update_details()
+        if self.current_session is None:
+            self.items = []
+            self.item_area.content = None
             return
-        items = model.list_items(
-            session.path, verify_checksums=self.verify_cb.isChecked())
-        root = self.item_model.invisibleRootItem()
-        for item in items:
+        self.items = model.list_items(
+            self.current_session.path, verify_checksums=self.verify)
+        self.item_area.content = (self._build_list() if self.list_view_mode
+                                  else self._build_grid())
+        problems = sum(1 for i in self.items if i.status != model.PAIRED)
+        self.status_text.value = (
+            f"{self.current_session.run_id}: {len(self.items)} item(s), "
+            f"{problems} problem(s)")
+
+    # -- grid view --------------------------------------------------------
+
+    def _build_grid(self) -> ft.Control:
+        grid = ft.GridView(expand=True, max_extent=150, spacing=10,
+                           run_spacing=10, child_aspect_ratio=0.85)
+        for item in self.items:
+            grid.controls.append(self._grid_tile(item))
+        return grid
+
+    def _grid_tile(self, item: "model.Item") -> ft.Control:
+        label = ft.Column(spacing=4, horizontal_alignment=ft.CrossAxisAlignment.CENTER,
+                          controls=[
+            compose_icon(item),
+            ft.Text(item.name, size=12, max_lines=2, text_align=ft.TextAlign.CENTER,
+                    overflow=ft.TextOverflow.ELLIPSIS),
+        ])
+        container = ft.Container(
+            padding=6, border_radius=8, tooltip=item.detail, ink=True,
+            border=ft.Border.all(2, ft.Colors.TRANSPARENT),
+            content=ft.GestureDetector(
+                content=label,
+                on_tap=lambda _, it=item: self._select(it, False),
+                on_double_tap=lambda _, it=item: self._activate(it, False)))
+        self._tiles.append((item, False, container))
+        return container
+
+    # -- list view --------------------------------------------------------
+
+    def _build_list(self) -> ft.Control:
+        rows: List[ft.DataRow] = []
+        for item in self.items:
             created = (item.timestamp or "")[:19].replace("T", " ")
-            parent = self._row(compose_icon(item), item.name, created,
-                               item.status_label, item, is_sidecar=False)
-            parent[0].setToolTip(item.detail)
-            root.appendRow(parent)
-            # Show the sidecar file explicitly, nested under its artefact.
+            rows.append(self._data_row(item, item.name, created,
+                                       item.status_label, is_sidecar=False))
             if item.has_sidecar:
-                child = self._row(sidecar_icon(), item.name + SIDECAR_SUFFIX,
-                                  created, "metadata", item, is_sidecar=True)
-                child[0].setToolTip(f"sidecar metadata for {item.name}")
-                parent[0].appendRow(child)
-        self.list_view.expandAll()
-        self.list_view.resizeColumnToContents(0)
-        if self.list_view.columnWidth(0) < 260:
-            self.list_view.setColumnWidth(0, 260)
-        self.list_view.resizeColumnToContents(1)
-        if self.list_view.columnWidth(1) < 160:
-            self.list_view.setColumnWidth(1, 160)
-        problems = sum(1 for i in items if i.status != model.PAIRED)
-        self.statusBar().showMessage(
-            f"{session.run_id}: {len(items)} item(s), {problems} problem(s)")
+                rows.append(self._data_row(
+                    item, "    ↳ " + item.name + SIDECAR_SUFFIX, created,
+                    "metadata", is_sidecar=True))
+        table = ft.DataTable(
+            expand=True,
+            columns=[ft.DataColumn(ft.Text("Name")),
+                     ft.DataColumn(ft.Text("Created")),
+                     ft.DataColumn(ft.Text("Status"))],
+            rows=rows)
+        return ft.Column([table], scroll=ft.ScrollMode.AUTO, expand=True)
 
-    def _item_at(self, index) -> Optional["model.Item"]:
-        cell = self.item_model.itemFromIndex(index.sibling(index.row(), 0))
-        return cell.data(_ROLE_ITEM) if cell is not None else None
+    def _data_row(self, item, name, created, status, *, is_sidecar) -> ft.DataRow:
+        icon = (ft.Icon(ft.Icons.DATA_OBJECT, size=20,
+                        color=ft.Colors.BLUE_GREY_400)
+                if is_sidecar else compose_icon(item, 28))
+        row = ft.DataRow(
+            cells=[
+                ft.DataCell(ft.Row([icon, ft.Text(name)], spacing=8,
+                                   tight=True)),
+                ft.DataCell(ft.Text(created)),
+                ft.DataCell(ft.Text(status)),
+            ],
+            on_select_change=lambda _, it=item, sc=is_sidecar:
+                self._select(it, sc))
+        self._tiles.append((item, is_sidecar, row))
+        return row
 
-    def _is_sidecar_row(self, index) -> bool:
-        cell = self.item_model.itemFromIndex(index.sibling(index.row(), 0))
-        return bool(cell.data(_ROLE_IS_SIDECAR)) if cell is not None else False
+    # -- selection & activation ------------------------------------------
 
-    def _on_current_changed(self, current, _previous) -> None:
-        if not current.isValid():
-            self.details.setText("")
-            return
-        item = self._item_at(current)
-        self.details.setText(item.detail if item else "")
+    def _select(self, item, is_sidecar) -> None:
+        self.selected_item = item
+        self.selected_is_sidecar = is_sidecar
+        # Highlight the matching grid tile (list rows manage their own state).
+        for it, sc, ctrl in self._tiles:
+            if isinstance(ctrl, ft.Container):
+                on = it is item and sc == is_sidecar
+                ctrl.border = ft.Border.all(
+                    2, ft.Colors.PRIMARY if on else ft.Colors.TRANSPARENT)
+            elif isinstance(ctrl, ft.DataRow):
+                ctrl.selected = it is item and sc == is_sidecar
+        self._update_details()
+        self.page.update()
 
-    def _on_item_activated(self, index) -> None:
-        item = self._item_at(index)
-        if item is None:
-            return
-        # The nested sidecar row opens the sidecar panel; the artefact row
-        # opens the data file (falling back to the sidecar if none exists).
-        if self._is_sidecar_row(index):
+    def _activate(self, item, is_sidecar) -> None:
+        """Double-click: sidecar row opens the panel; artefact row opens the
+        data file (falling back to the sidecar if none exists)."""
+        self._select(item, is_sidecar)
+        if is_sidecar:
             self._open_sidecar_panel(item)
         elif item.has_artifact:
             self._open_artifact(item)
         elif item.has_sidecar:
             self._open_sidecar_panel(item)
 
-    # -- context menus ------------------------------------------------
+    def _update_details(self) -> None:
+        item = self.selected_item
+        self.details_text.value = item.detail if item else \
+            "Select an item to see its provenance."
+        self.open_artifact_btn.disabled = not (item and item.has_artifact)
+        self.open_sidecar_btn.disabled = not (item and item.has_sidecar)
+        self.edit_sidecar_btn.disabled = not (item and item.has_sidecar)
 
-    def _session_menu(self, pos) -> None:
-        list_item = self.session_list.itemAt(pos)
-        if list_item is None:
-            return
-        session = list_item.data(QtCore.Qt.UserRole)
-        menu = QtWidgets.QMenu(self)
-        act = menu.addAction(f"Open in {osutil.file_manager_name()}")
-        act.triggered.connect(lambda: self._open_session_folder(session))
-        menu.exec(self.session_list.viewport().mapToGlobal(pos))
+    # -- toolbar handlers -------------------------------------------------
 
-    def _item_menu(self, view, pos) -> None:
-        index = view.indexAt(pos)
-        if not index.isValid():
-            return
-        item = self._item_at(index)
-        if item is None:
-            return
-        menu = QtWidgets.QMenu(self)
+    def _toggle_view(self, e) -> None:
+        self.list_view_mode = not self.list_view_mode
+        self.view_toggle.selected = self.list_view_mode
+        self._reload_items()
+        self.page.update()
 
-        a_open = menu.addAction("Open artefact")
-        a_open.setEnabled(item.has_artifact)
-        a_open.triggered.connect(lambda: self._open_artifact(item))
+    def _toggle_verify(self, e) -> None:
+        self.verify = bool(self.verify_check.value)
+        self._reload_items()
+        self.page.update()
 
-        a_side = menu.addAction("Open sidecar")
-        a_side.setEnabled(item.has_sidecar)
-        a_side.triggered.connect(lambda: self._open_sidecar_panel(item))
-
-        a_edit = menu.addAction("Open sidecar in editor")
-        a_edit.setEnabled(item.has_sidecar)
-        a_edit.triggered.connect(lambda: self._open_sidecar_editor(item))
-
-        menu.exec(view.viewport().mapToGlobal(pos))
-
-    # -- actions (also the unit-test entry points) --------------------
-
-    def _open_session_folder(self, session) -> None:
-        osutil.open_path(session.path)
+    # -- actions ----------------------------------------------------------
 
     def _open_artifact(self, item) -> None:
-        if item.artifact_path is not None:
+        if item is not None and item.artifact_path is not None:
             osutil.open_path(item.artifact_path)
 
     def _open_sidecar_editor(self, item) -> None:
-        if item.sidecar_path is not None:
+        if item is not None and item.sidecar_path is not None:
             osutil.open_path(item.sidecar_path)
 
     def _open_sidecar_panel(self, item) -> None:
-        if item.sidecar_path is None:
+        if item is None or item.sidecar_path is None:
             return
-        self.sidecar_panel.setPlainText(model.sidecar_display(item.sidecar_path))
-        self.sidecar_dock.setWindowTitle(f"Sidecar — {item.name}")
-        self.sidecar_dock.show()
-        self.sidecar_dock.raise_()
+        self.sidecar_text.value = model.sidecar_display(item.sidecar_path)
+        self.sidecar_title.value = f"Sidecar — {item.name}"
+        self.sidecar_panel.visible = True
+        self.page.update()
 
-    # -- drag & drop import ------------------------------------------
+    def _close_sidecar_panel(self, e) -> None:
+        self.sidecar_panel.visible = False
+        self.page.update()
 
-    @staticmethod
-    def _paths_from_mime(mime) -> "list[Path]":
-        """The local, existing regular files in a drag's mime data."""
-        paths = []
-        if mime.hasUrls():
-            for url in mime.urls():
-                local = url.toLocalFile()
-                if local and Path(local).is_file():
-                    paths.append(Path(local))
-        return paths
+    # -- drag & drop / file-picker import --------------------------------
 
-    def dragEnterEvent(self, event) -> None:
-        if self._paths_from_mime(event.mimeData()):
-            event.acceptProposedAction()
-
-    def dragMoveEvent(self, event) -> None:
-        if self._paths_from_mime(event.mimeData()):
-            event.acceptProposedAction()
-
-    def dropEvent(self, event) -> None:
-        paths = self._paths_from_mime(event.mimeData())
-        if not paths:
-            return
-        event.acceptProposedAction()
-        self._import_files(paths)
+    async def _pick_import(self, e) -> None:
+        result = await self.file_picker.pick_files(
+            dialog_title="Choose files to import", allow_multiple=True)
+        paths = [Path(f.path) for f in (result or [])
+                 if f.path and Path(f.path).is_file()]
+        if paths:
+            self._import_files(paths)
 
     def _import_files(self, paths) -> None:
         sessions = model.importable_sessions(self.archive_root)
         frozen = model.frozen_sessions(self.archive_root)
-        current = self._current_session()
         preselect = None
-        if current is not None and any(s.run_id == current.run_id for s in sessions):
-            preselect = current.run_id
-        dialog = ImportDialog(paths, sessions, frozen_sessions=frozen,
-                              preselect_run_id=preselect, parent=self)
-        if dialog.exec() != QtWidgets.QDialog.Accepted:
-            return
-        self._perform_import(paths, dialog.spec())
+        if self.current_session is not None and any(
+                s.run_id == self.current_session.run_id for s in sessions):
+            preselect = self.current_session.run_id
+        ImportDialog(
+            self.page, paths, sessions, frozen_sessions=frozen,
+            preselect_run_id=preselect,
+            on_submit=lambda spec: self._perform_import(paths, spec)).show()
 
-    def _perform_import(self, paths, spec) -> None:
+    def _perform_import(self, paths, spec) -> Optional[str]:
         """Run the actual import for a confirmed ImportSpec, then refresh and
-        jump to the target session. Returns the target run_id (or None)."""
+        jump to the target session."""
         try:
             if spec.mode == "new":
                 session = manual.import_new(
@@ -471,27 +453,26 @@ class Navigator(QtWidgets.QMainWindow):
                         origin=spec.origin_or_none,
                         allow_frozen=spec.allow_frozen)
                 target = spec.run_id
-        except (FileExistsError, FileNotFoundError, RuntimeError) as e:
-            QtWidgets.QMessageBox.warning(self, "Import failed", str(e))
+        except (FileExistsError, FileNotFoundError, RuntimeError) as exc:
+            self._toast(f"Import failed: {exc}")
             return None
         self.reload()
-        self._select_session(target)
+        for s in self.sessions:
+            if s.run_id == target:
+                self._select_session(s)
+                break
         return target
 
-    def _select_session(self, run_id) -> None:
-        for row in range(self.session_list.count()):
-            s = self.session_list.item(row).data(QtCore.Qt.UserRole)
-            if s is not None and s.run_id == run_id:
-                self.session_list.setCurrentRow(row)
-                return
+    def _toast(self, message: str) -> None:
+        self.page.show_dialog(ft.SnackBar(content=ft.Text(message)))
 
 
 def launch(archive, archive_label: Optional[str] = None) -> int:
-    app = QtWidgets.QApplication.instance() or QtWidgets.QApplication(sys.argv)
-    app.setApplicationName(APP_NAME)
-    win = Navigator(archive, archive_label=archive_label)
-    win.show()
-    return app.exec()
+    def main(page: ft.Page) -> None:
+        Navigator(page, archive, archive_label=archive_label)
+
+    ft.run(main, assets_dir=str(_ASSET_DIR))
+    return 0
 
 
 def main() -> int:
