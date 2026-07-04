@@ -13,11 +13,18 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-gui = ["PyQt5>=5.15"]
+gui = ["PyQt5>=5.15"]            # legacy session picker (nebula.picker)
+navigator = ["PySide6>=6.5"]    # Nebula Navigator GUI (nebula.navigator)
 dev = ["pytest>=7.0"]
 
 [project.scripts]
 nebula = "nebula.cli:main"
 
+[project.gui-scripts]
+nebula-navigator = "nebula.navigator.app:main"
+
 [tool.setuptools.packages.find]
 where = ["src"]
+
+[tool.setuptools.package-data]
+"nebula.navigator" = ["assets/*.png"]

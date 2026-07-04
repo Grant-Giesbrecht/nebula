@@ -144,6 +144,23 @@ All of these are also available programmatically: `nebula.import_file`,
 `import_new`, `adopt_file`, `delete_file`, `replace_file`, `reseal`,
 `delete_session`, `find_orphan_files`, and `nebula.check_archive`.
 
+### Nebula Navigator (GUI)
+
+A Finder-like browser over an archive. Instead of raw files it shows one
+*box* per logical artefact, with **DATA** and **META** slots so a missing
+half of the pair (an orphan file or a stray sidecar) is obvious at a glance.
+The left column lists sessions and flags any with problems.
+
+```
+pip install nebula-archive[navigator]     # PySide6
+nebula-navigator <archive-name-or-path>   # or: python -m nebula.navigator <archive>
+```
+
+The Navigator uses `nebula` purely as a library (`nebula.navigator.model`
+has no GUI dependency), so it can be lifted into its own repo and packaged
+as a macOS/Windows app. This first version is read-only; edit actions
+(reconcile, reseal, replace, delete) hang off the same manual-ops API.
+
 Rebuilding the index and checking for crashed/abandoned sessions:
 
 ```python
