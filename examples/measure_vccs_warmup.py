@@ -1,6 +1,6 @@
 from constellation.all import *
 from inputimeout import inputimeout, TimeoutOccurred
-from stardust.sandbox import dict_to_tome
+from stardust.tome import dict_to_tome
 from stardust.algorithm import randrange
 from pathlib import Path
 import nebula
