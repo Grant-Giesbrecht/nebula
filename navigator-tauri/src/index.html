@@ -1,0 +1,111 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Nebula Navigator</title>
+  <link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+  <div class="app">
+    <div class="titlebar">
+      <div class="title" id="wtitle">Nebula Navigator</div>
+      <button class="theme-toggle" id="themeBtn">◐ Theme</button>
+    </div>
+
+    <div class="body">
+      <aside class="rail">
+        <div class="rail-head">
+          <span>Sessions</span>
+          <span class="open-link" id="openArchive">Open archive…</span>
+        </div>
+        <div class="session-list" id="sessionList"></div>
+      </aside>
+
+      <section class="main">
+        <div class="toolbar">
+          <button class="tbtn" id="refresh" title="Refresh">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12a9 9 0 1 1-2.64-6.36"/><path d="M21 4v5h-5"/></svg>
+          </button>
+          <div class="seg">
+            <button class="tbtn on" id="viewList" title="List view">
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><line x1="8" y1="6" x2="21" y2="6"/><line x1="8" y1="12" x2="21" y2="12"/><line x1="8" y1="18" x2="21" y2="18"/><line x1="3" y1="6" x2="3.01" y2="6"/><line x1="3" y1="12" x2="3.01" y2="12"/><line x1="3" y1="18" x2="3.01" y2="18"/></svg>
+            </button>
+            <button class="tbtn" id="viewGrid" title="Grid view">
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/><rect x="14" y="14" width="7" height="7" rx="1"/></svg>
+            </button>
+          </div>
+          <div class="vdiv"></div>
+          <label class="check"><input type="checkbox" id="verify" /> Verify checksums</label>
+          <label class="check"><input type="checkbox" id="meta" checked /> Show metadata</label>
+          <div class="spacer"></div>
+          <button class="btn-primary" id="importBtn">
+            <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>
+            Import files…
+          </button>
+        </div>
+
+        <div class="item-area" id="itemArea"><div class="empty">Open an archive to begin.</div></div>
+
+        <div class="details">
+          <div class="det-actions">
+            <button class="lbtn" id="openArt" disabled>
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/><polyline points="15 3 21 3 21 9"/><line x1="10" y1="14" x2="21" y2="3"/></svg>
+              Open artefact
+            </button>
+            <button class="lbtn" id="openSc" disabled>
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><line x1="12" y1="16" x2="12" y2="12"/><line x1="12" y1="8" x2="12.01" y2="8"/></svg>
+              Open sidecar
+            </button>
+            <button class="lbtn" id="editSc" disabled>
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/><path d="M18.5 2.5a2.12 2.12 0 0 1 3 3L12 15l-4 1 1-4Z"/></svg>
+              Open sidecar in editor
+            </button>
+          </div>
+          <div class="det-text" id="detText">Select an item to see its provenance.</div>
+        </div>
+      </section>
+
+      <aside class="sidecar hidden" id="scPanel">
+        <div class="sc-head">
+          <span class="t" id="scTitle">Sidecar</span>
+          <button class="sc-close" id="scClose">✕</button>
+        </div>
+        <div class="sc-body"><pre id="scBody"></pre></div>
+      </aside>
+    </div>
+
+    <div class="statusbar" id="statusbar">No archive open</div>
+  </div>
+
+  <div class="scrim" id="scrim">
+    <div class="dialog" role="dialog" aria-modal="true" aria-labelledby="dlgHead">
+      <div class="dlg-head" id="dlgHead">Import files</div>
+      <div class="dlg-body">
+        <div class="filelist" id="dlgFiles"></div>
+        <div>
+          <label class="radio"><input type="radio" name="mode" value="existing" id="modeExisting" checked /> Add to existing session</label>
+          <div class="field indent" style="margin-top:6px">
+            <label>Session</label>
+            <select id="dlgSession"></select>
+          </div>
+          <label class="radio" style="margin-top:8px"><input type="radio" name="mode" value="new" id="modeNew" /> Create a new session</label>
+          <div class="field indent" id="newFields" style="margin-top:6px; gap:8px; display:none">
+            <div class="field"><label>Tags</label><input id="dlgTags" placeholder="comma-separated, optional" /></div>
+            <div class="field"><label>Description</label><input id="dlgDesc" placeholder="session description, optional" /></div>
+          </div>
+        </div>
+        <div class="field"><label>Origin</label><input id="dlgOrigin" placeholder="where did these come from? e.g. emailed by Jane" /></div>
+      </div>
+      <div class="dlg-actions">
+        <button class="dbtn ghost" id="dlgCancel">Cancel</button>
+        <button class="dbtn fill" id="dlgImport">Import</button>
+      </div>
+    </div>
+  </div>
+
+  <div class="toast" id="toast"></div>
+
+  <script src="main.js"></script>
+</body>
+</html>

@@ -1,0 +1,9 @@
+# Node / Tauri CLI
+node_modules/
+
+# Rust build output
+src-tauri/target/
+src-tauri/gen/
+
+# OS
+.DS_Store

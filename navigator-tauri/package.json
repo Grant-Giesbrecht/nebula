@@ -1,0 +1,14 @@
+{
+  "name": "nebula-navigator-tauri",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Tauri front-end for Nebula Navigator (static frontend, Python backend sidecar)",
+  "scripts": {
+    "dev": "tauri dev",
+    "build": "tauri build",
+    "tauri": "tauri"
+  },
+  "devDependencies": {
+    "@tauri-apps/cli": "^2"
+  }
+}
