@@ -151,15 +151,27 @@ A Finder-like browser over an archive. Instead of raw files it shows one
 half of the pair (an orphan file or a stray sidecar) is obvious at a glance.
 The left column lists sessions and flags any with problems.
 
+The Navigator is a **native desktop app** built with [Tauri](https://tauri.app),
+living in [`navigator-tauri/`](navigator-tauri/README.md). It is not a Python
+entry point: it ships as a self-contained `.app`/`.dmg` with a frozen Python
+bridge inside, so the machine running it needs neither Python nor `nebula`
+installed.
+
 ```
-pip install nebula-archive[navigator]     # PySide6
-nebula-navigator <archive-name-or-path>   # or: python -m nebula.navigator <archive>
+cd navigator-tauri
+./build-sidecar.sh     # freeze the Python bridge (needs pyinstaller)
+npm run build          # produces .app / .dmg
 ```
 
-The Navigator uses `nebula` purely as a library (`nebula.navigator.model`
-has no GUI dependency), so it can be lifted into its own repo and packaged
-as a macOS/Windows app. This first version is read-only; edit actions
-(reconcile, reseal, replace, delete) hang off the same manual-ops API.
+See [`navigator-tauri/README.md`](navigator-tauri/README.md) for the
+development loop and prerequisites.
+
+The GUI uses `nebula` purely as a library: `nebula.navigator.model` is the
+toolkit-independent data layer, and `nebula.navigator.api` exposes it over
+line-delimited JSON on stdin/stdout. Neither imports a GUI toolkit, so both
+stay unit-testable without a display, and the archive logic is shared with
+the CLI rather than duplicated. Edit actions (reconcile, reseal, replace,
+delete) hang off the same manual-ops API.
 
 Rebuilding the index and checking for crashed/abandoned sessions:
 
@@ -246,6 +258,6 @@ Core session/sidecar/ref/index/graph logic is implemented and covered by
 against a real repo, index rebuild, single- and cross-archive graph
 traversal, registry-name resolution, registry persistence). The CLI has
 been smoke-tested end to end against a real archive, including the new
-str-name-vs-Path resolution. The picker is functional but not yet
-battle-tested against a real Qt event loop.
+str-name-vs-Path resolution. The interactive terminal session picker
+(`nebula.session_select`) is covered by its own tests.
 

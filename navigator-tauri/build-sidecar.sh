@@ -39,10 +39,6 @@ echo "==> freezing $NAME for $TRIPLE using $PYTHON"
 #   on it being pip-installed for this interpreter.
 # --hidden-import yaml: nebula's only runtime dependency; it is imported
 #   lazily in places PyInstaller's static analysis does not follow.
-# --exclude-module flet*: nebula.navigator.__init__.launch() imports the Flet
-#   view lazily, but PyInstaller follows function-body imports and would
-#   otherwise embed the whole Flet.app. The bridge never calls launch(), and
-#   dragging Flet in both bloats the binary and fails to package.
 "$PYTHON" -m PyInstaller \
     --onefile \
     --console \
@@ -51,9 +47,6 @@ echo "==> freezing $NAME for $TRIPLE using $PYTHON"
     --name "$NAME" \
     --paths ../src \
     --hidden-import yaml \
-    --exclude-module flet \
-    --exclude-module flet_desktop \
-    --exclude-module flet_core \
     --distpath build/sidecar/dist \
     --workpath build/sidecar/work \
     --specpath build/sidecar \

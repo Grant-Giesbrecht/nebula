@@ -132,7 +132,18 @@ impl Bridge {
         if let Some(sidecar) = sidecar_path() {
             let path = sidecar.to_string_lossy().to_string();
             match Bridge::spawn_with(&path, &[]) {
-                Ok(bridge) => return Ok(bridge),
+                Ok(bridge) => {
+                    // Worth saying out loud: under `tauri dev` this frozen
+                    // binary shadows the working tree, so edits to
+                    // src/nebula/*.py do nothing until build-sidecar.sh is
+                    // re-run. Set NEBULA_PYTHON to develop against live code.
+                    eprintln!(
+                        "[bridge] using bundled sidecar: {path}\n\
+                         [bridge] (frozen -- Python source edits require ./build-sidecar.sh, \
+                         or set NEBULA_PYTHON to use live code)"
+                    );
+                    return Ok(bridge);
+                }
                 Err(e) => tried.push(format!("{path} (bundled sidecar) -- {e}")),
             }
         }
