@@ -1,5 +1,9 @@
 # Node / Tauri CLI
-node_modules/
+node_modules
+
+# Frozen sidecar: a build artefact, rebuilt by ./build-sidecar.sh
+build/
+src-tauri/binaries//
 
 # Rust build output
 src-tauri/target/

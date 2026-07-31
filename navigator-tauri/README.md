@@ -67,55 +67,96 @@ On first launch, click **“Open archive…”** (top-left) and pick an archive
 directory, or a registered archive by path. The choice is remembered in
 `localStorage` for next time.
 
-### Which Python gets used
+### ⚠️ Gotcha: once you have built a sidecar, `npm run dev` stops using your live Python
 
-The core does not just run `python3` -- a bundled `.app` launched from
-Finder gets a minimal `PATH` (`/usr/bin:/bin:/usr/sbin:/sbin`) where
-`python3` is Apple's 3.9 stub, which has no `nebula`. Instead it probes a
-list of candidates and picks **the first one that can actually
-`import nebula.navigator.api`**:
+`tauri dev` copies `src-tauri/binaries/nebula-bridge-<triple>` into
+`target/debug/` alongside the dev executable, exactly as it does for a
+release bundle. The core finds it there and uses it. So after the first
+`./build-sidecar.sh`, **`npm run dev` runs the frozen bridge, and your edits
+to `src/nebula/**.py` have no effect on the running app** no matter how many
+times you restart it. The symptom is backend changes that appear to do
+nothing.
 
-1. `$NEBULA_PYTHON`, if set (used exclusively -- no fallback)
-2. `python3` from `PATH` (so an activated venv wins in a terminal)
-3. `/Library/Frameworks/Python.framework/Versions/*/bin/python3`
-4. `/opt/homebrew/bin/python3`, `/usr/local/bin/python3`, `/usr/bin/python3`
-
-To pin an interpreter:
+Override it while working on Python — this takes priority over the sidecar:
 
 ```
-NEBULA_PYTHON=/path/to/.venv/bin/python npm run dev
+NEBULA_PYTHON=python3 npm run dev
 ```
 
-If no candidate has `nebula`, the window still opens and reports the list
-it tried; Python's stderr is drained and appended to bridge errors, so a
-traceback in the child shows up in the UI instead of a bare "Broken pipe".
+That reads `src/nebula/` live (assuming an editable `pip install -e .`), so
+Python edits apply on app restart with no re-freeze. Reasonable defaults:
+
+| What you're changing | Command |
+|---|---|
+| Python backend | `NEBULA_PYTHON=python3 npm run dev` |
+| Rust core or frontend | `npm run dev` (uses whatever sidecar is on disk) |
+| Testing the frozen bridge as shipped | `./build-sidecar.sh && npm run dev` |
+| Building the distributable | `./build-sidecar.sh && npm run build` |
+
+To opt out entirely for a while, delete `src-tauri/binaries/` — the core
+falls back to a system Python, and `npm run build` will tell you the
+sidecar is missing.
+
+### Which bridge gets used
+
+`Bridge::spawn()` tries, in order:
+
+1. **`$NEBULA_PYTHON`**, if set — used exclusively, no fallback.
+2. **The bundled sidecar**, `nebula-bridge` next to the running executable
+   (`Contents/MacOS/` in an `.app`, `target/<profile>/` under `tauri dev`).
+3. **A system Python** that can actually `import nebula.navigator.api`,
+   probed in this order:
+   1. `python3` from `PATH` (so an activated venv wins in a terminal)
+   2. `/Library/Frameworks/Python.framework/Versions/*/bin/python3`
+   3. `/opt/homebrew/bin/python3`, `/usr/local/bin/python3`, `/usr/bin/python3`
+
+Step 3 probes rather than trusting `PATH` because a bundled `.app` launched
+from Finder gets a minimal `PATH` (`/usr/bin:/bin:/usr/sbin:/sbin`) where
+`python3` is Apple's 3.9 stub, which has no `nebula`.
+
+Whatever is chosen must answer a `ping` handshake before startup completes,
+so a broken bridge fails immediately with a real message instead of
+surfacing later as "Broken pipe". If nothing works the window still opens
+and reports every candidate it tried; Python's stderr is drained and
+appended to bridge errors, so a traceback in the child reaches the UI.
 
 ## Build a distributable
 
+The shipped app is **fully self-contained** — it carries its own Python, so
+the target machine needs neither Python nor `nebula` installed. That takes
+two steps, in order:
+
 ```
-npm run build        # produces a .app/.dmg (macOS), .msi (Windows), etc.
+pip install pyinstaller     # one-time
+./build-sidecar.sh          # freeze the Python bridge (~9 MB, ~30 s)
+npm run build               # produces .app / .dmg
 ```
 
-## Packaging note (the one real gap)
+`build-sidecar.sh` runs PyInstaller over `sidecar/bridge.py` and installs
+the result as `src-tauri/binaries/nebula-bridge-<target-triple>`. The triple
+suffix is Tauri's `externalBin` convention (it lets one bundle carry
+per-platform binaries); Tauri strips it when copying into the app, landing
+it at `Nebula Navigator.app/Contents/MacOS/nebula-bridge` — right beside the
+main executable, which is where `sidecar_path()` in `main.rs` looks.
 
-`npm run build` bundles the **webview + Rust binary**, but the shipped app
-still calls whatever `python3` (or `$NEBULA_PYTHON`) resolves to at runtime.
-For a self-contained app you have two options:
+Re-run `build-sidecar.sh` whenever the Python changes; `npm run build` alone
+will happily re-ship a stale frozen bridge. The same staleness trap applies
+to `npm run dev` — see [the gotcha above](#️-gotcha-once-you-have-built-a-sidecar-npm-run-dev-stops-using-your-live-python).
 
-1. **Freeze the bridge** with PyInstaller into a single executable and ship
-   it as a real Tauri sidecar binary:
-   ```
-   pip install pyinstaller
-   pyinstaller --onefile --name nebula-bridge \
-       -p ../src -c src/nebula/navigator/api.py
-   ```
-   Then register it under `bundle.externalBin` in `tauri.conf.json` and
-   change `Bridge::spawn` to launch the sidecar instead of `python3 -m …`.
-2. **Require a Python** on the target machine (fine for a lab of known
-   workstations) — document `pip install nebula-archive` as a prerequisite.
+### Notes on the frozen build
 
-Option 1 is the path to a "download and run" app; option 2 is zero extra
-work if every user already has the `nebula` CLI.
+- **Flet is excluded deliberately.** `nebula.navigator.__init__.launch()`
+  imports the Flet view lazily, but PyInstaller follows function-body
+  imports and would otherwise try to embed all of `Flet.app` (which fails
+  to package outright). The bridge never calls `launch()`.
+- **The frozen bridge is architecture-specific.** The triple in the filename
+  is `rustc`'s host triple; an arm64 build will not run on an Intel Mac. For
+  a universal app, build the sidecar for both triples on the matching
+  hardware and ship both files.
+- **Gatekeeper.** The bundle is ad-hoc signed only. On *your* machine it
+  runs fine; a `.dmg` handed to someone else will be quarantined until it is
+  signed with a Developer ID and notarized. That is a code-signing step,
+  separate from bundling.
 
 ## The bridge protocol (for reference)
 

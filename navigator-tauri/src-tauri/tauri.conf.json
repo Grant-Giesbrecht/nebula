@@ -25,6 +25,9 @@
   "bundle": {
     "active": true,
     "targets": "all",
+    "externalBin": [
+      "binaries/nebula-bridge"
+    ],
     "icon": [
       "icons/icon.png"
     ]

@@ -21,6 +21,20 @@ use tauri::State;
 /// How many trailing stderr lines from Python we keep for error reports.
 const STDERR_KEEP: usize = 40;
 
+/// The frozen bridge, if this build has one.
+///
+/// `bundle.externalBin` ships `binaries/nebula-bridge-<triple>` and Tauri
+/// copies it next to the main executable with the triple stripped -- inside
+/// `Foo.app/Contents/MacOS/` for a bundle, or `target/<profile>/` under
+/// `tauri dev`. When it is there we use it and never touch the system
+/// Python at all; when it isn't (a dev checkout where build-sidecar.sh
+/// hasn't been run) we fall back to a real interpreter.
+fn sidecar_path() -> Option<std::path::PathBuf> {
+    let exe = std::env::current_exe().ok()?;
+    let candidate = exe.parent()?.join("nebula-bridge");
+    candidate.is_file().then_some(candidate)
+}
+
 /// Interpreters to try, in order, when NEBULA_PYTHON isn't set.
 ///
 /// A bundled .app launched from Finder does NOT inherit the shell's PATH --
@@ -103,28 +117,46 @@ struct Bridge {
 
 impl Bridge {
     fn spawn() -> Result<Self, String> {
-        let candidates = candidate_pythons();
         let mut tried: Vec<String> = Vec::new();
 
-        for python in &candidates {
-            if can_import_nebula(python) {
-                return Bridge::spawn_with(python);
+        // An explicit NEBULA_PYTHON wins over everything, including the
+        // frozen sidecar -- that is the point of setting it.
+        let explicit = std::env::var("NEBULA_PYTHON")
+            .ok()
+            .filter(|v| !v.trim().is_empty());
+        if let Some(python) = explicit {
+            return Bridge::spawn_with(&python, &["-m", "nebula.navigator.api"]);
+        }
+
+        // Preferred path in a shipped app: self-contained, no system Python.
+        if let Some(sidecar) = sidecar_path() {
+            let path = sidecar.to_string_lossy().to_string();
+            match Bridge::spawn_with(&path, &[]) {
+                Ok(bridge) => return Ok(bridge),
+                Err(e) => tried.push(format!("{path} (bundled sidecar) -- {e}")),
             }
-            tried.push(python.clone());
+        }
+
+        for python in candidate_pythons() {
+            if can_import_nebula(&python) {
+                return Bridge::spawn_with(&python, &["-m", "nebula.navigator.api"]);
+            }
+            tried.push(format!("{python} (no `nebula` package)"));
         }
 
         Err(format!(
-            "no Python interpreter with the `nebula` package was found.\n\n\
-             Tried: {}\n\n\
-             Install it for one of those interpreters (`pip install -e .` in \
-             the repo root), or set NEBULA_PYTHON to the interpreter that has it.",
-            tried.join(", ")
+            "could not start the Nebula bridge.\n\nTried:\n  {}\n\n\
+             This build has no bundled sidecar, and no Python on this machine \
+             has the `nebula` package. Either run ./build-sidecar.sh and rebuild, \
+             or `pip install -e .` in the repo root, or set NEBULA_PYTHON.",
+            tried.join("\n  ")
         ))
     }
 
-    fn spawn_with(python: &str) -> Result<Self, String> {
-        let mut child = Command::new(python)
-            .args(["-m", "nebula.navigator.api"])
+    fn spawn_with(program: &str, args: &[&str]) -> Result<Self, String> {
+        let python = program;
+        let mut child = Command::new(program)
+            .args(args)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
