@@ -14,13 +14,38 @@
     </div>
 
     <div class="body">
-      <aside class="rail">
-        <div class="rail-head">
-          <span>Sessions</span>
-          <span class="open-link" id="openArchive">Open archive…</span>
+      <aside class="rail" id="rail">
+        <div class="arc-bar">
+          <select id="archiveSel" title="Active archive"></select>
+          <button class="abtn" id="openArchive" title="Open another archive…">+</button>
+          <button class="abtn" id="closeArchive" title="Close this archive">✕</button>
+        </div>
+        <div class="rail-head"><span>Sessions</span><span id="sessCount"></span></div>
+        <div class="search-row">
+          <span class="s-ico">
+            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><circle cx="11" cy="11" r="7"/><line x1="16.5" y1="16.5" x2="21" y2="21"/></svg>
+          </span>
+          <input id="sessSearch" placeholder="Search sessions…" spellcheck="false" />
+          <button class="s-x hidden" id="sessSearchClear" title="Clear">✕</button>
+          <button class="abtn" id="sessCfgBtn" title="Search options">⚙</button>
+          <div class="pop hidden" id="sessCfg">
+          <div class="pop-h">Search in</div>
+          <label class="check"><input type="checkbox" id="sfTitle" checked /> Titles</label>
+          <label class="check"><input type="checkbox" id="sfId" checked /> IDs</label>
+          <label class="check"><input type="checkbox" id="sfTag" checked /> Tags</label>
+          <div class="pop-h">Show sessions</div>
+          <label class="check"><input type="checkbox" id="ssOpen" checked /> Open</label>
+          <label class="check"><input type="checkbox" id="ssClosed" checked /> Closed</label>
+          <label class="check"><input type="checkbox" id="ssCrashed" checked /> Crashed</label>
+          <div class="pop-sep"></div>
+          <label class="check"><input type="checkbox" id="sqClean" checked /> Clean</label>
+          <label class="check"><input type="checkbox" id="sqDirty" checked /> Dirty <span class="hint">(has problems)</span></label>
+          </div>
         </div>
         <div class="session-list" id="sessionList"></div>
       </aside>
+
+      <div class="splitter v" id="splitRail" title="Drag to resize"></div>
 
       <section class="main">
         <div class="toolbar">
@@ -38,11 +63,38 @@
           <div class="vdiv"></div>
           <label class="check"><input type="checkbox" id="verify" /> Verify checksums</label>
           <label class="check"><input type="checkbox" id="meta" checked /> Show metadata</label>
+          <div class="vdiv"></div>
+          <button class="tbtn" id="sessInfoBtn" title="Session info (session.yaml)">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><line x1="12" y1="11" x2="12" y2="16"/><line x1="12" y1="8" x2="12.01" y2="8"/></svg>
+            Session info
+          </button>
           <div class="spacer"></div>
           <button class="btn-primary" id="importBtn">
             <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>
             Import files…
           </button>
+        </div>
+
+        <div class="search-row wide">
+          <span class="s-ico">
+            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><circle cx="11" cy="11" r="7"/><line x1="16.5" y1="16.5" x2="21" y2="21"/></svg>
+          </span>
+          <input id="itemSearch" placeholder="Search artefacts in this archive — filenames, tags, origin…" spellcheck="false" />
+          <button class="s-x hidden" id="itemSearchClear" title="Clear search">✕</button>
+          <button class="abtn wide-btn" id="itemCfgBtn" title="Advanced search options">⚙ Advanced</button>
+          <div class="pop right hidden" id="itemCfg">
+          <div class="pop-h">Search in</div>
+          <label class="check"><input type="checkbox" id="ifName" checked /> Filenames</label>
+          <label class="check"><input type="checkbox" id="ifTag" checked /> Tags <span class="hint">(of the session)</span></label>
+          <label class="check"><input type="checkbox" id="ifOrigin" checked /> Origin / source</label>
+          <label class="check"><input type="checkbox" id="ifSession" checked /> Session ID &amp; title</label>
+          <div class="pop-h">Created between</div>
+          <div class="pop-dates">
+            <div class="field"><label>From</label><input type="date" id="ifFrom" /></div>
+            <div class="field"><label>To</label><input type="date" id="ifTo" /></div>
+          </div>
+          <div class="pop-actions"><button class="dbtn ghost" id="ifReset">Reset dates</button></div>
+          </div>
         </div>
 
         <div class="item-area" id="itemArea"><div class="empty">Open an archive to begin.</div></div>
@@ -66,22 +118,47 @@
         </div>
       </section>
 
-      <aside class="sidecar hidden" id="scPanel">
-        <div class="sc-head">
-          <span class="t" id="scTitle">Sidecar</span>
-          <button class="sc-close" id="scClose">✕</button>
-        </div>
-        <div class="sc-body"><pre id="scBody"></pre></div>
+      <div class="splitter v hidden" id="splitDock" title="Drag to resize"></div>
+
+      <aside class="dock hidden" id="dock">
+        <section class="panel hidden" id="sessPanel">
+          <div class="p-head">
+            <span class="t" id="sessTitle">Session</span>
+            <button class="p-btn" id="sessRaw" title="Show session.yaml source">{ }</button>
+            <button class="p-btn" id="sessClose" title="Hide">✕</button>
+          </div>
+          <div class="p-body" id="sessBody"></div>
+        </section>
+
+        <div class="splitter h hidden" id="splitDockRows" title="Drag to resize"></div>
+
+        <section class="panel hidden" id="scPanel">
+          <div class="p-head">
+            <span class="t" id="scTitle">Sidecar</span>
+            <button class="p-btn" id="scRaw" title="Show raw JSON">{ }</button>
+            <button class="p-btn" id="scClose" title="Hide">✕</button>
+          </div>
+          <div class="p-body" id="scBody"></div>
+        </section>
       </aside>
     </div>
 
     <div class="statusbar" id="statusbar">No archive open</div>
   </div>
 
+  <div class="dropzone" id="dropZone">
+    <div class="dz-card">
+      <svg width="34" height="34" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
+      <div class="dz-t">Drop files to import</div>
+      <div class="dz-s" id="dzSub"></div>
+    </div>
+  </div>
+
   <div class="scrim" id="scrim">
     <div class="dialog" role="dialog" aria-modal="true" aria-labelledby="dlgHead">
       <div class="dlg-head" id="dlgHead">Import files</div>
       <div class="dlg-body">
+        <div class="dlg-arc">into <b id="dlgArchive"></b></div>
         <div class="filelist" id="dlgFiles"></div>
         <div>
           <label class="radio"><input type="radio" name="mode" value="existing" id="modeExisting" checked /> Add to existing session</label>

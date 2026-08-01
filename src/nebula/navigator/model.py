@@ -25,11 +25,13 @@ from pathlib import Path
 from typing import List, Optional
 
 from nebula.index import _iter_session_dirs
+from nebula.refs import Ref, format_ref
 from nebula.registry import get_registry, resolve_archive
 from nebula.session import _hold_active, orphan_artifacts_in
 from nebula.sidecar import (
     SESSION_FILE,
     SIDECAR_SUFFIX,
+    SidecarMeta,
     read_session_yaml,
     read_sidecar,
     sha256_file,
@@ -132,11 +134,15 @@ def list_sessions(archive) -> List[SessionInfo]:
     return out
 
 
+def _appendable(status: str, created: str, held: bool) -> bool:
+    today = datetime.date.today().isoformat()
+    return status == "open" or (created or "")[:10] == today or bool(held)
+
+
 def _is_appendable(s: "SessionInfo") -> bool:
     """A session you can import into without a deliberate reopen: still
     open, created today, or held (mirrors session.append_to's rule)."""
-    today = datetime.date.today().isoformat()
-    return s.status == "open" or (s.created or "")[:10] == today or s.held
+    return _appendable(s.status, s.created, s.held)
 
 
 def importable_sessions(archive) -> List[SessionInfo]:
@@ -233,6 +239,214 @@ def sidecar_display(sidecar_path) -> str:
         return json.dumps(json.loads(raw), indent=2, sort_keys=True)
     except Exception:
         return raw
+
+
+def _ref_dict(r: Ref) -> dict:
+    """A ref as both its compact string form and its parts, so the view can
+    show the string and still key off the pieces."""
+    try:
+        text = format_ref(r)
+    except ValueError:          # a ref with neither session nor file
+        text = "(empty ref)"
+    return {"ref": text, "file": r.file, "session": r.session, "archive": r.archive}
+
+
+def sidecar_info(sidecar_path) -> dict:
+    """The sidecar as *structured* data for the detail panel, rather than
+    the pretty-printed blob ``sidecar_display`` returns.
+
+    Always succeeds: an unreadable or malformed sidecar comes back with
+    ``ok: False`` and whatever raw text we could get, because a broken
+    sidecar is exactly the case you most want to look at in the GUI.
+    """
+    path = Path(sidecar_path)
+    out: dict = {"ok": False, "name": path.name, "path": str(path),
+                 "raw": "", "error": None}
+    try:
+        raw = path.read_text()
+    except OSError as e:
+        out["error"] = f"could not read {path.name}: {e}"
+        return out
+
+    try:
+        data = json.loads(raw)
+        out["raw"] = json.dumps(data, indent=2, sort_keys=True)
+    except Exception as e:      # noqa: BLE001 -- any parse failure is reportable
+        out["raw"] = raw
+        out["error"] = f"not valid JSON: {e}"
+        return out
+
+    try:
+        meta = SidecarMeta.from_dict(data)
+    except Exception as e:      # noqa: BLE001 -- e.g. missing 'created'
+        out["error"] = f"unrecognised sidecar layout: {e}"
+        return out
+
+    pb = meta.produced_by
+    out.update({
+        "ok": True,
+        "created": meta.created,
+        "sha256": meta.sha256,
+        "produced_by": {
+            "source": pb.source,
+            "origin": pb.origin,
+            "repo": pb.repo,
+            "commit": pb.commit,
+            "dirty": pb.dirty,
+            "entry_point": pb.entry_point,
+            "imported_by": pb.imported_by,
+            "imported_at": pb.imported_at,
+        },
+        "derived_from": [_ref_dict(r) for r in meta.derived_from_refs()],
+        "inputs": meta.inputs,
+        "extra": meta.extra,
+    })
+    return out
+
+
+def session_info(session_dir) -> dict:
+    """Everything session.yaml knows about a session, plus the few derived
+    facts the GUI would otherwise have to recompute (hold state, whether
+    it's still appendable, item/problem counts, total artefact size)."""
+    session_dir = Path(session_dir)
+    path = session_dir / SESSION_FILE
+    out: dict = {"ok": False, "path": str(path), "session_path": str(session_dir),
+                 "raw": "", "error": None}
+    try:
+        out["raw"] = path.read_text()
+    except OSError as e:
+        out["error"] = f"could not read {SESSION_FILE}: {e}"
+        return out
+
+    try:
+        meta = read_session_yaml(session_dir)
+    except Exception as e:      # noqa: BLE001 -- malformed YAML is displayable
+        out["error"] = f"could not parse {SESSION_FILE}: {e}"
+        return out
+
+    items = list_items(session_dir)
+    held = _hold_active(meta)
+    out.update({
+        "ok": True,
+        "run_id": meta.run_id,
+        "created": meta.created,
+        "status": meta.status,
+        "tags": list(meta.tags),
+        "description": meta.description,
+        "held": held,
+        "hold_until": meta.hold_until,
+        "appendable": _appendable(meta.status, meta.created, held),
+        "related_runs": [_ref_dict(r) for r in meta.related_run_refs()],
+        "history": list(meta.history),
+        "n_items": len(items),
+        "n_problems": sum(1 for it in items if it.status != PAIRED),
+        "size": sum(it.size or 0 for it in items),
+    })
+    out["size_human"] = _human_size(out["size"])
+    return out
+
+
+ITEM_SEARCH_FIELDS = ("filename", "tags", "origin", "session")
+
+
+def _in_date_range(timestamp, date_from, date_to) -> bool:
+    """Compare an ISO timestamp's date part against YYYY-MM-DD bounds
+    (inclusive). ISO dates sort lexicographically, so string comparison is
+    both correct and cheap. An item with no timestamp is only kept when no
+    bound was asked for -- an unknown date can't be claimed to be in range.
+    """
+    if not date_from and not date_to:
+        return True
+    day = (timestamp or "")[:10]
+    if not day:
+        return False
+    if date_from and day < date_from:
+        return False
+    if date_to and day > date_to:
+        return False
+    return True
+
+
+def search_items(
+    archive,
+    query: str = "",
+    *,
+    fields=None,
+    date_from: Optional[str] = None,
+    date_to: Optional[str] = None,
+    limit: int = 1000,
+) -> dict:
+    """Search artefacts across every session in an archive.
+
+    ``query`` is split on whitespace and every term must match somewhere in
+    the enabled ``fields`` (AND, case-insensitive substring) -- so "diode
+    csv" finds a csv in a diode-tagged session. Fields:
+
+        filename -- the artefact's own name
+        tags     -- its *session's* tags (tags live on sessions, not files)
+        origin   -- the sidecar's free-text origin, plus script/external
+        session  -- the run id and session description
+
+    ``date_from``/``date_to`` are inclusive YYYY-MM-DD bounds on the item's
+    timestamp (its sidecar 'created', else the file's mtime).
+
+    An empty query with no date bounds matches nothing rather than
+    everything: the caller is asking to search, not to list the archive.
+    """
+    fields = set(fields or ITEM_SEARCH_FIELDS)
+    terms = [t for t in (query or "").lower().split() if t]
+    if not terms and not date_from and not date_to:
+        return {"items": [], "truncated": False, "n_sessions": 0, "n_scanned": 0}
+
+    root, _ = resolve(archive)
+    out: List[dict] = []
+    n_sessions = n_scanned = 0
+    truncated = False
+
+    for s in list_sessions(root):
+        n_sessions += 1
+        for it in list_items(s.path):
+            n_scanned += 1
+            if not _in_date_range(it.timestamp, date_from, date_to):
+                continue
+            if terms:
+                hay: List[str] = []
+                if "filename" in fields:
+                    hay.append(it.name)
+                if "tags" in fields:
+                    hay.extend(s.tags)
+                if "origin" in fields:
+                    hay.append(it.origin or "")
+                    hay.append(it.source or "")
+                if "session" in fields:
+                    hay.append(s.run_id)
+                    hay.append(s.description)
+                blob = " ".join(hay).lower()
+                if not all(t in blob for t in terms):
+                    continue
+            if len(out) >= limit:
+                truncated = True
+                break
+            out.append({
+                "item": it, "run_id": s.run_id, "session_path": str(s.path),
+                "session_description": s.description, "tags": list(s.tags),
+                "session_created": s.created,
+            })
+        if truncated:
+            break
+
+    return {"items": out, "truncated": truncated,
+            "n_sessions": n_sessions, "n_scanned": n_scanned}
+
+
+def registered_archives() -> List[dict]:
+    """The machine's archive registry (~/.nebula/archives.yaml), so the
+    archive switcher can offer known archives without the user hunting for
+    the directory. ``exists`` is False for a root that isn't mounted."""
+    out = []
+    for name, cfg in sorted(get_registry().all().items()):
+        out.append({"name": name, "root": str(cfg.root), "exists": cfg.root.is_dir()})
+    return out
 
 
 def _human_size(n: int) -> str:

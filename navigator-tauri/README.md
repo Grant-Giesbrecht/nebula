@@ -63,9 +63,39 @@ npm install          # fetches the @tauri-apps/cli
 npm run dev          # compiles the Rust core and opens the window
 ```
 
-On first launch, click **“Open archive…”** (top-left) and pick an archive
-directory, or a registered archive by path. The choice is remembered in
-`localStorage` for next time.
+On first launch, use the archive switcher at the top of the left rail: the
+**＋** button opens an archive directory, and any archive registered in
+`~/.nebula/archives.yaml` is already listed under "Registered". Several
+archives can be open at once — the switcher picks which one is active, and
+**✕** closes the active one. Open archives, the active one, the pane widths
+and which panels are showing are all remembered in `localStorage`.
+
+Other things worth knowing about the window:
+
+- **Drag and drop** files onto the window to import them — same dialog as
+  the **Import files…** button, with the files already chosen. They go into
+  the archive currently selected in the switcher.
+- **Search sessions** (top of the rail) filters the list you already have
+  loaded, so it is instant. Its **⚙** sets which fields are searched
+  (titles / IDs / tags) and which sessions are listed at all (open /
+  closed / crashed, clean / dirty — "dirty" meaning the session has
+  problem items). The gear highlights whenever those options are
+  narrowing things, so a filter can't silently hide sessions.
+- **Search artefacts** (above the file list) searches the *whole archive*,
+  not just the open session, via the `search_items` op. Terms are ANDed:
+  `diode csv` finds csv files in diode-tagged sessions. **⚙ Advanced**
+  picks the searched fields (filenames, session tags, origin/source,
+  session id & title) and a created-between date range; a date range alone
+  is a valid search. Results grow a Session column — click a run id to
+  jump to that session and leave search mode.
+- **Session info** (toolbar) toggles a panel showing `session.yaml` —
+  status, tags, hold, related runs and the manual-operation history —
+  rendered, not raw. The **{ }** button in its header shows the YAML source.
+- Opening a sidecar shows the same kind of rendered view of the
+  `.meta.json` (provenance, checksum, derived-from, inputs), with **{ }**
+  for the raw JSON.
+- The rail, the right-hand dock, and the split between the two docked
+  panels are all **draggable**.
 
 ### ⚠️ Gotcha: once you have built a sidecar, `npm run dev` stops using your live Python
 
@@ -168,9 +198,11 @@ One JSON object per line, request and response:
 <- {"id": 7, "ok": false, "error": "…", "error_type": "FileNotFoundError"}
 ```
 
-Ops: `ping`, `resolve`, `list_sessions`, `list_items`, `sidecar_display`,
-`importable_sessions`, `frozen_sessions`, `import_new`, `import_file`,
-`open_path`, `file_manager_name`. Test any of them without the GUI:
+Ops: `ping`, `resolve`, `list_archives`, `list_sessions`, `list_items`,
+`sidecar_display`, `sidecar_info`, `session_info`, `search_items`,
+`importable_sessions`,
+`frozen_sessions`, `import_new`, `import_file`, `open_path`,
+`file_manager_name`. Test any of them without the GUI:
 
 ```
 python -m nebula.navigator.api list_sessions '{"archive": "/path/to/archive"}'

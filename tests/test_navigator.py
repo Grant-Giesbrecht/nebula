@@ -112,3 +112,173 @@ def test_importable_sessions_excludes_frozen(tmp_path):
     ids = {s.run_id for s in model.importable_sessions(archive)}
     assert today.id in ids
     assert "S-9999" not in ids
+
+
+# ---------------------------------------------------------------------
+# structured panels (sidecar_info / session_info)
+# ---------------------------------------------------------------------
+
+def test_sidecar_info_structured(tmp_path):
+    archive = tmp_path / "archive"
+    s = _session_with(archive, {"raw.csv": "x"})
+    info = model.sidecar_info(s.path / "raw.csv.meta.json")
+    assert info["ok"] and info["error"] is None
+    assert info["produced_by"]["source"] == "script"
+    assert info["sha256"] and info["created"]
+    assert '"produced_by"' in info["raw"]   # raw stays available for the { } toggle
+
+
+def test_sidecar_info_reports_bad_json_without_raising(tmp_path):
+    archive = tmp_path / "archive"
+    s = _session_with(archive, {"raw.csv": "x"})
+    sc = s.path / "raw.csv.meta.json"
+    sc.write_text("{not valid json")
+    info = model.sidecar_info(sc)
+    assert not info["ok"]
+    assert "not valid JSON" in info["error"]
+    assert info["raw"] == "{not valid json"
+
+
+def test_sidecar_info_missing_file(tmp_path):
+    info = model.sidecar_info(tmp_path / "nope.meta.json")
+    assert not info["ok"] and "could not read" in info["error"]
+
+
+def test_sidecar_info_derived_from_refs(tmp_path):
+    archive = tmp_path / "archive"
+    s = nebula.new(archive, description="d")
+    with s.artifact("raw.csv") as fn:
+        fn.write_text("x")
+    with s.artifact("proc.graf", derived_from=["raw.csv"]) as fn:
+        fn.write_text("y")
+    s.close()
+    info = model.sidecar_info(s.path / "proc.graf.meta.json")
+    assert [r["ref"] for r in info["derived_from"]] == ["raw.csv"]
+
+
+def test_session_info_structured(tmp_path):
+    archive = tmp_path / "archive"
+    s = _session_with(archive, {"raw.csv": "x", "proc.graf": "yy"})
+    info = model.session_info(s.path)
+    assert info["ok"] and info["error"] is None
+    assert info["run_id"] == s.id
+    assert info["tags"] == ["demo"] and info["description"] == "a session"
+    assert info["status"] == "closed"
+    assert info["n_items"] == 2 and info["n_problems"] == 0
+    assert info["appendable"] is True          # closed, but created today
+    assert info["size"] == 3 and info["size_human"]
+    assert "run_id:" in info["raw"]            # session.yaml source for the toggle
+
+
+def test_session_info_counts_problems_and_history(tmp_path):
+    archive = tmp_path / "archive"
+    s = _session_with(archive, {"raw.csv": "x"})
+    (s.path / "dropped.dat").write_text("no sidecar")
+    meta = read_session_yaml(s.path)
+    meta.add_history("import", file="dropped.dat", note="by hand", by="tester")
+    write_session_yaml(s.path, meta)
+
+    info = model.session_info(s.path)
+    assert info["n_items"] == 2 and info["n_problems"] == 1
+    assert [h["action"] for h in info["history"]] == ["import"]
+    assert info["history"][0]["file"] == "dropped.dat"
+
+
+def test_session_info_reports_missing_yaml(tmp_path):
+    archive = tmp_path / "archive"
+    s = _session_with(archive, {"raw.csv": "x"})
+    (s.path / "session.yaml").unlink()
+    info = model.session_info(s.path)
+    assert not info["ok"] and "could not read" in info["error"]
+
+
+def test_registered_archives_lists_registry(tmp_path, monkeypatch):
+    import nebula.registry as reg
+    path = tmp_path / "archives.yaml"
+    root = tmp_path / "postdoc"
+    root.mkdir()
+    path.write_text(f"postdoc:\n  root: {root}\nmissing:\n  root: {tmp_path / 'gone'}\n")
+    monkeypatch.setenv("NEBULA_REGISTRY", str(path))
+    monkeypatch.setattr(reg, "_default_registry", None)
+
+    got = {a["name"]: a for a in model.registered_archives()}
+    assert got["postdoc"]["root"] == str(root) and got["postdoc"]["exists"] is True
+    assert got["missing"]["exists"] is False
+
+
+# ---------------------------------------------------------------------
+# artefact search
+# ---------------------------------------------------------------------
+
+def _search(archive, query="", **kw):
+    return model.search_items(archive, query, **kw)
+
+
+def test_search_items_matches_filename(tmp_path):
+    archive = tmp_path / "archive"
+    s = _session_with(archive, {"diode_sweep.csv": "x", "notes.txt": "y"})
+    res = _search(archive, "diode")
+    assert [h["item"].name for h in res["items"]] == ["diode_sweep.csv"]
+    assert res["items"][0]["run_id"] == s.id
+    assert res["n_sessions"] == 1 and res["n_scanned"] == 2
+
+
+def test_search_items_matches_session_tags(tmp_path):
+    archive = tmp_path / "archive"
+    _session_with(archive, {"a.csv": "x"})            # tagged "demo"
+    res = _search(archive, "demo")
+    assert [h["item"].name for h in res["items"]] == ["a.csv"]
+    # ...but not when tags are excluded from the searched fields
+    assert _search(archive, "demo", fields=["filename"])["items"] == []
+
+
+def test_search_items_terms_are_anded(tmp_path):
+    archive = tmp_path / "archive"
+    _session_with(archive, {"diode.csv": "x", "laser.csv": "y"})
+    assert len(_search(archive, "demo csv")["items"]) == 2      # tag + extension
+    assert len(_search(archive, "demo diode")["items"]) == 1
+    assert _search(archive, "demo nonesuch")["items"] == []
+
+
+def test_search_items_matches_origin_of_imported_file(tmp_path):
+    from nebula import manual
+    archive = tmp_path / "archive"
+    s = _session_with(archive, {"a.csv": "x"})
+    src = tmp_path / "outside.dat"
+    src.write_text("hand-made")
+    manual.import_file(archive, s.id, src, origin="emailed by Jane")
+    res = _search(archive, "jane")
+    assert [h["item"].name for h in res["items"]] == ["outside.dat"]
+    assert _search(archive, "jane", fields=["filename", "tags"])["items"] == []
+
+
+def test_search_items_empty_query_matches_nothing(tmp_path):
+    archive = tmp_path / "archive"
+    _session_with(archive, {"a.csv": "x"})
+    res = _search(archive, "   ")
+    assert res["items"] == [] and res["n_scanned"] == 0
+
+
+def test_search_items_date_bounds(tmp_path):
+    archive = tmp_path / "archive"
+    s = _session_with(archive, {"a.csv": "x"})
+    today = datetime.date.today().isoformat()
+    assert len(_search(archive, "", date_from=today, date_to=today)["items"]) == 1
+    assert _search(archive, "", date_from="2000-01-01", date_to="2000-01-02")["items"] == []
+    # a date bound alone is a valid search, with no text query at all
+    assert len(_search(archive, "", date_from="2000-01-01")["items"]) == 1
+
+
+def test_search_items_date_excludes_undated(tmp_path):
+    archive = tmp_path / "archive"
+    s = _session_with(archive, {"a.csv": "x"})
+    (s.path / "a.csv").unlink()                 # stray sidecar keeps its 'created'
+    (s.path / "a.csv.meta.json").write_text('{"created": null, "produced_by": {}}')
+    assert _search(archive, "", date_from="2000-01-01")["items"] == []
+
+
+def test_search_items_limit_truncates(tmp_path):
+    archive = tmp_path / "archive"
+    _session_with(archive, {f"f{i}.csv": "x" for i in range(5)})
+    res = _search(archive, "csv", limit=3)
+    assert len(res["items"]) == 3 and res["truncated"] is True

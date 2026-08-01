@@ -103,6 +103,43 @@ def op_sidecar_display(args: Dict[str, Any]) -> Dict[str, Any]:
     return {"text": model.sidecar_display(args["sidecar_path"])}
 
 
+def op_sidecar_info(args: Dict[str, Any]) -> Dict[str, Any]:
+    return model.sidecar_info(args["sidecar_path"])
+
+
+def op_session_info(args: Dict[str, Any]) -> Dict[str, Any]:
+    return model.session_info(args["session_path"])
+
+
+def op_search_items(args: Dict[str, Any]) -> Dict[str, Any]:
+    res = model.search_items(
+        args["archive"], args.get("query") or "",
+        fields=args.get("fields") or None,
+        date_from=args.get("date_from") or None,
+        date_to=args.get("date_to") or None,
+        limit=int(args.get("limit") or 1000),
+    )
+    # Flatten each hit into an item dict plus the session context the
+    # results table shows alongside it.
+    return {
+        "items": [
+            dict(_item_to_dict(hit["item"]),
+                 run_id=hit["run_id"],
+                 session_path=hit["session_path"],
+                 session_description=hit["session_description"],
+                 tags=hit["tags"])
+            for hit in res["items"]
+        ],
+        "truncated": res["truncated"],
+        "n_sessions": res["n_sessions"],
+        "n_scanned": res["n_scanned"],
+    }
+
+
+def op_list_archives(args: Dict[str, Any]) -> List[Dict[str, Any]]:
+    return model.registered_archives()
+
+
 def op_importable_sessions(args: Dict[str, Any]) -> List[Dict[str, Any]]:
     root, _ = model.resolve(args["archive"])
     return [_session_to_dict(s) for s in model.importable_sessions(root)]
@@ -151,6 +188,10 @@ OPS = {
     "list_sessions": op_list_sessions,
     "list_items": op_list_items,
     "sidecar_display": op_sidecar_display,
+    "sidecar_info": op_sidecar_info,
+    "session_info": op_session_info,
+    "list_archives": op_list_archives,
+    "search_items": op_search_items,
     "importable_sessions": op_importable_sessions,
     "frozen_sessions": op_frozen_sessions,
     "import_new": op_import_new,

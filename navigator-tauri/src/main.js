@@ -6,6 +6,7 @@
 
 const invoke = window.__TAURI__.core.invoke;
 const dialogOpen = window.__TAURI__.dialog.open;
+const tauriEvent = window.__TAURI__.event;
 
 // Must match nebula.sidecar.SIDECAR_SUFFIX.
 const SIDECAR_SUFFIX = ".meta.json";
@@ -22,15 +23,49 @@ async function call(op, args) {
 }
 
 // ---- state --------------------------------------------------------------
-let archive = localStorage.getItem("nebula.archive") || null;
-let archiveLabel = null;
+// `archives` is the list of archives the user has open (one at a time is
+// active); `registry` is what ~/.nebula/archives.yaml knows about, offered
+// in the switcher so known archives don't have to be hunted for on disk.
+let archives = [];          // [{ id, label }] -- id is a path or registered name
+let registry = [];          // [{ name, root, exists }]
+let archive = null;         // active archive id
 let sessions = [];
 let curSession = null;
 let items = [];
 let listView = true, showMeta = true, verify = false;
 let selected = null, selectedIsSidecar = false;
 
+// search: the rail filters the already-loaded session list locally, while
+// artefact search asks the backend to walk the whole archive.
+let shownSessions = [];
+let sessQuery = "";
+let sessCfg = { titles: true, ids: true, tags: true,
+                open: true, closed: true, crashed: true, clean: true, dirty: true };
+let itemCfg = { name: true, tags: true, origin: true, session: true, from: "", to: "" };
+let searchMode = false, searchMeta = null, searchTimer = null;
+
+// panels
+let showSess = false, showSc = false;
+let sessInfo = null, sessRaw = false;
+let scInfo = null, scRaw = false;
+
 const $ = (id) => document.getElementById(id);
+
+// ---- persistence --------------------------------------------------------
+const LS = {
+  get(key, fallback) {
+    try {
+      const v = localStorage.getItem(key);
+      return v === null ? fallback : JSON.parse(v);
+    } catch (e) { return fallback; }
+  },
+  set(key, value) { localStorage.setItem(key, JSON.stringify(value)); },
+};
+
+function saveArchives() {
+  LS.set("nebula.archives", archives);
+  localStorage.setItem("nebula.archive", archive || "");
+}
 
 // ---- glyphs -------------------------------------------------------------
 const EXT_COLOR = {
@@ -82,8 +117,37 @@ function escapeHtml(s) {
     ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
 }
 function fmtCreated(ts) { return (ts || "").slice(0, 19).replace("T", " "); }
+function baseName(p) { return String(p).split(/[\\/]/).filter(Boolean).pop() || String(p); }
 
-// ---- archive / data loading --------------------------------------------
+// ---- archives -----------------------------------------------------------
+function activeLabel() {
+  const a = archives.find((x) => x.id === archive);
+  return a ? a.label : (archive || "");
+}
+
+function renderArchiveSelect() {
+  const sel = $("archiveSel");
+  const open = archives
+    .map((a) => `<option value="open:${escapeHtml(a.id)}"${a.id === archive ? " selected" : ""}>${escapeHtml(a.label)}</option>`)
+    .join("");
+  const known = registry
+    .filter((r) => !archives.some((a) => a.id === r.name || a.id === r.root))
+    .map((r) => `<option value="reg:${escapeHtml(r.name)}">${escapeHtml(r.name)}${r.exists ? "" : "  (not mounted)"}</option>`)
+    .join("");
+  sel.innerHTML =
+    (open ? `<optgroup label="Open">${open}</optgroup>` : "") +
+    (known ? `<optgroup label="Registered">${known}</optgroup>` : "") +
+    (open || known ? "" : `<option value="">(no archive open)</option>`);
+  $("closeArchive").disabled = !archive;
+}
+
+async function onArchivePicked(value) {
+  if (!value) return;
+  const [kind, id] = [value.slice(0, value.indexOf(":")), value.slice(value.indexOf(":") + 1)];
+  if (kind === "reg") await loadArchive(id);       // adds it to the open list
+  else if (id !== archive) await loadArchive(id);
+}
+
 async function openArchive() {
   const dir = await dialogOpen({ directory: true, title: "Choose a nebula archive" });
   if (!dir) return;
@@ -93,32 +157,109 @@ async function openArchive() {
 async function loadArchive(arc) {
   try {
     const { label } = await call("resolve", { archive: arc });
+    if (arc !== archive) {
+      // Run ids are per-archive, so carrying a selection across would land
+      // on an unrelated session that merely shares an id.
+      curSession = null; selected = null; sessInfo = null; scInfo = null;
+      showSc = false; updateDock();
+      // Results from the previous archive would be misleading here.
+      searchMode = false; searchMeta = null;
+      $("itemSearch").value = "";
+      $("itemSearchClear").classList.add("hidden");
+    }
     archive = arc;
-    archiveLabel = label;
-    localStorage.setItem("nebula.archive", arc);
+    const existing = archives.find((a) => a.id === arc);
+    if (existing) existing.label = label;
+    else archives.push({ id: arc, label });
+    saveArchives();
+    renderArchiveSelect();
     $("wtitle").textContent = `Nebula Navigator — ${label}`;
     await reload();
   } catch (e) {
+    renderArchiveSelect();   // undo an optimistic <select> change
     toast(`Could not open archive: ${e}`);
   }
 }
 
+function closeArchive() {
+  if (!archive) return;
+  archives = archives.filter((a) => a.id !== archive);
+  archive = archives.length ? archives[0].id : null;
+  saveArchives();
+  if (archive) { loadArchive(archive); return; }
+  sessions = []; curSession = null; items = []; selected = null;
+  sessInfo = null; scInfo = null; searchMode = false; searchMeta = null;
+  renderArchiveSelect();
+  applySessionFilter();
+  $("wtitle").textContent = "Nebula Navigator";
+  $("itemArea").innerHTML = `<div class="empty">Open an archive to begin.</div>`;
+  $("statusbar").textContent = "No archive open";
+  renderSessionPanel();
+  updateDetails();
+}
+
+// ---- data loading -------------------------------------------------------
 async function reload() {
   if (!archive) return;
   sessions = await call("list_sessions", { archive });
-  renderSessions();
+  applySessionFilter();
   if (sessions.length) {
-    await selectSession(sessions[0]);
+    const keep = curSession && sessions.find((s) => s.run_id === curSession.run_id);
+    await selectSession(keep || shownSessions[0] || sessions[0]);
   } else {
-    curSession = null; items = []; selected = null;
+    curSession = null; items = []; selected = null; sessInfo = null;
     $("itemArea").innerHTML = `<div class="empty">No sessions in this archive.</div>`;
+    renderSessionPanel();
     updateDetails();
   }
-  $("statusbar").textContent = `${sessions.length} session(s)`;
+  $("statusbar").textContent = `${activeLabel()} — ${sessions.length} session(s)`;
+}
+
+// ---- session search (local: the whole list is already in memory) --------
+function sessionMatches(s) {
+  // Two independent gates: the session's own state, then the text query.
+  const status = (s.status || "").toLowerCase();
+  const statusOk = status === "open" ? sessCfg.open
+    : status === "crashed" ? sessCfg.crashed
+    : status === "closed" ? sessCfg.closed
+    : (sessCfg.open || sessCfg.closed || sessCfg.crashed);   // unknown status
+  if (!statusOk) return false;
+  if (!(s.n_problems ? sessCfg.dirty : sessCfg.clean)) return false;
+
+  const terms = sessQuery.toLowerCase().split(/\s+/).filter(Boolean);
+  if (!terms.length) return true;
+  const hay = [];
+  if (sessCfg.titles) hay.push(s.description || "");
+  if (sessCfg.ids) hay.push(s.run_id || "");
+  if (sessCfg.tags) hay.push((s.tags || []).join(" "));
+  const blob = hay.join(" ").toLowerCase();
+  return terms.every((t) => blob.includes(t));
+}
+
+function applySessionFilter() {
+  shownSessions = sessions.filter(sessionMatches);
+  const filtered = shownSessions.length !== sessions.length;
+  $("sessCount").textContent = filtered
+    ? `${shownSessions.length} of ${sessions.length}` : "";
+  $("sessSearchClear").classList.toggle("hidden", !sessQuery);
+  $("sessCfgBtn").classList.toggle("on", isSessCfgNarrowed());
+  renderSessions();
+}
+
+// True when the options exclude something, so the ⚙ can show it is doing
+// work even with an empty query.
+function isSessCfgNarrowed() {
+  return !(sessCfg.titles && sessCfg.ids && sessCfg.tags &&
+           sessCfg.open && sessCfg.closed && sessCfg.crashed &&
+           sessCfg.clean && sessCfg.dirty);
 }
 
 function renderSessions() {
-  $("sessionList").innerHTML = sessions.map((s, i) => {
+  if (!shownSessions.length && (sessQuery || isSessCfgNarrowed()) && sessions.length) {
+    $("sessionList").innerHTML = `<div class="none">No sessions match.</div>`;
+    return;
+  }
+  $("sessionList").innerHTML = shownSessions.map((s, i) => {
     const held = s.held ? '<span class="tag-held">HELD</span>' : "";
     const prob = s.n_problems ? `<span class="tag-prob">${s.n_problems} ⚠</span>` : "";
     const sel = curSession && s.run_id === curSession.run_id ? "sel" : "";
@@ -135,8 +276,8 @@ function renderSessions() {
   $("sessionList").querySelectorAll(".session").forEach((el) => {
     el.onclick = (ev) => {
       const openIdx = ev.target.getAttribute("data-open");
-      if (openIdx !== null) { call("open_path", { path: sessions[+openIdx].path }); return; }
-      selectSession(sessions[+el.dataset.i]);
+      if (openIdx !== null) { call("open_path", { path: shownSessions[+openIdx].path }); return; }
+      selectSession(shownSessions[+el.dataset.i]);
     };
   });
 }
@@ -147,39 +288,130 @@ async function selectSession(s) {
   renderSessions();
   await reloadItems();
   updateDetails();
+  await refreshSessionInfo();
+}
+
+// ---- artefact search (backend: walks every session in the archive) ------
+function itemSearchActive() {
+  return !!($("itemSearch").value.trim() || itemCfg.from || itemCfg.to);
+}
+
+function scheduleItemSearch() {
+  clearTimeout(searchTimer);
+  searchTimer = setTimeout(() => runItemSearch(), 220);
+}
+
+async function runItemSearch() {
+  $("itemSearchClear").classList.toggle("hidden", !itemSearchActive());
+  $("itemCfgBtn").classList.toggle("on", !!(itemCfg.from || itemCfg.to));
+  if (!archive) return;
+  if (!itemSearchActive()) { await exitSearch(); return; }
+
+  const fields = ["name", "tags", "origin", "session"]
+    .filter((f) => itemCfg[f])
+    .map((f) => (f === "name" ? "filename" : f));
+  try {
+    const res = await call("search_items", {
+      archive, query: $("itemSearch").value, fields,
+      date_from: itemCfg.from || null, date_to: itemCfg.to || null,
+    });
+    searchMode = true;
+    searchMeta = res;
+    items = res.items;
+    selected = null; selectedIsSidecar = false;
+    renderItemArea();
+    updateDetails();
+    const bits = [`${res.items.length}${res.truncated ? "+" : ""} match(es)`,
+                  `${res.n_scanned} artefact(s) in ${res.n_sessions} session(s)`];
+    $("statusbar").textContent = `${activeLabel()} — search: ${bits.join(", scanned ")}`;
+  } catch (e) {
+    toast(`Search failed: ${e}`);
+  }
+}
+
+async function exitSearch() {
+  if (!searchMode) return;
+  searchMode = false; searchMeta = null;
+  selected = null; selectedIsSidecar = false;
+  if (curSession) await reloadItems();
+  else { items = []; renderItemArea(); updateDetails(); }
+}
+
+function clearItemSearch() {
+  $("itemSearch").value = "";
+  itemCfg.from = ""; itemCfg.to = "";
+  $("ifFrom").value = ""; $("ifTo").value = "";
+  saveItemCfg();
+  runItemSearch();
+}
+
+// Jump from a search hit to the session that holds it.
+async function jumpToSession(runId) {
+  const s = sessions.find((x) => x.run_id === runId);
+  if (!s) { toast(`${runId} is not in the session list.`); return; }
+  $("itemSearch").value = "";
+  itemCfg.from = ""; itemCfg.to = "";
+  $("ifFrom").value = ""; $("ifTo").value = "";
+  saveItemCfg();
+  $("itemSearchClear").classList.add("hidden");
+  searchMode = false; searchMeta = null;
+  await selectSession(s);
+}
+
+function renderItemArea() {
+  $("itemArea").innerHTML = listView ? listHTML() : gridHTML();
+  wireItems();
 }
 
 async function reloadItems() {
   if (!curSession) return;
+  if (searchMode) return;   // a search owns the item area until it's cleared
   items = await call("list_items", { session_path: curSession.path, verify });
   $("itemArea").innerHTML = listView ? listHTML() : gridHTML();
   wireItems();
   const problems = items.filter((i) => i.status !== "paired").length;
-  $("statusbar").textContent = `${curSession.run_id}: ${items.length} item(s), ${problems} problem(s)`;
+  $("statusbar").textContent = `${activeLabel()} — ${curSession.run_id}: ${items.length} item(s), ${problems} problem(s)`;
 }
 
 // ---- views --------------------------------------------------------------
+// In search mode the same table gains a Session column, since results come
+// from all over the archive rather than one open session.
+function sessionCell(it) {
+  return `<td class="c-sess"><span class="sesslink" data-jump="${escapeHtml(it.run_id)}"
+    title="${escapeHtml(it.session_description || "")} — go to this session">${escapeHtml(it.run_id)}</span></td>`;
+}
+
 function listHTML() {
+  if (searchMode && !items.length) {
+    return `<div class="empty">Nothing matched. Try fewer words, or widen the search under ⚙ Advanced.</div>`;
+  }
   const rows = items.map((it, idx) => {
     const created = fmtCreated(it.timestamp);
     let r = `<tr data-i="${idx}" data-sc="0" class="${sameSel(idx, false) ? 'sel' : ''}">
       <td><div class="namecell">${fileGlyph(it, 20)}<span class="fname">${escapeHtml(it.name)}</span></div></td>
+      ${searchMode ? sessionCell(it) : ""}
       <td class="created">${created}</td>
       <td>${pill(it)}</td></tr>`;
     if (it.has_sidecar && showMeta) {
       r += `<tr data-i="${idx}" data-sc="1" class="sidecar ${sameSel(idx, true) ? 'sel' : ''}">
         <td><div class="namecell"><span style="width:20px;text-align:center;color:var(--text-faint)">↳</span><span class="fname">${escapeHtml(it.name + SIDECAR_SUFFIX)}</span></div></td>
+        ${searchMode ? "<td></td>" : ""}
         <td class="created">${created}</td>
         <td><span class="pill meta">metadata</span></td></tr>`;
     }
     return r;
   }).join("");
-  return `<table><thead><tr><th>Name</th><th class="c-created">Created</th><th class="c-status">Status</th></tr></thead><tbody>${rows}</tbody></table>`;
+  const sessHead = searchMode ? `<th class="c-sess">Session</th>` : "";
+  return `<table><thead><tr><th>Name</th>${sessHead}<th class="c-created">Created</th><th class="c-status">Status</th></tr></thead><tbody>${rows}</tbody></table>`;
 }
 function gridHTML() {
+  if (searchMode && !items.length) {
+    return `<div class="empty">Nothing matched. Try fewer words, or widen the search under ⚙ Advanced.</div>`;
+  }
   return `<div class="grid">${items.map((it, idx) => `
     <div class="cell ${sameSel(idx, false) ? 'sel' : ''}" data-i="${idx}" data-sc="0" title="${escapeHtml(it.detail)}">
-      ${fileGlyph(it, 54)}<span class="cname">${escapeHtml(it.name)}</span></div>`).join("")}</div>`;
+      ${fileGlyph(it, 54)}<span class="cname">${escapeHtml(it.name)}</span>
+      ${searchMode ? `<span class="cell-sess">${escapeHtml(it.run_id)}</span>` : ""}</div>`).join("")}</div>`;
 }
 function sameSel(idx, isSc) { return selected === items[idx] && selectedIsSidecar === isSc; }
 
@@ -187,7 +419,11 @@ function wireItems() {
   $("itemArea").querySelectorAll("[data-i]").forEach((el) => {
     const it = items[+el.dataset.i];
     const isSc = el.dataset.sc === "1";
-    el.onclick = () => selectItem(it, isSc);
+    el.onclick = (ev) => {
+      const jump = ev.target.getAttribute && ev.target.getAttribute("data-jump");
+      if (jump) { ev.stopPropagation(); jumpToSession(jump); return; }
+      selectItem(it, isSc);
+    };
     el.ondblclick = () => activate(it, isSc);
   });
 }
@@ -197,6 +433,7 @@ function selectItem(it, isSc) {
   $("itemArea").innerHTML = listView ? listHTML() : gridHTML();
   wireItems();
   updateDetails();
+  if (showSc && it.has_sidecar) openSidecarPanel(it);
 }
 function activate(it, isSc) {
   selectItem(it, isSc);
@@ -219,19 +456,265 @@ function updateDetails() {
     .join("\n");
 }
 
-// ---- sidecar panel ------------------------------------------------------
-async function openSidecarPanel(it) {
-  if (!it || !it.sidecar_path) return;
-  const { text } = await call("sidecar_display", { sidecar_path: it.sidecar_path });
-  $("scTitle").textContent = `Sidecar — ${it.name}`;
-  $("scBody").innerHTML = colorJSON(text);
-  $("scPanel").classList.remove("hidden");
+// ---- pretty-print helpers (shared by both panels) -----------------------
+function row(label, value, opts) {
+  const o = opts || {};
+  if (value === null || value === undefined || value === "") return "";
+  const cls = ["v", o.mono ? "mono" : "", o.wrap ? "wrap" : ""].filter(Boolean).join(" ");
+  const body = o.html ? value : escapeHtml(value);
+  return `<div class="kv"><div class="k">${escapeHtml(label)}</div><div class="${cls}">${body}</div></div>`;
+}
+function group(title, inner) {
+  if (!inner) return "";
+  return `<div class="grp"><div class="grp-h">${escapeHtml(title)}</div>${inner}</div>`;
+}
+function chips(values, cls) {
+  if (!values || !values.length) return "";
+  return `<div class="chips">${values
+    .map((v) => `<span class="chip ${cls || ""}">${escapeHtml(v)}</span>`).join("")}</div>`;
+}
+function valueText(v) {
+  if (v === null || v === undefined) return "null";
+  if (typeof v === "object") return JSON.stringify(v);
+  return String(v);
+}
+function dictRows(obj) {
+  if (!obj) return "";
+  const keys = Object.keys(obj);
+  if (!keys.length) return "";
+  return keys.map((k) => row(k, valueText(obj[k]), { mono: true, wrap: true })).join("");
 }
 function colorJSON(s) {
   return escapeHtml(s)
     .replace(/(&quot;(?:\\.|[^&]|&(?!quot;))*?&quot;)(\s*:)?/g,
       (m, str, colon) => colon ? `<span class="k">${str}</span>${colon}` : `<span class="s">${str}</span>`)
     .replace(/: (-?\d+(?:\.\d+)?)/g, ': <span class="n">$1</span>');
+}
+function noteBox(kind, text) {
+  return `<div class="note ${kind}">${escapeHtml(text)}</div>`;
+}
+function pathRow(label, path) {
+  return row(label,
+    `<span class="link" data-open-path="${escapeHtml(path)}" title="Open in file manager">${escapeHtml(path)}</span>`,
+    { mono: true, wrap: true, html: true });
+}
+function wirePaths(el) {
+  el.querySelectorAll("[data-open-path]").forEach((n) => {
+    n.onclick = () => call("open_path", { path: n.getAttribute("data-open-path") });
+  });
+}
+
+// ---- sidecar panel ------------------------------------------------------
+async function openSidecarPanel(it) {
+  if (!it || !it.sidecar_path) return;
+  scInfo = await call("sidecar_info", { sidecar_path: it.sidecar_path });
+  scInfo.itemName = it.name;
+  showSc = true;
+  savePanels();
+  renderSidecarPanel();
+  updateDock();
+}
+
+function renderSidecarPanel() {
+  const info = scInfo;
+  const body = $("scBody");
+  if (!info) { $("scTitle").textContent = "Sidecar"; body.innerHTML = ""; return; }
+  $("scTitle").textContent = `Sidecar — ${info.itemName || baseName(info.name)}`;
+  $("scRaw").classList.toggle("on", scRaw);
+
+  if (scRaw || !info.ok) {
+    const note = info.error ? noteBox("err", info.error) : "";
+    body.innerHTML = note + `<pre>${colorJSON(info.raw || "")}</pre>`;
+    return;
+  }
+
+  const pb = info.produced_by || {};
+  const srcCls = pb.source === "external" ? "warn" : pb.source === "script" ? "ok" : "miss";
+  const head = `<div class="p-title">
+      <div class="p-name">${escapeHtml(info.itemName || baseName(info.name))}</div>
+      <span class="chip ${srcCls}">${escapeHtml(pb.source || "unknown source")}</span>
+    </div>`;
+
+  const overview = group("Overview",
+    row("Created", fmtCreated(info.created)) +
+    row("SHA-256", info.sha256, { mono: true, wrap: true }) +
+    pathRow("Sidecar", info.path));
+
+  const provenance = group(
+    pb.source === "external" ? "Imported" : "Produced by",
+    row("Origin", pb.origin, { wrap: true }) +
+    row("Repository", pb.repo, { mono: true, wrap: true }) +
+    row("Commit", pb.commit, { mono: true, wrap: true }) +
+    row("Working tree", pb.dirty === null || pb.dirty === undefined ? null
+        : (pb.dirty ? "dirty at run time" : "clean")) +
+    row("Entry point", pb.entry_point, { mono: true, wrap: true }) +
+    row("Imported by", pb.imported_by) +
+    row("Imported at", fmtCreated(pb.imported_at)));
+
+  const derived = group("Derived from",
+    (info.derived_from || []).length
+      ? `<div class="chips">${info.derived_from
+          .map((r) => `<span class="chip mono">${escapeHtml(r.ref)}</span>`).join("")}</div>`
+      : "");
+
+  const inputs = group("Inputs", dictRows(info.inputs));
+  const extra = group("Other fields", dictRows(info.extra));
+
+  const all = overview + provenance + derived + inputs + extra;
+  body.innerHTML = head + (all || noteBox("info", "This sidecar records no further detail."));
+  wirePaths(body);
+}
+
+// ---- session info panel -------------------------------------------------
+async function refreshSessionInfo() {
+  if (!showSess) return;
+  if (!curSession) { sessInfo = null; renderSessionPanel(); return; }
+  sessInfo = await call("session_info", { session_path: curSession.path });
+  renderSessionPanel();
+}
+
+function renderSessionPanel() {
+  const info = sessInfo;
+  const body = $("sessBody");
+  if (!info) {
+    $("sessTitle").textContent = "Session";
+    body.innerHTML = noteBox("info", "Select a session to see its details.");
+    return;
+  }
+  $("sessTitle").textContent = `Session — ${info.run_id || baseName(info.session_path)}`;
+  $("sessRaw").classList.toggle("on", sessRaw);
+
+  if (sessRaw || !info.ok) {
+    const note = info.error ? noteBox("err", info.error) : "";
+    body.innerHTML = note + `<pre>${escapeHtml(info.raw || "")}</pre>`;
+    return;
+  }
+
+  const stCls = info.status === "open" ? "ok" : info.status === "crashed" ? "err" : "miss";
+  const head = `<div class="p-title">
+      <div class="p-name">${escapeHtml(info.run_id)}</div>
+      <span class="chip ${stCls}">${escapeHtml(info.status)}</span>
+      ${info.held ? '<span class="chip warn">held</span>' : ""}
+      ${info.appendable ? "" : '<span class="chip miss">frozen</span>'}
+    </div>` +
+    (info.description ? `<div class="p-desc">${escapeHtml(info.description)}</div>` : "");
+
+  const about = group("About",
+    chips(info.tags, "tag") +
+    row("Created", fmtCreated(info.created)) +
+    row("Hold until", info.hold_until === "forever" ? "indefinite" : fmtCreated(info.hold_until)) +
+    pathRow("Folder", info.session_path));
+
+  const counts = group("Contents",
+    row("Items", String(info.n_items)) +
+    row("Problems", info.n_problems
+      ? `<span class="warn-text">${info.n_problems}</span>` : "none",
+      { html: info.n_problems > 0 }) +
+    row("Total size", info.size_human));
+
+  const related = group("Related runs",
+    (info.related_runs || []).length
+      ? `<div class="chips">${info.related_runs
+          .map((r) => `<span class="chip mono">${escapeHtml(r.ref)}</span>`).join("")}</div>`
+      : "");
+
+  const hist = (info.history || []).slice().reverse();
+  const history = group(`History (${hist.length})`, hist.length
+    ? `<div class="hist">${hist.map((h) => `
+        <div class="hrow">
+          <div class="hline">
+            <span class="haction">${escapeHtml(h.action || "?")}</span>
+            ${h.file ? `<span class="hfile mono">${escapeHtml(h.file)}</span>` : ""}
+          </div>
+          <div class="hmeta">${escapeHtml(fmtCreated(h.at))}${h.by ? ` · ${escapeHtml(h.by)}` : ""}</div>
+          ${h.note ? `<div class="hnote">${escapeHtml(h.note)}</div>` : ""}
+        </div>`).join("")}</div>`
+    : "");
+
+  body.innerHTML = head + about + counts + related +
+    (history || noteBox("info", "No manual operations recorded."));
+  wirePaths(body);
+}
+
+// ---- dock / panel visibility -------------------------------------------
+function savePanels() { LS.set("nebula.panels", { sess: showSess, sc: showSc }); }
+
+function updateDock() {
+  $("sessPanel").classList.toggle("hidden", !showSess);
+  $("scPanel").classList.toggle("hidden", !showSc);
+  const both = showSess && showSc;
+  $("splitDockRows").classList.toggle("hidden", !both);
+  // Only meaningful to hold the session panel at a fixed height when it has
+  // a neighbour; alone it should fill the dock.
+  if (both) setSessHeight(LS.get("nebula.sessH", 320));
+  else $("sessPanel").style.flex = "1 1 0";
+  const any = showSess || showSc;
+  $("dock").classList.toggle("hidden", !any);
+  $("splitDock").classList.toggle("hidden", !any);
+  $("sessInfoBtn").classList.toggle("on", showSess);
+}
+
+async function toggleSessionPanel() {
+  showSess = !showSess;
+  savePanels();
+  updateDock();
+  if (showSess) await refreshSessionInfo();
+}
+
+// ---- resizable panes ----------------------------------------------------
+// Each splitter drags one neighbouring pane's flex-basis and remembers it.
+function makeSplitter(el, opts) {
+  el.addEventListener("mousedown", (ev) => {
+    ev.preventDefault();
+    const start = opts.axis === "x" ? ev.clientX : ev.clientY;
+    const startSize = opts.get();
+    const busy = opts.axis === "x" ? "resizing" : "resizing-y";
+    document.body.classList.add(busy);
+
+    const move = (e) => {
+      const now = opts.axis === "x" ? e.clientX : e.clientY;
+      const delta = (now - start) * (opts.invert ? -1 : 1);
+      const size = Math.max(opts.min, Math.min(opts.max(), startSize + delta));
+      opts.set(size);
+    };
+    const up = () => {
+      document.removeEventListener("mousemove", move);
+      document.removeEventListener("mouseup", up);
+      document.body.classList.remove(busy);
+      LS.set(opts.key, opts.get());
+    };
+    document.addEventListener("mousemove", move);
+    document.addEventListener("mouseup", up);
+  });
+}
+
+function setRailWidth(px) { $("rail").style.flex = `0 0 ${px}px`; $("rail").style.width = `${px}px`; }
+function setDockWidth(px) { $("dock").style.flex = `0 0 ${px}px`; $("dock").style.width = `${px}px`; }
+function setSessHeight(px) { $("sessPanel").style.flex = `0 0 ${px}px`; }
+
+function initPanes() {
+  setRailWidth(LS.get("nebula.railW", 280));
+  setDockWidth(LS.get("nebula.dockW", 340));
+  setSessHeight(LS.get("nebula.sessH", 320));
+
+  makeSplitter($("splitRail"), {
+    axis: "x", key: "nebula.railW", min: 180,
+    max: () => Math.max(220, window.innerWidth - 420),
+    get: () => $("rail").getBoundingClientRect().width,
+    set: setRailWidth,
+  });
+  makeSplitter($("splitDock"), {
+    axis: "x", key: "nebula.dockW", min: 240, invert: true,
+    max: () => Math.max(280, window.innerWidth - 420),
+    get: () => $("dock").getBoundingClientRect().width,
+    set: setDockWidth,
+  });
+  makeSplitter($("splitDockRows"), {
+    axis: "y", key: "nebula.sessH", min: 120,
+    max: () => Math.max(160, $("dock").getBoundingClientRect().height - 140),
+    get: () => $("sessPanel").getBoundingClientRect().height,
+    set: setSessHeight,
+  });
 }
 
 // ---- import -------------------------------------------------------------
@@ -245,8 +728,9 @@ async function startImport() {
 }
 async function showImportDialog() {
   $("dlgHead").textContent = `Import ${pendingPaths.length} file(s)`;
+  $("dlgArchive").textContent = activeLabel();
   $("dlgFiles").innerHTML = pendingPaths
-    .map((p) => `<span class="f">${escapeHtml(p.split(/[\\/]/).pop())}</span>`).join("");
+    .map((p) => `<span class="f">${escapeHtml(baseName(p))}</span>`).join("");
 
   const importable = await call("importable_sessions", { archive });
   const sel = $("dlgSession");
@@ -290,6 +774,42 @@ async function doImport() {
   }
 }
 
+// ---- drag and drop ------------------------------------------------------
+// Files dropped on the window take the same path as the Import button --
+// the picker step is simply already done. Tauri gives us absolute paths,
+// so the drop is exactly equivalent to picking those files in the dialog.
+//
+// The webview's onDragDropEvent wrapper is the documented API; we listen to
+// the underlying `tauri://drag-*` events directly instead, since those are
+// available through the plain event API under withGlobalTauri.
+function initDragDrop() {
+  const over = () => {
+    $("dzSub").textContent = archive ? `into ${activeLabel()}` : "open an archive first";
+    $("dropZone").classList.toggle("blocked", !archive);
+    $("dropZone").classList.add("show");
+  };
+  const hide = () => $("dropZone").classList.remove("show");
+
+  const on = (name, fn) =>
+    tauriEvent.listen(name, fn).catch((e) => console.error(`listen ${name} failed`, e));
+
+  on("tauri://drag-enter", over);
+  on("tauri://drag-over", over);
+  on("tauri://drag-leave", hide);
+  on("tauri://drag-drop", (event) => {
+    hide();
+    const p = event.payload || {};
+    onDropPaths(p.paths || []);
+  });
+}
+
+async function onDropPaths(paths) {
+  if (!paths.length) return;
+  if (!archive) { toast("Open an archive before dropping files."); return; }
+  pendingPaths = paths;
+  await showImportDialog();
+}
+
 // ---- misc UI ------------------------------------------------------------
 let toastTimer = null;
 function toast(msg) {
@@ -304,11 +824,70 @@ function setView(list) {
   listView = list;
   $("viewList").classList.toggle("on", list);
   $("viewGrid").classList.toggle("on", !list);
-  if (curSession) { $("itemArea").innerHTML = list ? listHTML() : gridHTML(); wireItems(); }
+  if (curSession || searchMode) renderItemArea();
+}
+
+// ---- search option popovers --------------------------------------------
+function saveSessCfg() { LS.set("nebula.sessCfg", sessCfg); }
+function saveItemCfg() { LS.set("nebula.itemCfg", itemCfg); }
+
+const SESS_BOXES = { sfTitle: "titles", sfId: "ids", sfTag: "tags", ssOpen: "open",
+                     ssClosed: "closed", ssCrashed: "crashed", sqClean: "clean", sqDirty: "dirty" };
+const ITEM_BOXES = { ifName: "name", ifTag: "tags", ifOrigin: "origin", ifSession: "session" };
+
+function syncCfgUI() {
+  for (const [id, key] of Object.entries(SESS_BOXES)) $(id).checked = !!sessCfg[key];
+  for (const [id, key] of Object.entries(ITEM_BOXES)) $(id).checked = !!itemCfg[key];
+  $("ifFrom").value = itemCfg.from || "";
+  $("ifTo").value = itemCfg.to || "";
+}
+
+function closePops(except) {
+  for (const id of ["sessCfg", "itemCfg"]) {
+    if (id !== except) $(id).classList.add("hidden");
+  }
+}
+function togglePop(id) {
+  const el = $(id);
+  const willShow = el.classList.contains("hidden");
+  closePops(willShow ? id : null);
+  el.classList.toggle("hidden", !willShow);
+}
+
+function wireSearchOptions() {
+  for (const [id, key] of Object.entries(SESS_BOXES)) {
+    $(id).onchange = (e) => { sessCfg[key] = e.target.checked; saveSessCfg(); applySessionFilter(); };
+  }
+  for (const [id, key] of Object.entries(ITEM_BOXES)) {
+    $(id).onchange = (e) => { itemCfg[key] = e.target.checked; saveItemCfg(); runItemSearch(); };
+  }
+  $("ifFrom").onchange = (e) => { itemCfg.from = e.target.value; saveItemCfg(); runItemSearch(); };
+  $("ifTo").onchange = (e) => { itemCfg.to = e.target.value; saveItemCfg(); runItemSearch(); };
+  $("ifReset").onclick = () => {
+    itemCfg.from = ""; itemCfg.to = "";
+    $("ifFrom").value = ""; $("ifTo").value = "";
+    saveItemCfg(); runItemSearch();
+  };
+
+  $("sessCfgBtn").onclick = (e) => { e.stopPropagation(); togglePop("sessCfg"); };
+  $("itemCfgBtn").onclick = (e) => { e.stopPropagation(); togglePop("itemCfg"); };
+  $("sessCfg").onclick = (e) => e.stopPropagation();
+  $("itemCfg").onclick = (e) => e.stopPropagation();
+  document.addEventListener("click", () => closePops(null));
+
+  $("sessSearch").oninput = (e) => { sessQuery = e.target.value; applySessionFilter(); };
+  $("sessSearchClear").onclick = () => { $("sessSearch").value = ""; sessQuery = ""; applySessionFilter(); };
+  $("itemSearch").oninput = scheduleItemSearch;
+  $("itemSearchClear").onclick = clearItemSearch;
+  document.addEventListener("keydown", (e) => {
+    if (e.key === "Escape") closePops(null);
+  });
 }
 
 // ---- wiring -------------------------------------------------------------
 $("openArchive").onclick = openArchive;
+$("closeArchive").onclick = closeArchive;
+$("archiveSel").onchange = (e) => onArchivePicked(e.target.value);
 $("refresh").onclick = () => reload();
 $("viewList").onclick = () => setView(true);
 $("viewGrid").onclick = () => setView(false);
@@ -317,7 +896,11 @@ $("verify").onchange = (e) => { verify = e.target.checked; reloadItems(); };
 $("openArt").onclick = () => selected && selected.artifact_path && call("open_path", { path: selected.artifact_path });
 $("editSc").onclick = () => selected && selected.sidecar_path && call("open_path", { path: selected.sidecar_path });
 $("openSc").onclick = () => selected && openSidecarPanel(selected);
-$("scClose").onclick = () => $("scPanel").classList.add("hidden");
+$("scClose").onclick = () => { showSc = false; savePanels(); updateDock(); };
+$("scRaw").onclick = () => { scRaw = !scRaw; renderSidecarPanel(); };
+$("sessInfoBtn").onclick = toggleSessionPanel;
+$("sessClose").onclick = () => { showSess = false; savePanels(); updateDock(); };
+$("sessRaw").onclick = () => { sessRaw = !sessRaw; renderSessionPanel(); };
 $("importBtn").onclick = startImport;
 $("modeExisting").onchange = syncMode;
 $("modeNew").onchange = syncMode;
@@ -332,6 +915,39 @@ $("themeBtn").onclick = () => {
 };
 
 // ---- boot ---------------------------------------------------------------
-if (archive) {
-  loadArchive(archive).catch((e) => toast(`Startup error: ${e}`));
+async function boot() {
+  initPanes();
+  initDragDrop();
+
+  sessCfg = Object.assign(sessCfg, LS.get("nebula.sessCfg", {}));
+  itemCfg = Object.assign(itemCfg, LS.get("nebula.itemCfg", {}));
+  syncCfgUI();
+  wireSearchOptions();
+  $("sessCfgBtn").classList.toggle("on", isSessCfgNarrowed());
+  $("itemCfgBtn").classList.toggle("on", !!(itemCfg.from || itemCfg.to));
+
+  const panels = LS.get("nebula.panels", { sess: false, sc: false });
+  showSess = !!panels.sess;
+  showSc = false;              // nothing selected yet, so no sidecar to show
+  updateDock();
+  renderSessionPanel();
+
+  archives = LS.get("nebula.archives", []);
+  const last = localStorage.getItem("nebula.archive") || null;
+  if (!archives.length && last) archives = [{ id: last, label: last }];
+
+  try {
+    registry = await call("list_archives", {});
+  } catch (e) {
+    registry = [];             // no registry file, or the bridge is down
+  }
+  renderArchiveSelect();
+
+  const start = archives.some((a) => a.id === last) ? last : (archives[0] || {}).id;
+  if (start) {
+    try { await loadArchive(start); }
+    catch (e) { toast(`Startup error: ${e}`); }
+  }
 }
+
+boot();
