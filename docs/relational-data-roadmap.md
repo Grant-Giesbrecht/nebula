@@ -59,7 +59,7 @@ panel renders them with the same row component as lineage (↔ arrow) — struck
 through when missing, marked separately when the archive is unreachable, and
 clickable when the target is there.
 
-### 2. Transitive lineage — **WANTED**, depth **OPEN**
+### 2. Transitive lineage — **DONE** (2026-08-01)
 
 `model.lineage()` deliberately walks the filesystem (so it is right even with
 a stale index) but stops at one hop. `graph.py` already does transitive
@@ -94,9 +94,12 @@ which argues for putting depth in the GUI (default 3, with expand) rather
 than in `archive.yaml`, where it would be an archive-wide answer to a
 per-question choice.
 
-**Open:** the default depth, and whether "expand" is per-node or global.
+**Shipped** as `model.provenance_tree()` + the Relations tab: multi-hop in
+both directions, index-first with a sidecar-scan fallback (the view says
+which it used), a depth control (1/2/3/5/10/all, default 3), and a "go
+deeper" affordance on any node whose children were withheld.
 
-### 3. Session-level provenance view — **WANTED**, form **OPEN**
+### 3. Session-level provenance view — **DONE** (2026-08-01), form: tree
 
 Everything today is per-file. Nothing answers "what did this run produce, and
 what came of it" in one look.
@@ -110,8 +113,16 @@ timestamp. Shows fan-in/fan-out honestly (a tree duplicates a node that has
 two parents), and is the natural seed of the timeline canvas in item 5.
 Costs layout code to maintain and needs the main area, not the dock.
 
-**Open:** which one. Recommendation: start with A, because B's layout is only
-worth writing once it doubles as the timeline canvas.
+**Chosen: A.** `provenance_tree(archive, run_id)` with no filename makes
+every artefact the session produced a top-level branch, each with its own
+"Built from" and "Used by". Because the tree is walked with one shared
+visited set per branch, a diamond appears under both parents but expands
+only once and the repeat is labelled *shown above* — an indented tree
+cannot draw reconvergence, so it says so rather than duplicating a subtree
+(which also stops a wide DAG from blowing up).
+
+B stays open as the seed of the timeline canvas (item 5); the tree already
+consumes the shape a node-link view would need, so nothing is wasted.
 
 ### 4. Calendar / activity view — **4a/4b DONE** (2026-08-01)
 
@@ -184,9 +195,6 @@ does this with the `script?` chip.
 
 ## Open questions
 
-- **Transitive depth** — now a display question, not a performance one (see
-  item 2): what default, and is "expand" per-node or global?
-- **Session view form** — indented tree vs node-link (item 3).
 - **Cross-archive traversal** — `graph.py` needs an index and the registry.
   Show unreachable archives as "unresolved" nodes (as `_resolve_ref` already
   does), or hide them?
@@ -207,6 +215,6 @@ does this with the `script?` chip.
 2. ~~Rail date grouping + activity strip (item 4a, 4b)~~ — **done**
 3. ~~Index freshness, relative paths, reverse edge index, year seals~~ —
    **done** (2026-08-01); the prerequisite for cheap multi-hop traversal.
-4. Transitive lineage with a depth cap (item 2) — next, needs the depth decision.
-5. Session provenance view, indented tree first (item 3) — needs the form decision.
-6. Reassess the timeline canvas and the `source` facet (items 5, 6).
+4. ~~Transitive lineage with a depth cap (item 2)~~ — **done**
+5. ~~Session provenance view, indented tree (item 3)~~ — **done**
+6. Reassess the timeline canvas and the `source` facet (items 5, 6) — next.

@@ -23,7 +23,7 @@ import json
 import os
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import List, Optional
+from typing import Dict, List, Optional
 
 from nebula import annotations
 from nebula.index import _iter_session_dirs
@@ -560,6 +560,246 @@ def lineage(archive, session_path, filename: str) -> dict:
         "upstream": upstream, "downstream": downstream,
         "complete": True,   # downstream is same-archive only, by construction
     }
+
+
+#: How many hops the tree view asks for unless told otherwise. Depth is a
+#: display choice, not a performance one: with the index swept and the
+#: reverse edge indexed, hops are cheap -- but a screen full of ancestors
+#: nobody asked for is still a worse answer than three and an "expand".
+DEFAULT_TREE_DEPTH = 3
+
+
+class _Lineage:
+    """One archive's provenance edges, answered index-first.
+
+    The index is swept before use (index.ensure_fresh), so it is normally
+    exact. When it can't be used at all -- no index, unreadable, a
+    filesystem we can only read -- this falls back to scanning sidecars,
+    which is slower but always right. Callers are told which happened via
+    ``source``, because "fast" and "trustworthy" are different promises
+    and a view should not quietly imply the wrong one.
+
+    Answers are memoised for the life of one query: a diamond in the graph
+    asks the same question twice, and the tree is walked breadth-first.
+    """
+
+    def __init__(self, archive_root: Path):
+        self.root = Path(archive_root)
+        self.source = "index"
+        self._conn = None
+        self._up: Dict[tuple, list] = {}
+        self._down: Dict[tuple, list] = {}
+        try:
+            from nebula import index as index_mod
+
+            self._conn = index_mod.open_fresh(self.root)
+        except Exception:       # noqa: BLE001 -- any index trouble: scan instead
+            self._conn = None
+            self.source = "scan"
+
+    def close(self) -> None:
+        if self._conn is not None:
+            try:
+                self._conn.close()
+            except Exception:   # noqa: BLE001
+                pass
+            self._conn = None
+
+    def parents(self, run_id: str, filename: str) -> List[dict]:
+        """Raw derived_from refs of one artefact, as dicts."""
+        key = (run_id, filename)
+        if key not in self._up:
+            self._up[key] = (self._parents_indexed(run_id, filename)
+                             if self._conn is not None
+                             else self._parents_scanned(run_id, filename))
+        return self._up[key]
+
+    def children(self, run_id: str, filename: str) -> List[dict]:
+        """Same-archive artefacts declaring they came from this one."""
+        key = (run_id, filename)
+        if key not in self._down:
+            self._down[key] = (self._children_indexed(run_id, filename)
+                               if self._conn is not None
+                               else self._children_scanned(run_id, filename))
+        return self._down[key]
+
+    # -- index-backed ----------------------------------------------------
+    def _parents_indexed(self, run_id, filename):
+        rows = self._conn.execute(
+            "SELECT ref_archive, ref_session, ref_file FROM derived_from "
+            "WHERE run_id = ? AND filename = ?", (run_id, filename)).fetchall()
+        return [{"archive": r["ref_archive"], "session": r["ref_session"],
+                 "file": r["ref_file"]} for r in rows]
+
+    def _children_indexed(self, run_id, filename):
+        # The reverse edge, which idx_derived_from_ref exists for. A child's
+        # ref may name this session explicitly or leave it implicit (same
+        # session), and may or may not name this archive.
+        rows = self._conn.execute(
+            """
+            SELECT run_id, filename FROM derived_from
+            WHERE ref_file = ?
+              AND ref_archive IS NULL
+              AND (ref_session = ? OR (ref_session IS NULL AND run_id = ?))
+            """, (filename, run_id, run_id)).fetchall()
+        return [{"run_id": r["run_id"], "filename": r["filename"]} for r in rows]
+
+    # -- filesystem fallback ---------------------------------------------
+    def _parents_scanned(self, run_id, filename):
+        session_dir = _find_session_dir(self.root, run_id)
+        if session_dir is None:
+            return []
+        art = session_dir / filename
+        if not sidecar_path_for(art).is_file():
+            return []
+        try:
+            meta = read_sidecar(art)
+        except Exception:       # noqa: BLE001
+            return []
+        return [_ref_dict(r) for r in meta.derived_from_refs()]
+
+    def _children_scanned(self, run_id, filename):
+        from nebula.check import dependents_of
+
+        out = []
+        for hit in dependents_of(self.root, run_id, filename):
+            dep_run, _, dep_file = hit.partition("/")
+            out.append({"run_id": dep_run, "filename": dep_file})
+        return out
+
+
+def _tree_node(archive_root: Path, label: str, run_id: str, filename: str,
+               *, note=None, resolved=True) -> dict:
+    """One artefact as the tree renders it: what it is, where it is, and
+    whether it is actually there."""
+    session_dir = _find_session_dir(archive_root, run_id) if resolved else None
+    path = (session_dir / filename) if (session_dir and filename) else None
+    return {
+        "ref": f"{run_id}/{filename}" if filename else run_id,
+        "run_id": run_id, "filename": filename, "archive": label,
+        "session_path": str(session_dir) if session_dir else None,
+        "path": str(path) if path else None,
+        "exists": bool(path and path.is_file()),
+        "resolved": resolved, "note": note,
+        "children": [], "truncated": False, "seen": False,
+    }
+
+
+def provenance_tree(archive, run_id: str, filename: Optional[str] = None, *,
+                    direction: str = "both", depth: int = DEFAULT_TREE_DEPTH) -> dict:
+    """A nested provenance tree, for the relations view.
+
+    Rooted either at one artefact (``filename`` given) or at a whole
+    session, in which case every artefact the session produced becomes a
+    top-level branch -- the "what did this run produce, and what came of
+    it" question that nothing answered before.
+
+    ``direction`` is "up", "down" or "both". ``depth`` caps the hops; a
+    node whose children were not expanded because of the cap is marked
+    ``truncated`` so the view can offer to go further, and a node already
+    shown elsewhere in the tree is marked ``seen`` rather than being
+    expanded twice -- an indented tree cannot draw a diamond, so it should
+    at least admit to one.
+    """
+    archive_root, label = resolve(archive)
+    lin = _Lineage(archive_root)
+    try:
+        def walk(node: dict, direction: str, left: int, seen: set) -> None:
+            # `seen` is shared across the whole branch, not per path. That
+            # catches cycles, and it is also what makes a diamond honest: an
+            # indented tree cannot show that two paths reconverge, so the
+            # second appearance is marked instead of being expanded again --
+            # which additionally stops a wide DAG from blowing up.
+            key = (node["run_id"], node["filename"])
+            if key in seen:
+                node["seen"] = True
+                return
+            seen.add(key)
+            if left <= 0:
+                edges = (lin.parents(*key) if direction == "up"
+                         else lin.children(*key))
+                node["truncated"] = bool(edges)
+                return
+            if direction == "up":
+                for ref in lin.parents(*key):
+                    child = _parent_node(archive_root, label, node["run_id"], ref)
+                    node["children"].append(child)
+                    if child["resolved"] and child["filename"]:
+                        walk(child, "up", left - 1, seen)
+            else:
+                for edge in lin.children(*key):
+                    child = _tree_node(archive_root, label,
+                                       edge["run_id"], edge["filename"])
+                    node["children"].append(child)
+                    walk(child, "down", left - 1, seen)
+
+        roots = []
+        if filename:
+            roots = [filename]
+        else:
+            session_dir = _find_session_dir(archive_root, run_id)
+            if session_dir is not None:
+                roots = [it.name for it in list_items(session_dir)
+                         if it.has_sidecar]
+
+        out = {"archive": label, "root": str(archive_root), "run_id": run_id,
+               "filename": filename, "direction": direction, "depth": depth,
+               "source": lin.source, "branches": []}
+        for name in roots:
+            branch = {"item": _tree_node(archive_root, label, run_id, name),
+                      "upstream": [], "downstream": []}
+            if direction in ("up", "both"):
+                up = _tree_node(archive_root, label, run_id, name)
+                walk(up, "up", depth, set())
+                branch["upstream"] = up["children"]
+                branch["item"]["truncated_up"] = up["truncated"]
+            if direction in ("down", "both"):
+                down = _tree_node(archive_root, label, run_id, name)
+                walk(down, "down", depth, set())
+                branch["downstream"] = down["children"]
+                branch["item"]["truncated_down"] = down["truncated"]
+            out["branches"].append(branch)
+        out["session"] = _session_summary(archive_root, run_id)
+        return out
+    finally:
+        lin.close()
+
+
+def _parent_node(archive_root: Path, label: str, from_run: str, ref: dict) -> dict:
+    """An upstream edge, which -- unlike a downstream one -- may point into
+    another archive, and so may not be resolvable at all."""
+    target_run = ref.get("session") or from_run
+    other = ref.get("archive")
+    if other is not None and other != label:
+        cfg = get_registry().try_get(other)
+        if cfg is None or not Path(cfg.root).is_dir():
+            node = _tree_node(archive_root, other, target_run, ref.get("file"),
+                              resolved=False,
+                              note=(f"archive {other!r} is not registered here"
+                                    if cfg is None else
+                                    f"archive {other!r} is not mounted"))
+            return node
+        node = _tree_node(Path(cfg.root), other, target_run, ref.get("file"))
+        return node
+    node = _tree_node(archive_root, label, target_run, ref.get("file"))
+    if not node["session_path"]:
+        node["note"] = f"session {target_run} not found"
+    elif not node["exists"]:
+        node["note"] = "file is missing"
+    return node
+
+
+def _session_summary(archive_root: Path, run_id: str) -> Optional[dict]:
+    session_dir = _find_session_dir(archive_root, run_id)
+    if session_dir is None:
+        return None
+    try:
+        meta = read_session_yaml(session_dir)
+    except Exception:           # noqa: BLE001
+        return None
+    return {"run_id": meta.run_id, "description": meta.description,
+            "created": meta.created, "status": meta.status,
+            "path": str(session_dir)}
 
 
 def resolve_refs(archive, run_id: str, refs: List[str]) -> List[dict]:

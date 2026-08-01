@@ -158,6 +158,15 @@ def op_lineage(args: Dict[str, Any]) -> Dict[str, Any]:
     return model.lineage(args["archive"], args["session_path"], args["filename"])
 
 
+def op_provenance_tree(args: Dict[str, Any]) -> Dict[str, Any]:
+    """The relations view: a nested, depth-capped provenance tree rooted at
+    an artefact or a whole session."""
+    return model.provenance_tree(
+        args["archive"], args["run_id"], args.get("filename") or None,
+        direction=args.get("direction") or "both",
+        depth=int(args.get("depth") or model.DEFAULT_TREE_DEPTH))
+
+
 def op_code_info(args: Dict[str, Any]) -> Dict[str, Any]:
     return model.code_info(args["archive"], args["code"])
 
@@ -546,6 +555,7 @@ OPS = {
     "list_archives": op_list_archives,
     "search_items": op_search_items,
     "lineage": op_lineage,
+    "provenance_tree": op_provenance_tree,
     "resolve_refs": op_resolve_refs,
     "code_info": op_code_info,
     "restore_code": op_restore_code,

@@ -351,6 +351,25 @@ fn install_menu(app: &tauri::App) -> tauri::Result<()> {
         .accelerator("CmdOrCtrl+Shift+I")
         .build(app)?;
 
+    let new_tab = MenuItemBuilder::with_id("menu:new-tab", "New Tab")
+        .accelerator("CmdOrCtrl+T")
+        .build(app)?;
+    let dup_tab = MenuItemBuilder::with_id("menu:duplicate-tab", "Duplicate Tab")
+        .accelerator("CmdOrCtrl+D")
+        .build(app)?;
+    let close_tab = MenuItemBuilder::with_id("menu:close-tab", "Close Tab")
+        .accelerator("CmdOrCtrl+W")
+        .build(app)?;
+    let next_tab = MenuItemBuilder::with_id("menu:next-tab", "Next Tab")
+        .accelerator("CmdOrCtrl+Shift+]")
+        .build(app)?;
+    let prev_tab = MenuItemBuilder::with_id("menu:prev-tab", "Previous Tab")
+        .accelerator("CmdOrCtrl+Shift+[")
+        .build(app)?;
+    let relations = MenuItemBuilder::with_id("menu:relations", "Show Relations")
+        .accelerator("CmdOrCtrl+Shift+L")
+        .build(app)?;
+
     let tab_sessions = MenuItemBuilder::with_id("menu:tab-sessions", "Sessions")
         .accelerator("CmdOrCtrl+1")
         .build(app)?;
@@ -368,6 +387,7 @@ fn install_menu(app: &tauri::App) -> tauri::Result<()> {
         .separator()
         .item(&metadata)
         .item(&session)
+        .item(&relations)
         .separator()
         .item(&collect)
         .item(&archive)
@@ -378,6 +398,13 @@ fn install_menu(app: &tauri::App) -> tauri::Result<()> {
         .build()?;
 
     let window_menu = SubmenuBuilder::new(app, "Window")
+        .item(&new_tab)
+        .item(&dup_tab)
+        .item(&close_tab)
+        .separator()
+        .item(&next_tab)
+        .item(&prev_tab)
+        .separator()
         .minimize()
         .maximize()
         .fullscreen()

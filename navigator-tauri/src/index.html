@@ -13,6 +13,11 @@
       <button class="theme-toggle" id="themeBtn">◐ Theme</button>
     </div>
 
+    <div class="tabbar hidden" id="tabbar">
+      <div class="tabstrip" id="tabstrip"></div>
+      <button class="tabadd" id="tabAdd" title="New tab  (Ctrl-T)">+</button>
+    </div>
+
     <div class="body">
       <aside class="rail" id="rail">
         <div class="arc-bar">
@@ -90,10 +95,10 @@
             <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12a9 9 0 1 1-2.64-6.36"/><path d="M21 4v5h-5"/></svg>
           </button>
           <div class="seg">
-            <button class="tbtn on" id="viewList" title="List view">
+            <button class="tbtn on" id="viewModeList" title="List view">
               <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><line x1="8" y1="6" x2="21" y2="6"/><line x1="8" y1="12" x2="21" y2="12"/><line x1="8" y1="18" x2="21" y2="18"/><line x1="3" y1="6" x2="3.01" y2="6"/><line x1="3" y1="12" x2="3.01" y2="12"/><line x1="3" y1="18" x2="3.01" y2="18"/></svg>
             </button>
-            <button class="tbtn" id="viewGrid" title="Grid view">
+            <button class="tbtn" id="viewModeGrid" title="Grid view">
               <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/><rect x="14" y="14" width="7" height="7" rx="1"/></svg>
             </button>
           </div>
@@ -136,6 +141,24 @@
           </button>
         </div>
 
+        <div class="toolbar tree-tools hidden" id="treeTools">
+          <span class="tree-root" id="treeRootLabel"></span>
+          <div class="vdiv"></div>
+          <label class="check"><input type="checkbox" id="treeUp" checked /> Sources</label>
+          <label class="check"><input type="checkbox" id="treeDown" checked /> Results</label>
+          <div class="vdiv"></div>
+          <span class="check">Depth
+            <select id="treeDepth">
+              <option value="1">1</option><option value="2">2</option>
+              <option value="3" selected>3</option><option value="5">5</option>
+              <option value="10">10</option><option value="50">all</option>
+            </select>
+          </span>
+          <div class="spacer"></div>
+          <span class="tree-src" id="treeSource"></span>
+          <button class="tbtn" id="treeReload" title="Recompute">↻</button>
+        </div>
+
         <div class="search-row wide">
           <span class="s-ico">
             <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><circle cx="11" cy="11" r="7"/><line x1="16.5" y1="16.5" x2="21" y2="21"/></svg>
@@ -162,6 +185,8 @@
         </div>
 
         <div class="item-area" id="itemArea"><div class="empty">Open an archive to begin.</div></div>
+
+        <div class="tree-area hidden" id="treeArea"></div>
 
         <div class="details">
           <div class="det-actions">

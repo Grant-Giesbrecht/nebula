@@ -146,6 +146,44 @@ Other things worth knowing about the window:
   undo; `delete` offers a forced retry if another artefact still derives
   from the file.
 
+### Tabs
+
+Finder-style tabs over one window. A tab owns a **location** — which rail
+tab is showing, which session or collection is open, the search text, the
+selection — while the archive and the loaded session list stay shared,
+because those describe the machine's state rather than a place you
+navigated to. Switching tabs freezes the location you are leaving and thaws
+the one you are entering (`browseState()` / `restoreBrowse()` in `main.js`).
+
+The strip stays hidden while there is only one tab, since a lone tab is
+just "the window". New tabs open beside their opener, not at the end.
+Cmd/Ctrl-click a session, or use the right-click menu on a session or
+collection, to open it in a new tab. Tabs are persisted as locations, not
+as loaded data, so a restored tab pointing at a session that has since gone
+simply lands on the archive with nothing open.
+
+Tearing a tab out into a separate window is **not** implemented: Tauri
+would need a second webview plus a way to hand the location across, which
+is a larger change than the rest of this put together.
+
+### The Relations tab
+
+`Show relations` (right-click a session or file, or `Mod-Shift-L`) opens a
+tab showing the provenance tree, rooted either at one artefact or — with no
+file — at every artefact a session produced.
+
+Both directions are shown: **Built from** (upstream, walking `derived_from`)
+and **Used by** (downstream, the reverse edge). Depth defaults to 3; a node
+whose children were withheld offers *go deeper*. Missing files are struck
+through with the reason, archives that can't be reached are marked
+separately and are not clickable, and a node reachable by two paths expands
+once with the repeat labelled *shown above* — an indented tree can't draw a
+diamond, so it admits to one instead.
+
+The footer says whether the answer came **from the index** or was **read
+from sidecars**. Both are correct; only one is fast, and the view shouldn't
+imply the wrong one. See `model.provenance_tree()`.
+
 ### Keyboard shortcuts
 
 Cmd on macOS, Ctrl on Windows/Linux (`hasMod()` in `main.js` picks the
@@ -160,6 +198,12 @@ modifier; tooltips are rewritten to ⌘ / ⇧⌘ at boot on macOS):
 | `Mod-O`       | Open the selection in the default app |
 | `Mod-Shift-C` | Add the selection to a collection |
 | `Mod-1/2/3`   | Sessions / Collections / Saved searches |
+| `Mod-T`       | New tab |
+| `Mod-D`       | Duplicate the current tab |
+| `Mod-W`       | Close tab (the last one stays open) |
+| `Mod-Shift-]` / `Mod-Shift-[` | Next / previous tab |
+| `Ctrl-Tab`    | Cycle tabs (Ctrl on every platform, including macOS) |
+| `Mod-Shift-L` | Show relations for the selection |
 
 On macOS these are listed in the **View** menu so they can be found without
 memorising them. That has an implementation consequence worth knowing:

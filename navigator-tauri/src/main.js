@@ -263,6 +263,387 @@ async function reload() {
   $("statusbar").textContent = `${activeLabel()} — ${sessions.length} session(s)`;
 }
 
+// ---- window tabs --------------------------------------------------------
+// Finder-style tabs over one window. A tab owns a *location* -- which rail
+// tab is showing, which session or collection is open, the search, the
+// selection -- while the archive itself and the loaded session list stay
+// shared, because they describe the machine's state rather than a place
+// you navigated to.
+//
+// Switching tabs is therefore: freeze the current location into the tab we
+// are leaving, thaw the one we are entering.
+let tabs = [];              // [{ id, kind: "browse" | "tree", state }]
+let activeTab = null;       // id
+let tabSeq = 1;
+
+function newTabId() { return `t${tabSeq++}`; }
+
+function browseState() {
+  return {
+    railTab, searchMode,
+    sessionRun: curSession ? curSession.run_id : null,
+    sessionPath: curSession ? curSession.path : null,
+    collection: openCollection, collPath: collPath.slice(),
+    itemQuery: $("itemSearch").value, sessQuery,
+    selectedName: selected ? selected.name : null,
+    calFrom, calTo, showCal,
+  };
+}
+
+function blankTab(kind, state) {
+  return { id: newTabId(), kind, state: state || (kind === "browse" ? browseState() : {}) };
+}
+
+function activeTabObj() { return tabs.find((t) => t.id === activeTab) || null; }
+
+function tabTitle(tab) {
+  if (tab.kind === "tree") {
+    const st = tab.state || {};
+    return st.filename ? st.filename : (st.run_id ? `${st.run_id} relations` : "Relations");
+  }
+  const st = tab.state || {};
+  if (st.searchMode) return st.itemQuery ? `“${st.itemQuery}”` : "Search";
+  if (st.collection) return st.collection;
+  if (st.sessionRun) return st.sessionRun;
+  return "Archive";
+}
+
+const TAB_ICONS = {
+  browse: `<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/></svg>`,
+  tree: `<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><circle cx="6" cy="6" r="2.5"/><circle cx="18" cy="12" r="2.5"/><circle cx="6" cy="18" r="2.5"/><path d="M8.5 6H13a2 2 0 0 1 2 2v1.5"/><path d="M8.5 18H13a2 2 0 0 0 2-2v-1.5"/></svg>`,
+};
+
+function renderTabs() {
+  // A single tab is just "the window", so the strip stays out of the way
+  // until there is actually a choice to make.
+  $("tabbar").classList.toggle("hidden", tabs.length < 2);
+  $("tabstrip").innerHTML = tabs.map((t) => `
+    <div class="wtab ${t.id === activeTab ? "on" : ""}" data-tab="${t.id}" title="${escapeHtml(tabTitle(t))}">
+      <span class="wt-ico">${TAB_ICONS[t.kind] || ""}</span>
+      <span class="wt-label">${escapeHtml(tabTitle(t))}</span>
+      <span class="wt-x" data-close="${t.id}" title="Close tab">✕</span>
+    </div>`).join("");
+  $("tabstrip").querySelectorAll(".wtab").forEach((el) => {
+    el.onclick = (ev) => {
+      const close = ev.target.closest("[data-close]");
+      if (close) { closeTab(close.getAttribute("data-close")); return; }
+      selectTab(el.getAttribute("data-tab"));
+    };
+  });
+}
+
+function applyTabChrome() {
+  // The relations view replaces the file list, so the file-list chrome goes
+  // with it rather than sitting there inert.
+  const tree = (activeTabObj() || {}).kind === "tree";
+  $("treeArea").classList.toggle("hidden", !tree);
+  $("treeTools").classList.toggle("hidden", !tree);
+  $("itemArea").classList.toggle("hidden", tree);
+  document.querySelector(".main .search-row.wide").classList.toggle("hidden", tree);
+  document.querySelector(".main .toolbar:not(.tree-tools)").classList.toggle("hidden", tree);
+  $("rail").classList.toggle("hidden", tree);
+  document.getElementById("splitRail").classList.toggle("hidden", tree);
+}
+
+async function selectTab(id) {
+  if (id === activeTab) return;
+  const cur = activeTabObj();
+  if (cur && cur.kind === "browse") cur.state = browseState();
+  activeTab = id;
+  LS.set("nebula.activeTab", id);
+  const tab = activeTabObj();
+  renderTabs();
+  applyTabChrome();
+  if (!tab) return;
+  if (tab.kind === "tree") { await renderTreeTab(tab); return; }
+  await restoreBrowse(tab.state || {});
+}
+
+async function restoreBrowse(st) {
+  sessQuery = st.sessQuery || "";
+  $("sessSearch").value = sessQuery;
+  calFrom = st.calFrom || null; calTo = st.calTo || null;
+  showCal = !!st.showCal;
+  $("itemSearch").value = st.itemQuery || "";
+  setRailTab(st.railTab || "sessions", { keepLocation: true });
+  renderCalendar();
+  applySessionFilter();
+
+  if (st.searchMode && st.itemQuery) { await runItemSearch(); return; }
+  searchMode = false; searchMeta = null;
+  if (st.collection) {
+    collPath = (st.collPath || []).slice();
+    await loadCollections();
+    await showCollection(st.collection, { push: false });
+    return;
+  }
+  openCollection = null;
+  const sess = sessions.find((x) => x.run_id === st.sessionRun);
+  if (sess) {
+    curSession = sess;
+    selected = null; picked = []; pickAnchor = null;
+    renderSessions();
+    await reloadItems();
+    const want = (items || []).find((i) => i.name === st.selectedName);
+    if (want) { selected = want; applyItemView(); }
+    updateDetails();
+    await refreshSessionInfo();
+  } else {
+    curSession = null; items = []; selected = null;
+    renderSessions(); applyItemView(); updateDetails();
+    // Nothing open in this tab: the status bar has to say so, or it keeps
+    // describing wherever the tab we just left was.
+    $("statusbar").textContent = `${activeLabel()} — ${sessions.length} session(s)`;
+  }
+}
+
+function addTab(kind, state, { activate = true } = {}) {
+  const cur = activeTabObj();
+  if (cur && cur.kind === "browse") cur.state = browseState();
+  const tab = blankTab(kind, state);
+  const at = tabs.findIndex((t) => t.id === activeTab);
+  tabs.splice(at < 0 ? tabs.length : at + 1, 0, tab);   // beside its opener, like Finder
+  saveTabs();
+  if (!activate) { renderTabs(); return tab; }
+  activeTab = null;                      // force selectTab to do the work
+  selectTab(tab.id);
+  return tab;
+}
+
+function closeTab(id) {
+  if (tabs.length < 2) { toast("The last tab stays open."); return; }
+  const idx = tabs.findIndex((t) => t.id === id);
+  if (idx < 0) return;
+  tabs.splice(idx, 1);
+  saveTabs();
+  if (id === activeTab) {
+    const next = tabs[Math.min(idx, tabs.length - 1)];
+    activeTab = null;
+    selectTab(next.id);
+  } else {
+    renderTabs();
+  }
+}
+
+function cycleTab(delta) {
+  if (tabs.length < 2) return;
+  const idx = tabs.findIndex((t) => t.id === activeTab);
+  const next = tabs[(idx + delta + tabs.length) % tabs.length];
+  selectTab(next.id);
+}
+
+function restoreTabs() {
+  // Tabs come back as *locations*, not as loaded data: the archive is
+  // loaded once afterwards, and whichever tab is active then restores
+  // itself against it. A saved tab pointing at a session that has since
+  // gone simply lands on the archive with nothing open.
+  const saved = LS.get("nebula.tabs", null);
+  const list = saved && Array.isArray(saved.tabs) ? saved.tabs.filter((t) => t && t.id) : [];
+  if (list.length) {
+    tabs = list;
+    activeTab = saved.activeTab && list.some((t) => t.id === saved.activeTab)
+      ? saved.activeTab : list[0].id;
+    // Keep generated ids from colliding with restored ones.
+    tabSeq = 1 + list.reduce((m, t) => Math.max(m, parseInt(String(t.id).slice(1), 10) || 0), 0);
+  } else {
+    tabs = [blankTab("browse")];
+    activeTab = tabs[0].id;
+  }
+  renderTabs();
+  applyTabChrome();
+}
+
+// Tab titles follow the location, so re-render the strip whenever the
+// location moves -- but coalesce, since navigation fires several of these.
+let tabSaveTimer = null;
+function scheduleTabSave() {
+  clearTimeout(tabSaveTimer);
+  tabSaveTimer = setTimeout(() => { saveTabs(); renderTabs(); }, 120);
+}
+
+function saveTabs() {
+  const cur = activeTabObj();
+  if (cur && cur.kind === "browse") cur.state = browseState();
+  LS.set("nebula.tabs", { tabs, activeTab });
+}
+
+function duplicateTab() {
+  const cur = activeTabObj();
+  if (!cur) return;
+  addTab(cur.kind, JSON.parse(JSON.stringify(cur.kind === "browse" ? browseState() : cur.state)));
+}
+
+// Opening "in a new tab" is the same gesture everywhere: build the location
+// the click would have navigated to, and hand it to a fresh tab instead.
+function openSessionInNewTab(s) {
+  addTab("browse", Object.assign(browseState(), {
+    railTab: "sessions", searchMode: false, collection: null, collPath: [],
+    sessionRun: s.run_id, sessionPath: s.path, selectedName: null, itemQuery: "",
+  }));
+}
+
+function openCollectionInNewTab(name) {
+  addTab("browse", Object.assign(browseState(), {
+    railTab: "collections", searchMode: false, collection: name, collPath: [name],
+    selectedName: null, itemQuery: "",
+  }));
+}
+
+function openSearchInNewTab(query) {
+  addTab("browse", Object.assign(browseState(), {
+    railTab: "sessions", searchMode: true, itemQuery: query,
+    collection: null, collPath: [], selectedName: null,
+  }));
+}
+
+function openRelationsTab(runId, filename) {
+  if (!runId) { toast("Select a session or file first."); return; }
+  addTab("tree", { run_id: runId, filename: filename || null,
+                   direction: "both", depth: 3 });
+}
+
+function openRelationsForSelection() {
+  if (!archive) { toast("No archive open."); return; }
+  if (selected && curSession) return openRelationsTab(curSession.run_id, selected.name);
+  if (selected && selected.run_id) return openRelationsTab(selected.run_id, selected.name);
+  if (curSession) return openRelationsTab(curSession.run_id, null);
+  toast("Open a session or select a file first.");
+}
+
+// ---- relations (tree) view ---------------------------------------------
+let treeData = null, treeExpanded = {};
+
+async function renderTreeTab(tab) {
+  const st = tab.state;
+  $("treeUp").checked = st.direction !== "down";
+  $("treeDown").checked = st.direction !== "up";
+  $("treeDepth").value = String(st.depth || 3);
+  $("treeRootLabel").textContent = st.filename ? `${st.run_id}/${st.filename}` : st.run_id;
+  $("treeArea").innerHTML = `<div class="tree-empty">Working…</div>`;
+  if (!archive) { $("treeArea").innerHTML = `<div class="tree-empty">No archive open.</div>`; return; }
+  try {
+    treeData = await call("provenance_tree", {
+      archive, run_id: st.run_id, filename: st.filename || "",
+      direction: st.direction || "both", depth: st.depth || 3,
+    });
+  } catch (e) {
+    treeData = null;
+    $("treeArea").innerHTML = `<div class="tree-empty">Couldn't build the tree: ${escapeHtml(String(e))}</div>`;
+    return;
+  }
+  renderTree();
+  $("statusbar").textContent = `${activeLabel()} — relations for `
+    + `${st.filename ? st.run_id + "/" + st.filename : st.run_id}`;
+}
+
+// "index" means the answer came from the swept SQLite index; "scan" means
+// it came from reading sidecars. Both are correct -- but only one of them
+// is fast, and a view shouldn't imply the wrong one.
+function treeSourceLabel(source) {
+  return source === "scan"
+    ? "read from sidecars (no usable index)"
+    : "from the index";
+}
+
+function treeNodeHTML(node, dir, depthPath) {
+  const key = `${depthPath}|${node.ref}`;
+  const kids = node.children || [];
+  const open = treeExpanded[key] !== false;
+  const arrow = dir === "up" ? "←" : "→";
+  const cls = [
+    "tnode",
+    node.resolved === false ? "unresolved" : "",
+    node.resolved !== false && !node.exists ? "missing" : "",
+    node.exists ? "go" : "",
+  ].filter(Boolean).join(" ");
+  const where = node.run_id && node.filename ? node.run_id : "";
+  // Same twisty as the collections tree, so the two trees behave alike.
+  const chev = kids.length
+    ? `<span class="tw" data-tex="${escapeHtml(key)}" title="${open ? "Collapse" : "Expand"}">`
+      + `<svg viewBox="0 0 16 16" width="13" height="13" aria-hidden="true">`
+      + `<path d="${open ? "M3.5 6 L8 10.5 L12.5 6" : "M6 3.5 L10.5 8 L6 12.5"}"`
+      + ` fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"`
+      + ` stroke-linejoin="round"/></svg></span>`
+    : `<span class="tw empty"></span>`;
+  return `
+    <div class="tnode-wrap">
+      <div class="${cls}" ${node.exists ? `data-goto="${escapeHtml(node.run_id)}" data-file="${escapeHtml(node.filename || "")}"` : ""}>
+        ${chev}
+        <span class="tn-arrow">${arrow}</span>
+        <span class="tn-name">${escapeHtml(node.filename || node.run_id)}</span>
+        ${where ? `<span class="tn-where">${escapeHtml(where)}</span>` : ""}
+        ${node.archive && node.resolved === false ? `<span class="tn-where">${escapeHtml(node.archive)}</span>` : ""}
+        ${node.note ? `<span class="tn-note">${escapeHtml(node.note)}</span>` : ""}
+        ${node.seen ? `<span class="tn-seen">shown above</span>` : ""}
+      </div>
+      ${kids.length && open ? `<div class="tkids">${kids.map((k) => treeNodeHTML(k, dir, key)).join("")}</div>` : ""}
+      ${node.truncated ? `<div class="tkids"><span class="tmore" data-deeper="1">more beyond depth ${treeData.depth} — go deeper</span></div>` : ""}
+    </div>`;
+}
+
+function renderTree() {
+  if (!treeData) return;
+  const dirs = [];
+  if (treeData.direction !== "down") dirs.push(["upstream", "up", "Built from"]);
+  if (treeData.direction !== "up") dirs.push(["downstream", "down", "Used by"]);
+
+  const body = (treeData.branches || []).map((b) => {
+    const sections = dirs.map(([key, dir, label]) => {
+      const nodes = b[key] || [];
+      const truncFlag = dir === "up" ? b.item.truncated_up : b.item.truncated_down;
+      if (!nodes.length) {
+        return `<div class="tsec"><div class="tsec-h">${label}</div>`
+          + `<div class="tree-empty">nothing recorded</div></div>`;
+      }
+      return `<div class="tsec"><div class="tsec-h">${label}</div>`
+        + nodes.map((n) => treeNodeHTML(n, dir, b.item.ref)).join("")
+        + (truncFlag ? `<span class="tmore" data-deeper="1">more beyond depth ${treeData.depth} — go deeper</span>` : "")
+        + `</div>`;
+    }).join("");
+    return `<div class="tbranch">
+        <div class="tb-h">
+          <span class="tn-name">${escapeHtml(b.item.filename || b.item.run_id)}</span>
+          <span class="tn-where">${escapeHtml(b.item.run_id)}</span>
+        </div>${sections}</div>`;
+  }).join("");
+
+  const sess = treeData.session;
+  const head = sess
+    ? `<div class="tsec-h">${escapeHtml(sess.run_id)} — ${escapeHtml(sess.description || "")}</div>`
+    : "";
+  $("treeArea").innerHTML = head + (body || `<div class="tree-empty">This session has no artefacts with metadata.</div>`);
+  $("treeSource").textContent = treeSourceLabel(treeData.source);
+
+  $("treeArea").querySelectorAll("[data-tex]").forEach((el) => {
+    el.onclick = (ev) => {
+      ev.stopPropagation();
+      const key = el.getAttribute("data-tex");
+      treeExpanded[key] = treeExpanded[key] === false;
+      renderTree();
+    };
+  });
+  $("treeArea").querySelectorAll("[data-deeper]").forEach((el) => {
+    el.onclick = () => {
+      const tab = activeTabObj();
+      if (!tab) return;
+      tab.state.depth = Math.min(50, (tab.state.depth || 3) * 2);
+      saveTabs();
+      renderTreeTab(tab);
+    };
+  });
+  $("treeArea").querySelectorAll(".tnode.go").forEach((el) => {
+    el.onclick = (ev) => {
+      if (ev.target.closest("[data-tex]")) return;
+      const run = el.getAttribute("data-goto");
+      const file = el.getAttribute("data-file");
+      addTab("browse", Object.assign(browseState(), {
+        railTab: "sessions", searchMode: false, collection: null, collPath: [],
+        sessionRun: run, sessionPath: null, selectedName: file || null, itemQuery: "",
+      }));
+    };
+  });
+}
+
 // ---- activity calendar --------------------------------------------------
 // A GitHub-style strip over the archive's own timeline: the data is just
 // list_sessions' created dates bucketed by local day, so this renders what
@@ -503,13 +884,21 @@ function renderSessions() {
     el.onclick = (ev) => {
       const openIdx = ev.target.getAttribute("data-open");
       if (openIdx !== null) { call("open_path", { path: shownSessions[+openIdx].path }); return; }
-      selectSession(shownSessions[+el.dataset.i]);
+      const s = shownSessions[+el.dataset.i];
+      // Cmd/Ctrl-click opens elsewhere rather than here, as a browser does.
+      if (ev.metaKey || ev.ctrlKey) { openSessionInNewTab(s); return; }
+      selectSession(s);
+    };
+    el.oncontextmenu = (ev) => {
+      ev.preventDefault();
+      showSessionMenu(ev.clientX, ev.clientY, shownSessions[+el.dataset.i]);
     };
   });
 }
 
 async function selectSession(s) {
   curSession = s;
+  scheduleTabSave();
   selected = null; selectedIsSidecar = false; picked = []; pickAnchor = null;
   renderSessions();
   await reloadItems();
@@ -520,7 +909,7 @@ async function selectSession(s) {
 // ---- collections and saved searches -------------------------------------
 // A collection points at things instead of holding them, so opening one
 // never leaves the archive's real layout -- it is a view, like search.
-function setRailTab(tab) {
+function setRailTab(tab, { keepLocation = false } = {}) {
   railTab = tab;
   for (const [id, name] of [["tabSessions", "sessions"], ["tabCollections", "collections"],
                             ["tabViews", "views"]]) {
@@ -535,7 +924,7 @@ function setRailTab(tab) {
   // Leaving the collections tab means leaving its contents: the item area
   // is shared, so hand it back to the open session rather than stranding a
   // collection listing under the Sessions tab.
-  if (tab !== "collections" && openCollection) {
+  if (!keepLocation && tab !== "collections" && openCollection) {
     openCollection = null;
     collPath = [];
     if (curSession && !searchMode) reloadItems();
@@ -658,6 +1047,7 @@ function renderCollections() {
 }
 
 async function showCollection(name, { push = true } = {}) {
+  scheduleTabSave();
   if (push) {
     const at = collPath.indexOf(name);
     collPath = at >= 0 ? collPath.slice(0, at + 1) : collPath.concat([name]);
@@ -1691,6 +2081,9 @@ function showItemMenu(x, y) {
     { head: label },
     { label: many ? "Add all to collection…" : "Add to collection…",
       action: () => openCollectionPicker(selectedRefs(), label) },
+    { label: "Show relations", disabled: many || !it,
+      action: () => openRelationsTab(it && it.run_id ? it.run_id
+                                     : (curSession && curSession.run_id), it && it.name) },
     { separator: true },
     { label: "Open", disabled: many || !(it && it.has_artifact),
       action: () => call("open_path", { path: it.artifact_path }) },
@@ -1707,11 +2100,24 @@ function showItemMenu(x, y) {
   showMenu(x, y, entries);
 }
 
+function showSessionMenu(x, y, s) {
+  showMenu(x, y, [
+    { head: `${s.run_id}${s.description ? " — " + s.description : ""}` },
+    { label: "Open", action: () => selectSession(s) },
+    { label: "Open in new tab", action: () => openSessionInNewTab(s) },
+    { label: "Show relations", action: () => openRelationsTab(s.run_id, null) },
+    { separator: true },
+    { label: `Reveal in ${fileManagerName}`, action: () => call("reveal_path", { path: s.path }) },
+  ]);
+}
+
+
 function showCollectionMenu(x, y, name) {
   showMenu(x, y, [
     { head: collLabel(name) },
     { label: "New folder inside…", action: () => newNestedCollection(name) },
     { label: "Open", action: () => showCollection(name) },
+    { label: "Open in new tab", action: () => openCollectionInNewTab(name) },
     { label: "Rename…", action: () => renameCollection(name) },
     { separator: true },
     { label: "Delete collection…", danger: true, action: () => deleteCollection(name) },
@@ -1725,6 +2131,7 @@ function showEntryMenu(x, y, entry) {
     { head: entry.ref },
     ...(isFolder ? [
       { label: "Open this folder", action: () => showCollection(entry.target) },
+      { label: "Open in new tab", action: () => openCollectionInNewTab(entry.target) },
       { label: "New folder inside this one…", action: () => newNestedCollection(entry.target) },
       { label: "Rename…", action: () => renameCollection(entry.target) },
       { separator: true },
@@ -2729,8 +3136,11 @@ function toast(msg) {
 
 function setView(list) {
   listView = list;
-  $("viewList").classList.toggle("on", list);
-  $("viewGrid").classList.toggle("on", !list);
+  // NB: these ids must not collide with the rail's saved-search list
+  // (#viewList) -- getElementById returns the first match in the document,
+  // which silently wired this button to the wrong element.
+  $("viewModeList").classList.toggle("on", list);
+  $("viewModeGrid").classList.toggle("on", !list);
   if (curSession || searchMode) renderItemArea();
 }
 
@@ -2827,6 +3237,19 @@ function wireSearchOptions() {
   $("itemSearchClear").onclick = clearItemSearch;
 }
 
+function treeDirChanged() {
+  const tab = activeTabObj();
+  if (!tab || tab.kind !== "tree") return;
+  const up = $("treeUp").checked, down = $("treeDown").checked;
+  // Turning both off would show an empty page and look broken; keep the
+  // one being switched off from taking the other with it.
+  if (!up && !down) { $("treeUp").checked = true; }
+  tab.state.direction = !$("treeDown").checked ? "up"
+    : !$("treeUp").checked ? "down" : "both";
+  saveTabs();
+  renderTreeTab(tab);
+}
+
 // ---- keyboard shortcuts -------------------------------------------------
 // One set of bindings, spelled with each platform's own command modifier:
 // Cmd on macOS, Ctrl on Windows/Linux. They work while a search box has
@@ -2888,6 +3311,12 @@ function addSelectionToCollection() {
 
 const MENU_ACTIONS = {
   metadata: toggleMetadataPanel,
+  "new-tab": () => addTab("browse"),
+  "close-tab": () => closeTab(activeTab),
+  "duplicate-tab": duplicateTab,
+  "next-tab": () => cycleTab(1),
+  "prev-tab": () => cycleTab(-1),
+  relations: openRelationsForSelection,
   collect: addSelectionToCollection,
   "tab-sessions": () => setRailTab("sessions"),
   "tab-collections": () => setRailTab("collections"),
@@ -2914,6 +3343,13 @@ function initShortcuts() {
 
   document.addEventListener("keydown", (e) => {
     if (e.key === "Escape") { closePops(null); return; }
+    // Ctrl-Tab cycles tabs on every platform (it is not a Cmd shortcut even
+    // on macOS), so it is checked before the command-modifier gate.
+    if (e.ctrlKey && e.key === "Tab") {
+      e.preventDefault();
+      cycleTab(e.shiftKey ? -1 : 1);
+      return;
+    }
     if (!hasMod(e) || e.altKey) return;
     const k = (e.key || "").toLowerCase();
     const shift = e.shiftKey;
@@ -2928,6 +3364,12 @@ function initShortcuts() {
     else if (k === "1" && !shift) name = "tab-sessions";
     else if (k === "2" && !shift) name = "tab-collections";
     else if (k === "3" && !shift) name = "tab-searches";
+    else if (k === "t" && !shift) name = "new-tab";
+    else if (k === "w" && !shift) name = "close-tab";
+    else if (k === "d" && !shift) name = "duplicate-tab";
+    else if (k === "]" && shift) name = "next-tab";
+    else if (k === "[" && shift) name = "prev-tab";
+    else if (k === "l" && shift) name = "relations";
     if (!name) return;
 
     e.preventDefault();   // Ctrl-R would otherwise reload the webview
@@ -2940,8 +3382,8 @@ $("openArchive").onclick = openArchive;
 $("closeArchive").onclick = closeArchive;
 $("archiveSel").onchange = (e) => onArchivePicked(e.target.value);
 $("refresh").onclick = () => reload();
-$("viewList").onclick = () => setView(true);
-$("viewGrid").onclick = () => setView(false);
+$("viewModeList").onclick = () => setView(true);
+$("viewModeGrid").onclick = () => setView(false);
 $("meta").onchange = (e) => { showMeta = e.target.checked; if (curSession || searchMode) renderItemArea(); };
 $("verify").onchange = (e) => { verify = e.target.checked; reloadItems(); };
 $("openArt").onclick = () => selected && selected.artifact_path && call("open_path", { path: selected.artifact_path });
@@ -2964,6 +3406,20 @@ $("calToggle").onclick = () => {
     return;
   }
   if (showCal && !activity) loadActivity(); else renderCalendar();
+};
+$("tabAdd").onclick = () => addTab("browse");
+$("treeUp").onchange = treeDirChanged;
+$("treeDown").onchange = treeDirChanged;
+$("treeDepth").onchange = () => {
+  const tab = activeTabObj();
+  if (!tab || tab.kind !== "tree") return;
+  tab.state.depth = +$("treeDepth").value || 3;
+  saveTabs();
+  renderTreeTab(tab);
+};
+$("treeReload").onclick = () => {
+  const tab = activeTabObj();
+  if (tab && tab.kind === "tree") renderTreeTab(tab);
 };
 $("tabSessions").onclick = () => setRailTab("sessions");
 $("tabCollections").onclick = () => setRailTab("collections");
@@ -3031,6 +3487,7 @@ async function boot() {
 
   showCal = LS.get("nebula.showCal", false);
   setRailTab(LS.get("nebula.railTab", "sessions"));
+  restoreTabs();
   archives = LS.get("nebula.archives", []);
   const last = localStorage.getItem("nebula.archive") || null;
   if (!archives.length && last) archives = [{ id: last, label: last }];
@@ -3049,8 +3506,17 @@ async function boot() {
 
   const start = archives.some((a) => a.id === last) ? last : (archives[0] || {}).id;
   if (start) {
-    try { await loadArchive(start); }
-    catch (e) { toast(`Startup error: ${e}`); }
+    try {
+      await loadArchive(start);
+      // Only now is there an archive for a saved tab to point into, so the
+      // active tab restores itself here rather than at restoreTabs().
+      const tab = activeTabObj();
+      if (tab && tab.kind === "tree") await renderTreeTab(tab);
+      else if (tab && tab.state && (tab.state.sessionRun || tab.state.collection
+                                    || tab.state.searchMode)) {
+        await restoreBrowse(tab.state);
+      }
+    } catch (e) { toast(`Startup error: ${e}`); }
   }
 }
 
