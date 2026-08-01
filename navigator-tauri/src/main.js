@@ -41,6 +41,9 @@ let picked = [], pickAnchor = null;
 // search: the rail filters the already-loaded session list locally, while
 // artefact search asks the backend to walk the whole archive.
 let shownSessions = [];
+// calFrom/calTo are an inclusive day range (equal for a single click, both
+// null for no filter), so drag-select and click share one code path.
+let activity = null, calFrom = null, calTo = null, showCal = false, calWeeksShown = 0;
 let sessQuery = "";
 let sessCfg = { titles: true, ids: true, tags: true, userTags: true,
                 open: true, closed: true, crashed: true, clean: true, dirty: true };
@@ -247,6 +250,7 @@ async function reload() {
   if (!archive) return;
   sessions = await call("list_sessions", { archive });
   applySessionFilter();
+  loadActivity();
   if (sessions.length) {
     const keep = curSession && sessions.find((s) => s.run_id === curSession.run_id);
     await selectSession(keep || shownSessions[0] || sessions[0]);
@@ -259,8 +263,163 @@ async function reload() {
   $("statusbar").textContent = `${activeLabel()} — ${sessions.length} session(s)`;
 }
 
+// ---- activity calendar --------------------------------------------------
+// A GitHub-style strip over the archive's own timeline: the data is just
+// list_sessions' created dates bucketed by local day, so this renders what
+// data/<year>/ already contains rather than needing an index.
+async function loadActivity() {
+  if (!archive) return;
+  try {
+    activity = await call("activity", { archive });
+  } catch (e) {
+    activity = null;
+  }
+  renderCalendar();
+}
+
+function dayKey(d) {
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}`
+    + `-${String(d.getDate()).padStart(2, "0")}`;
+}
+
+function calLevel(n, busiest) {
+  if (!n) return 0;
+  if (busiest <= 1) return 3;
+  const share = n / busiest;
+  return share > 0.66 ? 3 : share > 0.33 ? 2 : 1;
+}
+
+// Fit as many trailing weeks as the rail is currently wide enough for. Measure
+// the rail, not the strip: the strip's own overflow would otherwise be part of
+// what we measure, and it could never shrink again.
+function calWeeks() {
+  const width = ($("rail").getBoundingClientRect().width || 240) - 28;
+  return Math.max(6, Math.min(53, Math.floor(width / 12)));
+}
+
+// Re-lay the strip when the splitter moves, or it keeps the week count it was
+// built with and spills past the rail.
+function watchCalendarWidth() {
+  if (typeof ResizeObserver === "undefined") return;
+  new ResizeObserver(() => {
+    if (showCal && activity && calWeeks() !== calWeeksShown) renderCalendar();
+  }).observe($("rail"));
+}
+
+function renderCalendar() {
+  $("calendar").classList.toggle("hidden", !showCal);
+  $("calToggle").classList.toggle("on", showCal);
+  if (!showCal || !activity) return;
+
+  const weeks = calWeeks();
+  calWeeksShown = weeks;
+
+  const today = new Date();
+  const end = new Date(today);
+  end.setDate(end.getDate() + (6 - end.getDay()));      // end of this week
+  const start = new Date(end);
+  start.setDate(start.getDate() - (weeks * 7 - 1));
+
+  const cells = [];
+  const months = [];
+  let lastMonth = null;
+  for (let w = 0; w < weeks; w++) {
+    const first = new Date(start);
+    first.setDate(first.getDate() + w * 7);
+    const label = first.toLocaleString(undefined, { month: "short" });
+    months.push(`<span style="width:12px">${first.getMonth() !== lastMonth ? escapeHtml(label) : ""}</span>`);
+    if (first.getMonth() !== lastMonth) lastMonth = first.getMonth();
+
+    for (let d = 0; d < 7; d++) {
+      const day = new Date(start);
+      day.setDate(day.getDate() + w * 7 + d);
+      const key = dayKey(day);
+      const info = (activity.days || {})[key];
+      const future = day > today;
+      const lvl = calLevel(info ? info.sessions : 0, activity.busiest || 1);
+      const title = future ? ""
+        : info ? `${key} — ${info.sessions} session(s), ${info.items} file(s)`
+        : `${key} — nothing`;
+      cells.push(`<div class="cal-cell lv${lvl} ${future ? "future" : ""} `
+        + `${inCalRange(key) ? "sel" : ""}" data-day="${key}" title="${escapeHtml(title)}"
+           style="grid-row:${d + 1}"></div>`);
+    }
+  }
+  $("calMonths").innerHTML = months.join("");
+  $("calGrid").innerHTML = cells.join("");
+  $("calLegendText").textContent = !calFrom ? `${Object.keys(activity.days || {}).length} active day(s)`
+    : calFrom === calTo ? `showing ${calFrom}` : `showing ${calFrom} → ${calTo}`;
+
+  bindCalendarDrag();
+}
+
+function inCalRange(key) {
+  return !!calFrom && key >= calFrom && key <= calTo;   // ISO keys sort as dates
+}
+
+function setCalRange(a, b) {
+  if (!a) { calFrom = calTo = null; return; }
+  calFrom = a <= b ? a : b;
+  calTo = a <= b ? b : a;
+}
+
+// Click picks one day, drag picks a span. The whole gesture is previewed by
+// re-rendering the strip, and only committed to the session filter on mouseup
+// -- dragging across 40 days should not re-filter the list 40 times.
+function bindCalendarDrag() {
+  const grid = $("calGrid");
+  // The event target during a drag is whatever is under the pointer (we set
+  // no pointer capture), so no hit-testing by coordinates is needed.
+  const dayAt = (ev) => {
+    const cell = ev.target && ev.target.closest
+      && ev.target.closest(".cal-cell:not(.future)");
+    return cell ? cell.getAttribute("data-day") : null;
+  };
+
+  grid.onmousedown = (ev) => {
+    const cell = ev.target.closest(".cal-cell:not(.future)");
+    if (!cell) return;
+    ev.preventDefault();                       // no text selection while dragging
+    const anchor = cell.getAttribute("data-day");
+    const before = { from: calFrom, to: calTo };
+    let dragged = false, last = anchor;
+
+    const move = (e) => {
+      const day = dayAt(e);
+      if (!day || day === last) return;        // only re-render when it changes
+      last = day;
+      dragged = true;
+      setCalRange(anchor, day);
+      renderCalendar();
+    };
+    const up = (e) => {
+      document.removeEventListener("mousemove", move);
+      document.removeEventListener("mouseup", up);
+      const day = dayAt(e) || anchor;
+      if (!dragged && before.from === anchor && before.to === anchor) {
+        setCalRange(null);                     // click the same single day to clear
+      } else {
+        setCalRange(anchor, dragged ? day : anchor);
+      }
+      renderCalendar();
+      applySessionFilter();
+    };
+    document.addEventListener("mousemove", move);
+    document.addEventListener("mouseup", up);
+  };
+}
+
 // ---- session search (local: the whole list is already in memory) --------
+function sessionDay(s) {
+  const t = Date.parse(s.created || "");
+  return Number.isNaN(t) ? null : dayKey(new Date(t));
+}
+
 function sessionMatches(s) {
+  if (calFrom) {
+    const day = sessionDay(s);
+    if (!day || !inCalRange(day)) return false;
+  }
   // Two independent gates: the session's own state, then the text query.
   const status = (s.status || "").toLowerCase();
   const statusOk = status === "open" ? sessCfg.open
@@ -279,6 +438,21 @@ function sessionMatches(s) {
   if (sessCfg.userTags) hay.push((s.user_tags || []).join(" "));
   const blob = hay.join(" ").toLowerCase();
   return terms.every((t) => blob.includes(t));
+}
+
+// "Today" / "Yesterday" / a weekday for the last week / else Month Year.
+// Sessions are newest-first, so these read as a descending timeline.
+function dayBucket(created) {
+  const t = Date.parse(created || "");
+  if (Number.isNaN(t)) return "Undated";
+  const d = new Date(t);
+  const today = new Date();
+  const startOfDay = (x) => new Date(x.getFullYear(), x.getMonth(), x.getDate());
+  const days = Math.round((startOfDay(today) - startOfDay(d)) / 86400000);
+  if (days === 0) return "Today";
+  if (days === 1) return "Yesterday";
+  if (days < 7) return d.toLocaleString(undefined, { weekday: "long" });
+  return d.toLocaleString(undefined, { month: "long", year: "numeric" });
 }
 
 function applySessionFilter() {
@@ -300,16 +474,23 @@ function isSessCfgNarrowed() {
 }
 
 function renderSessions() {
-  if (!shownSessions.length && (sessQuery || isSessCfgNarrowed()) && sessions.length) {
+  // A calendar day is a filter too, so an empty result explains itself
+  // rather than looking like an empty archive.
+  if (!shownSessions.length && (sessQuery || calFrom || isSessCfgNarrowed()) && sessions.length) {
     $("sessionList").innerHTML = `<div class="none">No sessions match.</div>`;
     return;
   }
+  let lastBucket = null;
   $("sessionList").innerHTML = shownSessions.map((s, i) => {
+    const bucket = dayBucket(s.created);
+    const header = bucket === lastBucket ? ""
+      : `<div class="day-head"><span>${escapeHtml(bucket)}</span></div>`;
+    lastBucket = bucket;
     const held = s.held ? '<span class="tag-held">HELD</span>' : "";
     const prob = s.n_problems ? `<span class="tag-prob">${s.n_problems} ⚠</span>` : "";
     const sel = curSession && s.run_id === curSession.run_id ? "sel" : "";
     const line1 = `${escapeHtml(s.run_id)} <span class="desc">${escapeHtml(s.description)}</span>`;
-    return `<div class="session ${sel}" data-i="${i}">
+    return header + `<div class="session ${sel}" data-i="${i}">
       <span class="folder">${folderSVG()}</span>
       <div class="meta">
         <div class="line1"><span class="rid">${line1}</span></div>
@@ -2125,14 +2306,15 @@ async function restoreCode(code) {
 // `show` never displays -- looking at a source file, nothing tells you
 // anything derives from it.
 function lineageRow(r, dir) {
-  const arrow = dir === "up" ? "←" : "→";
-  const label = r.whole_session ? `${r.run_id} (whole session)`
+  const arrow = dir === "up" ? "←" : dir === "rel" ? "↔" : "→";
+  const label = r.whole_session || !r.filename ? `${r.run_id}${r.whole_session ? " (whole session)" : ""}`
     : `${r.run_id}/${r.filename}`;
   const cls = r.resolved === false ? "unresolved" : r.exists ? "" : "missing";
   const note = r.note ? `<span class="ln-note">${escapeHtml(r.note)}</span>` : "";
-  const clickable = r.exists && !r.whole_session;
+  const clickable = r.exists && !!r.session_path;
   return `<div class="ln ${cls}${clickable ? " go" : ""}"
-      ${clickable ? `data-goto-session="${escapeHtml(r.session_path)}" data-goto-file="${escapeHtml(r.filename)}"` : ""}
+      ${clickable ? `data-goto-session="${escapeHtml(r.session_path)}" `
+        + `data-goto-file="${escapeHtml(r.filename || "")}"` : ""}
       title="${clickable ? "Go to this artefact" : escapeHtml(r.note || "")}">
       <span class="ln-arrow">${arrow}</span>
       <span class="ln-name">${escapeHtml(label)}</span>${note}</div>`;
@@ -2173,6 +2355,7 @@ function wireLineage(el) {
 
 // Follow a lineage link: select the target's session, then the file in it.
 async function gotoArtifact(sessionPath, filename) {
+  // filename may be empty: a related_run points at a whole session.
   const s = sessions.find((x) => x.path === sessionPath);
   if (!s) { toast("That session is not in the current archive view."); return; }
   if (!curSession || curSession.path !== sessionPath || searchMode) {
@@ -2181,6 +2364,7 @@ async function gotoArtifact(sessionPath, filename) {
     $("itemSearchClear").classList.add("hidden");
     await selectSession(s);
   }
+  if (!filename) return;
   const target = items.find((i) => i.name === filename);
   if (!target) { toast(`${filename} is not in ${s.run_id}.`); return; }
   selectItem(target, false);
@@ -2250,8 +2434,7 @@ function renderSessionPanel() {
 
   const related = group("Related runs",
     (info.related_runs || []).length
-      ? `<div class="chips">${info.related_runs
-          .map((r) => `<span class="chip mono">${escapeHtml(r.ref)}</span>`).join("")}</div>`
+      ? info.related_runs.map((r) => lineageRow(r, "rel")).join("")
       : "");
 
   const hist = (info.history || []).slice().reverse();
@@ -2753,6 +2936,18 @@ $("sessInfoBtn").onclick = toggleSessionPanel;
 $("sessClose").onclick = () => { showSess = false; savePanels(); updateDock(); };
 $("sessRaw").onclick = () => { sessRaw = !sessRaw; renderSessionPanel(); };
 $("importBtn").onclick = startImport;
+$("calToggle").onclick = () => {
+  showCal = !showCal;
+  LS.set("nebula.showCal", showCal);
+  if (!showCal && calFrom) {
+    // A filter you can no longer see is a trap: hiding the strip clears it.
+    setCalRange(null);
+    renderCalendar();
+    applySessionFilter();
+    return;
+  }
+  if (showCal && !activity) loadActivity(); else renderCalendar();
+};
 $("tabSessions").onclick = () => setRailTab("sessions");
 $("tabCollections").onclick = () => setRailTab("collections");
 $("tabViews").onclick = () => setRailTab("views");
@@ -2794,6 +2989,7 @@ $("themeBtn").onclick = () => {
 // ---- boot ---------------------------------------------------------------
 async function boot() {
   initPanes();
+  watchCalendarWidth();
   initDragDrop();
 
   sessCfg = Object.assign(sessCfg, LS.get("nebula.sessCfg", {}));
@@ -2816,6 +3012,7 @@ async function boot() {
   updateDock();
   renderSessionPanel();
 
+  showCal = LS.get("nebula.showCal", false);
   setRailTab(LS.get("nebula.railTab", "sessions"));
   archives = LS.get("nebula.archives", []);
   const last = localStorage.getItem("nebula.archive") || null;

@@ -48,15 +48,16 @@ questions).
 
 ## Work items
 
-### 1. `related_runs` is a dead end — **WANTED**
+### 1. `related_runs` is a dead end — **DONE** (2026-08-01)
 
 Session-level refs render as plain chips: not resolved, not clickable, no
 indication whether the target exists. Meanwhile artifact-level lineage rows
 already resolve, mark missing/unreachable targets, and navigate on click.
 
-**Do:** reuse `model._resolve_ref()` for `related_runs` in `session_info`,
-render them like lineage rows, and make them jump to the target session.
-Cheap, and it is the only session-to-session link nebula records.
+**Done:** `session_info` resolves them through `_resolve_ref()`, and the
+panel renders them with the same row component as lineage (↔ arrow) — struck
+through when missing, marked separately when the archive is unreachable, and
+clickable when the target is there.
 
 ### 2. Transitive lineage — **WANTED**, depth **OPEN**
 
@@ -97,7 +98,7 @@ Costs layout code to maintain and needs the main area, not the dock.
 **Open:** which one. Recommendation: start with A, because B's layout is only
 worth writing once it doubles as the timeline canvas.
 
-### 4. Calendar / activity view — **WANTED**
+### 4. Calendar / activity view — **4a/4b DONE** (2026-08-01)
 
 Three layers, cheapest first; they stack rather than compete.
 
@@ -129,9 +130,12 @@ Fits nebula specifically: the archive is *already* bucketed by year and every
 session carries a creation timestamp, so this renders `data/<year>/` — it is
 not a new index.
 
-**Notes:** needs a counts-per-day op (cheap: `list_sessions` already returns
-`created`). Beware timestamps carrying UTC offsets — bucket by local date
-using the same parsing as `model._parse_timestamp`, not by string slicing.
+**Done:** `model.activity()` buckets sessions per *local* day (parsed, not
+string-sliced, for exactly the offset reason below). The rail groups sessions
+under Today / Yesterday / weekday / Month Year, and the **calendar** toggle
+shows a trailing-weeks strip sized to the current rail width; clicking a day
+filters the list, clicking it again clears. Only item 5 (the timeline canvas
+with lineage arcs) is left here.
 
 ### 5. Timeline canvas with lineage arcs — **IDEA**
 
@@ -181,10 +185,10 @@ does this with the `script?` chip.
 
 ---
 
-## Sequencing (if picked up as-is)
+## Sequencing
 
-1. `related_runs` resolved + clickable (item 1) — small, unblocks session-to-session navigation.
-2. Transitive lineage with a depth cap (item 2).
-3. Session provenance view, indented tree first (item 3).
-4. Rail date grouping, then the activity strip (item 4a, 4b).
+1. ~~`related_runs` resolved + clickable (item 1)~~ — **done**
+2. ~~Rail date grouping + activity strip (item 4a, 4b)~~ — **done**
+3. Transitive lineage with a depth cap (item 2) — next, needs the depth decision.
+4. Session provenance view, indented tree first (item 3) — needs the form decision.
 5. Reassess the timeline canvas and the `source` facet (items 5, 6).

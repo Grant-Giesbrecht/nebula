@@ -529,3 +529,35 @@ body.dragging-entry { cursor:grabbing; user-select:none; }
 .head-tools .open-link { font-size:10.5px; }
 .rail-head { align-items:center; }
 .citem .ctitle { font-size:11px; }
+
+/* activity calendar */
+.calendar { padding:4px 10px 8px; overflow:hidden; }
+/* clip rather than widen the rail: the strip is rebuilt on resize, but must
+   not push the rail out in the frame before that happens */
+.cal-months, .cal-grid { overflow:hidden; }
+.cal-months { display:flex; gap:0; font-size:9.5px; color:var(--text-faint);
+              margin-left:0; height:12px; }
+.cal-months span { flex:0 0 auto; }
+.cal-grid { display:grid; grid-auto-flow:column; grid-template-rows:repeat(7, 10px);
+            gap:2px; }
+.cal-cell { width:10px; height:10px; border-radius:2px; background:var(--miss-bg);
+            cursor:pointer; user-select:none; }
+.cal-cell.lv1 { background:color-mix(in srgb, var(--accent) 35%, var(--miss-bg)); }
+.cal-cell.lv2 { background:color-mix(in srgb, var(--accent) 65%, var(--miss-bg)); }
+.cal-cell.lv3 { background:var(--accent); }
+.cal-cell.future { background:transparent; cursor:default; }
+.cal-cell.sel { outline:2px solid var(--text); outline-offset:1px; }
+.cal-cell:hover:not(.future) { outline:1px solid var(--border-strong); outline-offset:1px; }
+.cal-foot { display:flex; align-items:center; justify-content:space-between; gap:8px;
+            margin-top:6px; font-size:10.5px; color:var(--text-faint); }
+.cal-key { display:flex; align-items:center; gap:3px; }
+.cal-key i { width:9px; height:9px; border-radius:2px; background:var(--miss-bg); display:block; }
+.cal-key i.lv1 { background:color-mix(in srgb, var(--accent) 35%, var(--miss-bg)); }
+.cal-key i.lv2 { background:color-mix(in srgb, var(--accent) 65%, var(--miss-bg)); }
+.cal-key i.lv3 { background:var(--accent); }
+
+/* date grouping in the session list */
+.day-head { font-size:10px; font-weight:700; letter-spacing:.06em; text-transform:uppercase;
+            color:var(--text-faint); padding:9px 9px 3px; display:flex; gap:7px;
+            align-items:baseline; position:sticky; top:0; background:var(--rail); z-index:1; }
+.day-head .n { font-weight:600; letter-spacing:0; text-transform:none; }

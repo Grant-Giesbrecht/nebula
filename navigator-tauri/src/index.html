@@ -25,7 +25,21 @@
           <button class="rtab" id="tabCollections">Collections</button>
           <button class="rtab" id="tabViews">Searches</button>
         </div>
-        <div class="rail-head" id="sessHead"><span>Sessions</span><span id="sessCount"></span></div>
+        <div class="rail-head" id="sessHead">
+          <span>Sessions</span>
+          <span class="head-tools"><span class="open-link" id="calToggle" title="Show activity">calendar</span></span>
+          <span id="sessCount"></span>
+        </div>
+        <div class="calendar hidden" id="calendar">
+          <div class="cal-months" id="calMonths"></div>
+          <div class="cal-grid" id="calGrid"></div>
+          <div class="cal-foot">
+            <span id="calLegendText"></span>
+            <span class="cal-key">less
+              <i class="lv0"></i><i class="lv1"></i><i class="lv2"></i><i class="lv3"></i>
+            more</span>
+          </div>
+        </div>
         <div class="search-row">
           <span class="s-ico">
             <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><circle cx="11" cy="11" r="7"/><line x1="16.5" y1="16.5" x2="21" y2="21"/></svg>

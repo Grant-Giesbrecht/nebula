@@ -437,7 +437,15 @@ def session_info(session_dir) -> dict:
         "held": held,
         "hold_until": meta.hold_until,
         "appendable": _appendable(meta.status, meta.created, held),
-        "related_runs": [_ref_dict(r) for r in meta.related_run_refs()],
+        # Resolved, not just formatted: the panel marks a missing session
+        # and an unreachable archive differently, and only navigates to
+        # something that is actually there (roadmap item 1).
+        "related_runs": [
+            _resolve_ref(r, archive_root=session_dir.parents[2],
+                         archive_label=session_dir.parents[2].name,
+                         run_id=meta.run_id)
+            for r in meta.related_run_refs()
+        ],
         "history": list(meta.history),
         "n_items": len(items),
         "n_problems": sum(1 for it in items if it.status != PAIRED),
@@ -823,6 +831,36 @@ def restore_code(archive, code: str, dest_parent) -> dict:
         dest = parent / f"{base}-{n}"
         n += 1
     return codestore.restore(root, code, dest)
+
+
+def activity(archive) -> dict:
+    """Sessions and artifacts per calendar day, for the activity strip.
+
+    Days are *local* dates parsed from the timestamp, not string slices: a
+    session created at 23:40 with a +02:00 offset belongs to the day its
+    clock showed, and slicing the ISO string would file it under the wrong
+    one either side of a DST change.
+    """
+    root, _ = resolve(archive)
+    days: dict = {}
+    for s in list_sessions(root):
+        ts = _parse_timestamp(s.created)
+        if ts is None:
+            continue
+        day = datetime.datetime.fromtimestamp(ts).date().isoformat()
+        bucket = days.setdefault(day, {"sessions": 0, "items": 0, "problems": 0})
+        bucket["sessions"] += 1
+        bucket["items"] += s.n_items
+        bucket["problems"] += s.n_problems
+
+    ordered = sorted(days)
+    return {
+        "days": days,
+        "first": ordered[0] if ordered else None,
+        "last": ordered[-1] if ordered else None,
+        "busiest": max((d["sessions"] for d in days.values()), default=0),
+        "today": datetime.date.today().isoformat(),
+    }
 
 
 def archive_stats(archive) -> dict:

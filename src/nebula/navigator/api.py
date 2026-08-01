@@ -191,6 +191,10 @@ def op_set_annotation(args: Dict[str, Any]) -> Dict[str, Any]:
     )
 
 
+def op_activity(args: Dict[str, Any]) -> Dict[str, Any]:
+    return model.activity(args["archive"])
+
+
 def op_archive_stats(args: Dict[str, Any]) -> Dict[str, Any]:
     return model.archive_stats(args["archive"])
 
@@ -561,6 +565,7 @@ OPS = {
     "run_view": op_run_view,
     "save_view": op_save_view,
     "delete_view": op_delete_view,
+    "activity": op_activity,
     "archive_stats": op_archive_stats,
     "rebuild_index": op_rebuild_index,
     "check": op_check,

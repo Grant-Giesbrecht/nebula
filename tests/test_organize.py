@@ -573,3 +573,71 @@ def test_retitling_on_its_own_still_works(tmp_path):
     C.rename(archive, "c", title="second")
     assert C.read(archive, "c").title == "second"
     assert C.read(archive, "c").name == "c"
+
+
+# ---------------------------------------------------------------------
+# activity (the calendar strip)
+# ---------------------------------------------------------------------
+
+def test_activity_counts_per_day(tmp_path):
+    from nebula.navigator import model
+
+    archive, sessions = _archive(tmp_path, sessions=2)
+    act = model.activity(archive)
+    today = __import__("datetime").date.today().isoformat()
+    assert act["days"][today]["sessions"] == 2
+    assert act["days"][today]["items"] == 2      # one artifact each
+    assert act["first"] == act["last"] == today
+    assert act["busiest"] == 2
+
+
+def test_activity_buckets_by_local_day_not_string_slice(tmp_path):
+    """A timestamp carries a UTC offset; slicing the ISO string would file
+    a late-evening session under the wrong day."""
+    from nebula.sidecar import SessionMeta, write_session_yaml
+    from nebula.navigator import model
+
+    archive, _ = _archive(tmp_path, sessions=0)
+    d = archive / "data" / "2026"
+    d.mkdir(parents=True, exist_ok=True)
+    s = d / "S-26-0001"
+    s.mkdir()
+    # 23:40 on the 5th at +02:00 is 21:40 UTC on the 5th -- and in a
+    # negative-offset local zone, still the 5th locally where it was written.
+    write_session_yaml(s, SessionMeta(run_id="S-26-0001", status="closed",
+                                      created="2026-03-05T23:40:00+02:00"))
+
+    act = model.activity(archive)
+    assert len(act["days"]) == 1
+    day = next(iter(act["days"]))
+    assert day.startswith("2026-03-0")           # the 5th locally, or the 5th/6th boundary
+    assert act["days"][day]["sessions"] == 1
+
+
+def test_activity_of_an_empty_archive(tmp_path):
+    from nebula.navigator import model
+
+    archive = tmp_path / "empty"
+    archive.mkdir()
+    act = model.activity(archive)
+    assert act["days"] == {} and act["first"] is None and act["busiest"] == 0
+
+
+def test_related_runs_are_resolved(tmp_path):
+    """Roadmap item 1: session-to-session links say whether the target is
+    actually there, like artifact lineage does."""
+    from nebula.navigator import model
+
+    archive, _ = _archive(tmp_path, sessions=1)
+    first = model.list_sessions(archive)[0]
+    s = nebula.new(archive, description="second")
+    s.add_related_run(first.run_id)
+    s.add_related_run("S-26-9999")
+    s.add_related_run("nebula://kai@lab/elsewhere/S-26-0001")
+    s.close()
+
+    rel = model.session_info(s.path)["related_runs"]
+    assert rel[0]["exists"] is True and rel[0]["session_path"]
+    assert rel[1]["exists"] is False and rel[1]["resolved"] is True
+    assert "not found" in rel[1]["note"]
+    assert rel[2]["resolved"] is False and "not registered" in rel[2]["note"]

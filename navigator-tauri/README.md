@@ -75,6 +75,10 @@ Other things worth knowing about the window:
 - **Drag and drop** files onto the window to import them — same dialog as
   the **Import files…** button, with the files already chosen. They go into
   the archive currently selected in the switcher.
+- The session list is **grouped by day** (Today / Yesterday / weekday /
+  Month Year), and the **calendar** link in its header shows a GitHub-style
+  activity strip: one cell per day shaded by session count, sized to fit the
+  current rail width. Click a day to filter the list, click again to clear.
 - **Search sessions** (top of the rail) filters the list you already have
   loaded, so it is instant. Its **⚙** sets which fields are searched
   (titles / IDs / tags) and which sessions are listed at all (open /

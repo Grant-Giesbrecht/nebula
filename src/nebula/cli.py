@@ -554,6 +554,13 @@ def cmd_collection(args):
                   else f"no collection {args.name!r}")
             return
 
+        if act == "rename":
+            coll = collection_mod.rename(root, args.name, args.new,
+                                         title=args.title)
+            print(f"renamed to {coll.name}")
+            print(f"  {collection_mod.path_for(root, coll.name)}")
+            return
+
         if act == "add":
             for ref in args.refs:
                 collection_mod.add(root, args.name, ref, note=args.note or "")
@@ -772,6 +779,13 @@ def main(argv=None):
     q.add_argument("--title")
     q = csub.add_parser("rm", help="delete a collection (members are untouched)")
     q.add_argument("name")
+    q = csub.add_parser("rename", help="rename a collection (rewrites every "
+                                       "collections/<old> ref that points at it)")
+    q.add_argument("name")
+    q.add_argument("new", nargs="?", help="the new name; omit to only set --title")
+    q.add_argument("--title", help="one-line description (not a second name)")
+    q.set_defaults(collection_action="rename")
+
     q = csub.add_parser("add", help="add refs -- files, sessions, or collections/<name>")
     q.add_argument("name")
     q.add_argument("refs", nargs="+")
