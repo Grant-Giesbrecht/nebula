@@ -101,6 +101,11 @@ class SidecarMeta:
     # Hex SHA-256 of the artifact bytes, auto-filled by write_sidecar. Lets
     # `check` verify a hand-added file hasn't silently drifted.
     sha256: Optional[str] = None
+    # Set only when nebula renamed the file to avoid an overwrite: the name
+    # that was asked for, and which duplicate this is (1 = the first
+    # rename, i.e. "-001"). Creation-time facts, so they belong here.
+    original_name: Optional[str] = None
+    duplicate_index: Optional[int] = None
     extra: Dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> Dict[str, Any]:
@@ -114,7 +119,8 @@ class SidecarMeta:
 
     @classmethod
     def from_dict(cls, d: Dict[str, Any]) -> "SidecarMeta":
-        known = {"created", "produced_by", "derived_from", "inputs", "sha256"}
+        known = {"created", "produced_by", "derived_from", "inputs", "sha256",
+                 "original_name", "duplicate_index"}
         extra = {k: v for k, v in d.items() if k not in known}
         produced_by = ProducedBy.from_dict(d.get("produced_by", {}) or {})
         return cls(
@@ -123,6 +129,8 @@ class SidecarMeta:
             derived_from=d.get("derived_from", []),
             inputs=d.get("inputs", {}),
             sha256=d.get("sha256"),
+            original_name=d.get("original_name"),
+            duplicate_index=d.get("duplicate_index"),
             extra=extra,
         )
 

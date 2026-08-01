@@ -36,6 +36,7 @@ import sys
 import time
 from pathlib import Path
 
+from nebula.config import OVERWRITE_POLICIES
 from nebula import check as check_mod
 from nebula import graph, index, manual
 from nebula.registry import get_registry
@@ -337,6 +338,7 @@ def cmd_config(args):
     changes = {
         "capture_code": args.capture_code,
         "code_max_file_bytes": args.max_file_bytes,
+        "on_overwrite": args.on_overwrite,
     }
     changes = {k: v for k, v in changes.items() if v is not None}
 
@@ -355,13 +357,59 @@ def cmd_config(args):
     on_disk = config_mod.read_settings(root, apply_env=False)
     effective = config_mod.read_settings(root)
     print(f"{path}{'' if path.exists() else '  (not present -- using defaults)'}")
-    for key in ("capture_code", "code_max_file_bytes"):
+    for key in ("on_overwrite", "capture_code", "code_max_file_bytes"):
         print(f"  {key}: {getattr(on_disk, key)}")
 
     override = config_mod.env_override()
     if override is not None and override != on_disk.capture_code:
         print(f"\nnote: {config_mod.CAPTURE_ENV} is set in this environment, so "
               f"capture_code is currently {effective.capture_code} regardless of the file")
+
+
+def cmd_annotate(args):
+    """Show or edit the mutable user tags/comment on a session or file."""
+    from nebula import annotations
+    from nebula.session import _find_session_dir
+
+    root, _ = _resolve_archive_cli(args.archive)
+    try:
+        session_dir = _find_session_dir(root, args.run_id)
+    except FileNotFoundError as e:
+        print(str(e), file=sys.stderr)
+        sys.exit(1)
+
+    target = args.file
+    changed = False
+    try:
+        if args.set_tags is not None:
+            annotations.set_annotation(session_dir, target,
+                                       tags=annotations.split_tags(args.set_tags))
+            changed = True
+        if args.add_tags:
+            annotations.add_tags(session_dir, target,
+                                 annotations.split_tags(args.add_tags))
+            changed = True
+        if args.rm_tags:
+            annotations.remove_tags(session_dir, target,
+                                    annotations.split_tags(args.rm_tags))
+            changed = True
+        if args.comment is not None:
+            annotations.set_annotation(session_dir, target, comment=args.comment)
+            changed = True
+    except annotations.TagError as e:
+        print(f"bad tag: {e}", file=sys.stderr)
+        sys.exit(1)
+
+    got = annotations.get(session_dir, target)
+    where = f"{args.run_id}/{target}" if target else args.run_id
+    print(f"{where}{'  (updated)' if changed else ''}")
+    print(f"  user tags: {', '.join(got['tags']) if got['tags'] else '(none)'}")
+    if got["comment"]:
+        print("  comment:")
+        for line in got["comment"].splitlines():
+            print(f"    {line}")
+    else:
+        print("  comment: (none)")
 
 
 def cmd_gc(args):
@@ -578,7 +626,26 @@ def main(argv=None):
                    help="snapshot first-party source into <archive>/.code on save")
     p.add_argument("--max-file-bytes", type=int, dest="max_file_bytes",
                    help="per-file ceiling for that snapshot")
+    p.add_argument("--on-overwrite", choices=OVERWRITE_POLICIES, dest="on_overwrite",
+                   help="what a write that would clobber an artifact does: "
+                        "duplicate (default), overwrite, or cancel")
     p.set_defaults(func=cmd_config)
+
+    p = sub.add_parser(
+        "annotate",
+        help="show or edit user tags/comment on a session or file (mutable; "
+             "never touches sidecars)")
+    p.add_argument("archive", help="registered archive name, or a literal path")
+    p.add_argument("run_id", type=_run_id_arg,
+                   help="session id -- S-26-0012, or 0012 for the current year")
+    p.add_argument("file", nargs="?",
+                   help="artifact filename; omit to annotate the session itself")
+    p.add_argument("--set-tags", metavar="T,T",
+                   help="replace the user tags (empty string clears them)")
+    p.add_argument("--add-tags", metavar="T,T", help="add user tags")
+    p.add_argument("--rm-tags", metavar="T,T", help="remove user tags")
+    p.add_argument("--comment", help="set the comment (empty string clears it)")
+    p.set_defaults(func=cmd_annotate)
 
     p = sub.add_parser("gc", help="delete captured source code nothing references")
     p.add_argument("archive", help="registered archive name, or a literal path")

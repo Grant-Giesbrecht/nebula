@@ -25,6 +25,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import List, Optional
 
+from nebula import annotations
 from nebula.index import _iter_session_dirs
 from nebula.refs import Ref, format_ref
 from nebula.registry import get_registry, resolve_archive
@@ -84,6 +85,24 @@ class Item:
     dirty: Optional[bool] = None
     entry_point: Optional[str] = None
     n_derived_from: int = 0            # how many sources it declares
+    # Mutable, user-authored -- deliberately kept apart from everything
+    # above, which was recorded at creation time and never changes.
+    user_tags: List[str] = field(default_factory=list)
+    user_comment: str = ""
+    # Duplicate grouping: `name` is what is on disk (raw-001.csv), while
+    # `display_name` is what was asked for (raw.csv). position/total say
+    # which write this was, so the view can show "2 of 3".
+    original_name: Optional[str] = None
+    position: int = 1
+    total: int = 1
+
+    @property
+    def display_name(self) -> str:
+        return self.original_name or self.name
+
+    @property
+    def is_duplicate(self) -> bool:
+        return self.total > 1
 
     @property
     def status_label(self) -> str:
@@ -119,6 +138,7 @@ class SessionInfo:
     held: bool = False
     n_items: int = 0
     n_problems: int = 0
+    user_tags: List[str] = field(default_factory=list)
 
 
 def list_sessions(archive) -> List[SessionInfo]:
@@ -137,6 +157,7 @@ def list_sessions(archive) -> List[SessionInfo]:
             run_id=meta.run_id, path=session_dir, created=meta.created,
             status=meta.status, tags=meta.tags, description=meta.description,
             held=_hold_active(meta), n_items=len(items), n_problems=problems,
+            user_tags=annotations.get(session_dir)["tags"],
         ))
     out.sort(key=lambda s: s.created or "", reverse=True)
     return out
@@ -170,12 +191,13 @@ def list_items(session_dir, *, verify_checksums: bool = False) -> List[Item]:
     and sidecars). verify_checksums re-hashes present files to detect drift
     -- off by default since it can be slow on large data."""
     session_dir = Path(session_dir)
+    notes = annotations.read_annotations(session_dir).get("artifacts") or {}
     artefacts: set = set()
     sidecar_bases: set = set()
     for entry in session_dir.iterdir():
         if not entry.is_file() or entry.name.startswith("."):
             continue
-        if entry.name == SESSION_FILE:
+        if entry.name in (SESSION_FILE, annotations.ANNOTATIONS_FILE):
             continue
         if entry.name.endswith(SIDECAR_SUFFIX):
             sidecar_bases.add(entry.name[: -len(SIDECAR_SUFFIX)])
@@ -190,6 +212,8 @@ def list_items(session_dir, *, verify_checksums: bool = False) -> List[Item]:
         sc_path = sidecar_path_for(art_path)
 
         source = origin = sha = created = None
+        original_name = None
+        duplicate_index = None
         repo = commit = entry_point = None
         dirty = None
         n_derived = 0
@@ -203,6 +227,8 @@ def list_items(session_dir, *, verify_checksums: bool = False) -> List[Item]:
                 dirty = meta.produced_by.dirty
                 entry_point = meta.produced_by.entry_point
                 n_derived = len(meta.derived_from)
+                original_name = meta.original_name
+                duplicate_index = meta.duplicate_index
                 sha = meta.sha256
                 created = meta.created
             except Exception:
@@ -240,8 +266,29 @@ def list_items(session_dir, *, verify_checksums: bool = False) -> List[Item]:
             sidecar_path=sc_path if has_s else None,
             repo=repo, commit=commit, dirty=dirty, entry_point=entry_point,
             n_derived_from=n_derived,
+            user_tags=list((notes.get(name) or {}).get("tags") or []),
+            user_comment=(notes.get(name) or {}).get("comment") or "",
+            original_name=original_name,
+            position=(duplicate_index or 0) + 1,
         ))
-    return items
+
+    return _group_duplicates(items)
+
+
+def _group_duplicates(items: List[Item]) -> List[Item]:
+    """Number each duplicate group and keep its members together.
+
+    Sorting by filename alone would split a group up ("raw-001.csv" sorts
+    before "raw.csv", since '-' < '.'), which is exactly backwards from the
+    order they were written in.
+    """
+    groups: dict = {}
+    for it in items:
+        groups.setdefault(it.display_name, []).append(it)
+    for name, members in groups.items():
+        for it in members:
+            it.total = len(members)
+    return sorted(items, key=lambda it: (it.display_name, it.position, it.name))
 
 
 def sidecar_display(sidecar_path) -> str:
@@ -368,6 +415,8 @@ def session_info(session_dir) -> dict:
         "history": list(meta.history),
         "n_items": len(items),
         "n_problems": sum(1 for it in items if it.status != PAIRED),
+        "user_tags": annotations.get(session_dir)["tags"],
+        "user_comment": annotations.get(session_dir)["comment"],
         "size": sum(it.size or 0 for it in items),
     })
     out["size_human"] = _human_size(out["size"])
@@ -507,7 +556,8 @@ def resolve_refs(archive, run_id: str, refs: List[str]) -> List[dict]:
     return out
 
 
-ITEM_SEARCH_FIELDS = ("filename", "tags", "origin", "session")
+ITEM_SEARCH_FIELDS = ("filename", "tags", "origin", "session",
+                      "user_tags", "comments")
 
 
 def _in_date_range(timestamp, date_from, date_to) -> bool:
@@ -566,6 +616,7 @@ def search_items(
 
     for s in list_sessions(root):
         n_sessions += 1
+        session_notes = annotations.get(s.path)
         for it in list_items(s.path):
             n_scanned += 1
             if not _in_date_range(it.timestamp, date_from, date_to):
@@ -582,6 +633,12 @@ def search_items(
                 if "session" in fields:
                     hay.append(s.run_id)
                     hay.append(s.description)
+                if "user_tags" in fields:
+                    hay.extend(it.user_tags)
+                    hay.extend(session_notes["tags"])
+                if "comments" in fields:
+                    hay.append(it.user_comment)
+                    hay.append(session_notes["comment"])
                 blob = " ".join(hay).lower()
                 if not all(t in blob for t in terms):
                     continue
@@ -592,6 +649,7 @@ def search_items(
                 "item": it, "run_id": s.run_id, "session_path": str(s.path),
                 "session_description": s.description, "tags": list(s.tags),
                 "session_created": s.created,
+                "session_user_tags": list(session_notes["tags"]),
             })
         if truncated:
             break

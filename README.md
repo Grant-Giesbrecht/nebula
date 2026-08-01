@@ -246,12 +246,98 @@ src/nebula/
     sidecar.py    # atomic JSON sidecar I/O + session.yaml I/O
     session.py    # Session, new()/append_to()/reopen()/session() context manager
     index.py      # SQLite index rebuild (fully regeneratable)
-    codestore.py  # content-addressed snapshot of the source that ran (.code/)
+    codestore.py  # content-addressed snapshot of the source that ran (code/)
+    annotations.py # mutable user tags/comments (<session>/annotations.yaml)
     config.py     # per-archive settings (<archive>/archive.yaml)
     graph.py      # upstream()/downstream() provenance traversal, cross-archive aware
     cli.py        # `nebula` command-line tool
     picker.py     # optional PyQt5 session picker (not imported by default)
 ```
+
+## Overwrite protection
+
+A write that would land on an existing artifact never silently destroys it.
+The archive's `on_overwrite` policy decides what happens instead:
+
+| `on_overwrite` | What a colliding write does |
+|---|---|
+| `duplicate` *(default)* | writes `raw-001.csv` beside `raw.csv`, recording the name that was asked for |
+| `overwrite` | replaces the existing file |
+| `cancel` | raises `FileExistsError` and writes nothing |
+
+```
+nebula config <archive> --on-overwrite duplicate|overwrite|cancel
+```
+
+The rename is recorded on the new file's sidecar as `original_name` and
+`duplicate_index`, so "this was automatic, and here is what I asked for"
+survives in the metadata rather than only in the filename. An unrecognised
+policy in `archive.yaml` falls back to `duplicate` rather than being
+trusted.
+
+This applies to `s.artifact()` and to manual imports alike -- a coworker's
+second copy of `raw.csv` lands beside the first instead of being refused.
+`artifact_path()` stays a pure path helper and is deliberately *not*
+overwrite-aware.
+
+In the Navigator, duplicates render under **the name that was asked for**
+with a `2 of 3` badge showing write order; hovering reveals the real
+filename and why it was renamed. The `.meta.json` rows still show the name
+on disk, so a file can always be found.
+
+## User tags and comments
+
+Two kinds of metadata, deliberately kept apart:
+
+| | Recorded at creation | Added later |
+|---|---|---|
+| Where | `session.yaml` tags, `*.meta.json` sidecars | `annotations.yaml` |
+| What | provenance, checksums, inputs, session tags | your tags + one comment |
+| Who writes it | nebula, automatically | you, whenever you like |
+| Mutable? | **no** — a claim about the run | yes, on a whim |
+
+Annotating never modifies a sidecar or `session.yaml`. Both sessions and
+individual artifacts can carry user tags and a comment:
+
+```yaml
+# <session>/annotations.yaml
+version: 1
+session:
+  tags: [thesis-ch3]
+  comment: |
+    Warm-up drifted for the first 20 min.
+artifacts:
+  vccs_warm_up.tome:
+    tags: [shows-drift, paper:2026]
+    comment: the run that showed the phenomenon
+```
+
+The point is finding things later: tags are short and searchable, the
+comment is long-form and less convenient to search but says whatever you
+need it to.
+
+**Tag rules.** Outer whitespace is stripped and internal runs collapse to a
+single space. Case is preserved (`RP23D` stays `RP23D`). Colons, hyphens
+and underscores are all valid, so namespaced tags like `paper:2026` and
+`rp23-warmup` work. Commas, newlines and tabs are rejected — a comma is
+the separator wherever tags are typed. Duplicates are dropped.
+
+```
+nebula annotate <archive> <run_id> [file] --add-tags "a,b" --comment "..."
+nebula annotate <archive> <run_id> [file] --set-tags "" --rm-tags "a"
+nebula annotate <archive> <run_id>                       # show, change nothing
+```
+
+Omit `file` to annotate the session itself. In the Navigator, both panels
+have a **Your notes** editor, and the search options gain *Your tags* and
+*Your comments* checkboxes. `nebula check` reports (as info, not an error)
+annotations naming a file that is no longer in the session — a comment
+outliving its file is worth knowing about, but deleting it would break
+restoring that file from `.trash/`.
+
+Concurrency is intentionally simple: atomic write-then-replace, and
+last-write-wins between machines. Two people annotating the same session
+through a syncing folder at the same moment will lose one side's edit.
 
 ## Captured source code
 

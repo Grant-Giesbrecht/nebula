@@ -39,11 +39,12 @@ let selected = null, selectedIsSidecar = false;
 // artefact search asks the backend to walk the whole archive.
 let shownSessions = [];
 let sessQuery = "";
-let sessCfg = { titles: true, ids: true, tags: true,
+let sessCfg = { titles: true, ids: true, tags: true, userTags: true,
                 open: true, closed: true, crashed: true, clean: true, dirty: true };
 // from/to are stored as ISO (YYYY-MM-DD) for the backend but shown as
 // YYYY/MM/DD; `dates` is the master switch for the whole date filter.
 let itemCfg = { name: true, tags: true, origin: true, session: true,
+                userTags: true, comments: true,
                 dates: false, from: "", to: "" };
 let searchMode = false, searchMeta = null, searchTimer = null;
 
@@ -51,6 +52,9 @@ let searchMode = false, searchMeta = null, searchTimer = null;
 let showSess = false, showSc = false;
 let sessInfo = null, sessRaw = false;
 let scInfo = null, scRaw = false;
+// In-progress annotation edits, kept out of the panel data so an
+// async lineage/code refresh can't wipe what is being typed.
+let scNotes = null, sessNotes = null;
 
 const $ = (id) => document.getElementById(id);
 
@@ -251,6 +255,7 @@ function sessionMatches(s) {
   if (sessCfg.titles) hay.push(s.description || "");
   if (sessCfg.ids) hay.push(s.run_id || "");
   if (sessCfg.tags) hay.push((s.tags || []).join(" "));
+  if (sessCfg.userTags) hay.push((s.user_tags || []).join(" "));
   const blob = hay.join(" ").toLowerCase();
   return terms.every((t) => blob.includes(t));
 }
@@ -268,7 +273,7 @@ function applySessionFilter() {
 // True when the options exclude something, so the ⚙ can show it is doing
 // work even with an empty query.
 function isSessCfgNarrowed() {
-  return !(sessCfg.titles && sessCfg.ids && sessCfg.tags &&
+  return !(sessCfg.titles && sessCfg.ids && sessCfg.tags && sessCfg.userTags &&
            sessCfg.open && sessCfg.closed && sessCfg.crashed &&
            sessCfg.clean && sessCfg.dirty);
 }
@@ -328,9 +333,9 @@ async function runItemSearch() {
   if (!archive) return;
   if (!itemSearchActive()) { await exitSearch(); return; }
 
-  const fields = ["name", "tags", "origin", "session"]
+  const fields = ["name", "tags", "origin", "session", "userTags", "comments"]
     .filter((f) => itemCfg[f])
-    .map((f) => (f === "name" ? "filename" : f));
+    .map((f) => (f === "name" ? "filename" : f === "userTags" ? "user_tags" : f));
   try {
     const res = await call("search_items", {
       archive, query: $("itemSearch").value, fields,
@@ -421,7 +426,7 @@ function listHTML() {
   const rows = items.map((it, idx) => {
     const created = fmtCreated(it.timestamp);
     let r = `<tr data-i="${idx}" data-sc="0" class="${sameSel(idx, false) ? 'sel' : ''}">
-      <td><div class="namecell">${fileGlyph(it, 20)}<span class="fname">${escapeHtml(it.name)}</span></div></td>
+      <td><div class="namecell">${fileGlyph(it, 20)}<span class="fname">${escapeHtml(it.display_name || it.name)}</span>${dupBadge(it)}</div></td>
       ${searchMode ? sessionCell(it) : ""}
       <td class="created">${created}</td>
       <td>${pill(it)}</td></tr>`;
@@ -443,9 +448,18 @@ function gridHTML() {
   }
   return `<div class="grid">${items.map((it, idx) => `
     <div class="cell ${sameSel(idx, false) ? 'sel' : ''}" data-i="${idx}" data-sc="0" title="${escapeHtml(it.detail)}">
-      ${fileGlyph(it, 54)}<span class="cname">${escapeHtml(it.name)}</span>
+      ${fileGlyph(it, 54)}<span class="cname">${escapeHtml(it.display_name || it.name)}${dupBadge(it)}</span>
       ${searchMode ? `<span class="cell-sess">${escapeHtml(it.run_id)}</span>` : ""}</div>`).join("")}</div>`;
 }
+// Duplicates keep the name that was asked for, with their write order
+// alongside -- the real filename is one hover away.
+function dupBadge(it) {
+  if (!it.is_duplicate) return "";
+  return `<span class="dup" title="written as ${escapeHtml(it.name)} — ` +
+    `nebula renamed it so it would not overwrite ${escapeHtml(it.display_name)}">` +
+    `${it.position} of ${it.total}</span>`;
+}
+
 function sameSel(idx, isSc) { return selected === items[idx] && selectedIsSidecar === isSc; }
 
 function wireItems() {
@@ -568,6 +582,18 @@ function provenanceLine(it) {
     } else if (it.has_sidecar) {
       bits.push(`<span class="dp dim">no build provenance recorded in this sidecar</span>`);
     }
+  }
+  if (it.is_duplicate) {
+    bits.push(`<span class="dp"><span class="dp-k">Duplicate</span>` +
+      `write ${it.position} of ${it.total}` +
+      (it.original_name ? ` — asked for <span class="mono">${escapeHtml(it.original_name)}</span>,`
+        + ` stored as <span class="mono">${escapeHtml(it.name)}</span>` : "") +
+      `</span>`);
+  }
+  if (it.user_tags && it.user_tags.length) {
+    bits.push(`<span class="dp"><span class="dp-k">Your tags</span>` +
+      it.user_tags.map((t) => `<span class="chip user">${escapeHtml(t)}</span>`).join(" ") +
+      `</span>`);
   }
   if (it.n_derived_from) {
     bits.push(`<span class="dp"><span class="dp-k">Derived from</span>${it.n_derived_from} source(s)</span>`);
@@ -692,7 +718,14 @@ function renderSidecarPanel() {
       <span class="chip ${srcCls}" title="${escapeHtml(srcTitle)}">${escapeHtml(srcText)}</span>
     </div>`;
 
+  const dup = selected && selected.is_duplicate
+    ? row("Duplicate", `write ${selected.position} of ${selected.total}`
+        + (selected.original_name
+           ? ` — asked for <span class="mono">${escapeHtml(selected.original_name)}</span>`
+           : ""), { html: true })
+    : "";
   const overview = group("Overview",
+    dup +
     row("Created", fmtCreated(info.created)) +
     row("SHA-256", info.sha256, { mono: true, wrap: true }) +
     pathRow("Sidecar", info.path));
@@ -718,7 +751,12 @@ function renderSidecarPanel() {
   const inputs = group("Inputs", dictRows(info.inputs));
   const extra = group("Other fields", dictRows(info.extra));
 
-  const all = overview + provenance + lineage + code + inputs + extra;
+  const notesDraft = scNotes || {
+    tags: (selected && selected.user_tags) || [],
+    comment: (selected && selected.user_comment) || "",
+  };
+  const notes = selected ? notesHTML("sc", notesDraft) : "";
+  const all = overview + provenance + notes + lineage + code + inputs + extra;
   body.innerHTML = head + (all || noteBox("info", "This sidecar records no further detail."));
   wirePaths(body);
   wireLineage(body);
@@ -729,6 +767,70 @@ function renderSidecarPanel() {
   body.querySelectorAll("[data-restore]").forEach((n) => {
     n.onclick = (ev) => { ev.stopPropagation(); restoreCode(n.getAttribute("data-restore")); };
   });
+  if (selected) {
+    const sessionPath = selected.session_path || (curSession && curSession.path);
+    wireNotes("sc", sessionPath, selected.name, (saved) => {
+      selected.user_tags = saved.tags;
+      selected.user_comment = saved.comment;
+      updateDetails();
+    });
+  }
+}
+
+// ---- user annotations ---------------------------------------------------
+// Mutable tags and a comment, stored in the session's annotations.yaml.
+// Kept visually and conceptually apart from creation-time tags: those are
+// a claim about the run, these are a note to yourself.
+function notesHTML(kind, draft) {
+  const tags = escapeHtml((draft.tags || []).join(", "));
+  const comment = escapeHtml(draft.comment || "");
+  return group("Your notes",
+    `<div class="notes">
+       <label class="notes-l">Tags <span class="hint">comma-separated; no commas or newlines inside a tag</span></label>
+       <input class="notes-tags" id="${kind}NotesTags" value="${tags}" spellcheck="false"
+              placeholder="e.g. shows-drift, paper:2026" />
+       <label class="notes-l">Comment</label>
+       <textarea class="notes-comment" id="${kind}NotesComment" rows="4"
+                 placeholder="anything worth remembering about this">${comment}</textarea>
+       <div class="notes-actions">
+         <span class="notes-state" id="${kind}NotesState"></span>
+         <button class="dbtn fill" id="${kind}NotesSave">Save notes</button>
+       </div>
+     </div>`);
+}
+
+function wireNotes(kind, sessionPath, filename, onSaved) {
+  const tagsEl = $(`${kind}NotesTags`), commentEl = $(`${kind}NotesComment`);
+  const stateEl = $(`${kind}NotesState`);
+  if (!tagsEl || !commentEl) return;
+
+  const draft = () => ({
+    tags: tagsEl.value.split(",").map((t) => t.trim()).filter(Boolean),
+    comment: commentEl.value,
+  });
+  const stash = () => {
+    if (kind === "sc") scNotes = draft(); else sessNotes = draft();
+    stateEl.textContent = "unsaved";
+  };
+  tagsEl.oninput = stash;
+  commentEl.oninput = stash;
+
+  $(`${kind}NotesSave`).onclick = async () => {
+    const d = draft();
+    try {
+      const saved = await call("set_annotation", {
+        session_path: sessionPath, filename: filename || null,
+        tags: d.tags, comment: d.comment,
+      });
+      if (kind === "sc") scNotes = null; else sessNotes = null;
+      stateEl.textContent = "saved";
+      toast(filename ? `Saved notes for ${filename}` : "Saved session notes");
+      if (onSaved) onSaved(saved);
+    } catch (e) {
+      stateEl.textContent = "";
+      toast(`Could not save notes: ${e}`);   // e.g. a tag with a comma in it
+    }
+  };
 }
 
 // ---- captured source ----------------------------------------------------
@@ -879,6 +981,10 @@ function renderSessionPanel() {
 
   const about = group("About",
     chips(info.tags, "tag") +
+    (info.user_tags && info.user_tags.length
+      ? `<div class="chips">${info.user_tags
+          .map((t) => `<span class="chip user">${escapeHtml(t)}</span>`).join("")}</div>`
+      : "") +
     row("Created", fmtCreated(info.created)) +
     row("Hold until", info.hold_until === "forever" ? "indefinite" : fmtCreated(info.hold_until)) +
     pathRow("Folder", info.session_path));
@@ -909,9 +1015,17 @@ function renderSessionPanel() {
         </div>`).join("")}</div>`
     : "");
 
-  body.innerHTML = head + about + counts + related +
+  const notesDraft = sessNotes || {
+    tags: info.user_tags || [], comment: info.user_comment || "",
+  };
+  body.innerHTML = head + about + counts + notesHTML("sess", notesDraft) + related +
     (history || noteBox("info", "No manual operations recorded."));
   wirePaths(body);
+  wireNotes("sess", info.session_path, null, (saved) => {
+    sessInfo.user_tags = saved.tags;
+    sessInfo.user_comment = saved.comment;
+    if (curSession) reload();       // the rail search matches session user tags
+  });
 }
 
 // ---- dock / panel visibility -------------------------------------------
@@ -1164,9 +1278,12 @@ function setView(list) {
 function saveSessCfg() { LS.set("nebula.sessCfg", sessCfg); }
 function saveItemCfg() { LS.set("nebula.itemCfg", itemCfg); }
 
-const SESS_BOXES = { sfTitle: "titles", sfId: "ids", sfTag: "tags", ssOpen: "open",
+const SESS_BOXES = { sfTitle: "titles", sfId: "ids", sfTag: "tags",
+                     sfUserTag: "userTags", ssOpen: "open",
                      ssClosed: "closed", ssCrashed: "crashed", sqClean: "clean", sqDirty: "dirty" };
-const ITEM_BOXES = { ifName: "name", ifTag: "tags", ifOrigin: "origin", ifSession: "session" };
+const ITEM_BOXES = { ifName: "name", ifTag: "tags", ifOrigin: "origin",
+                     ifSession: "session", ifUserTags: "userTags",
+                     ifComments: "comments" };
 
 function syncCfgUI() {
   for (const [id, key] of Object.entries(SESS_BOXES)) $(id).checked = !!sessCfg[key];

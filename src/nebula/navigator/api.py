@@ -49,6 +49,7 @@ def _session_to_dict(s: "model.SessionInfo") -> Dict[str, Any]:
         "held": bool(s.held),
         "n_items": s.n_items,
         "n_problems": s.n_problems,
+        "user_tags": list(s.user_tags),
     }
 
 
@@ -73,6 +74,13 @@ def _item_to_dict(it: "model.Item") -> Dict[str, Any]:
         "dirty": it.dirty,
         "entry_point": it.entry_point,
         "n_derived_from": it.n_derived_from,
+        "user_tags": list(it.user_tags),
+        "user_comment": it.user_comment,
+        "display_name": it.display_name,
+        "original_name": it.original_name,
+        "position": it.position,
+        "total": it.total,
+        "is_duplicate": it.is_duplicate,
     }
 
 
@@ -161,6 +169,23 @@ def op_restore_code(args: Dict[str, Any]) -> Dict[str, Any]:
     return model.restore_code(args["archive"], args["code"], args["dest_parent"])
 
 
+def op_get_annotations(args: Dict[str, Any]) -> Dict[str, Any]:
+    from nebula import annotations
+
+    return annotations.get(args["session_path"], args.get("filename") or None)
+
+
+def op_set_annotation(args: Dict[str, Any]) -> Dict[str, Any]:
+    """Replace a target's tags and/or comment. Tag errors come back as
+    normal op errors, so the GUI can show what was rejected."""
+    from nebula import annotations
+
+    return annotations.set_annotation(
+        args["session_path"], args.get("filename") or None,
+        tags=args.get("tags"), comment=args.get("comment"),
+    )
+
+
 def op_list_archives(args: Dict[str, Any]) -> List[Dict[str, Any]]:
     return model.registered_archives()
 
@@ -229,6 +254,8 @@ OPS = {
     "resolve_refs": op_resolve_refs,
     "code_info": op_code_info,
     "restore_code": op_restore_code,
+    "get_annotations": op_get_annotations,
+    "set_annotation": op_set_annotation,
     "entry_point_link": op_entry_point_link,
     "open_url": op_open_url,
     "importable_sessions": op_importable_sessions,

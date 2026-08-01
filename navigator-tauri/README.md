@@ -225,7 +225,7 @@ One JSON object per line, request and response:
 Ops: `ping`, `resolve`, `list_archives`, `list_sessions`, `list_items`,
 `sidecar_display`, `sidecar_info`, `session_info`, `search_items`,
 `lineage`, `resolve_refs`, `code_info`, `restore_code`, `entry_point_link`,
-`open_url`,
+`open_url`, `get_annotations`, `set_annotation`,
 `importable_sessions`,
 `frozen_sessions`, `import_new`, `import_file`, `open_path`,
 `file_manager_name`. Test any of them without the GUI:

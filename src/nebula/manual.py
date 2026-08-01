@@ -62,6 +62,8 @@ def _write_external_sidecar(
     derived_from: Optional[List] = None,
     inputs: Optional[Dict] = None,
     extra: Optional[Dict] = None,
+    original_name: Optional[str] = None,
+    duplicate_index: Optional[int] = None,
 ) -> Path:
     """Write a sidecar recording that `dest` came from outside a tracked
     script. write_sidecar fills in the sha256."""
@@ -75,6 +77,8 @@ def _write_external_sidecar(
         created=_now_iso(),
         produced_by=produced_by,
         inputs=inputs or {},
+        original_name=original_name,
+        duplicate_index=duplicate_index,
         extra=extra or {},
     )
     for ref in derived_from or []:
@@ -121,18 +125,23 @@ def _place_file(
     src = Path(src)
     if not src.is_file():
         raise FileNotFoundError(f"no such file to import: {src}")
-    dest = session_dir / (dest_name or src.name)
-    if dest.exists():
-        raise FileExistsError(
-            f"{dest.name!r} already exists in {session_dir.name}; import it "
-            f"under a different --as name (replacing files comes later)."
-        )
+    # Imports honour the same overwrite policy as script writes, so a
+    # coworker's second copy of raw.csv lands beside the first by default
+    # instead of being refused (or silently clobbering it).
+    from nebula.config import read_settings
+    from nebula.session import resolve_write_target
+
+    policy = read_settings(session_dir.parents[2]).on_overwrite
+    dest, original_name, duplicate_index = resolve_write_target(
+        session_dir, dest_name or src.name, policy)
     if move:
         shutil.move(str(src), str(dest))
     else:
         shutil.copy2(str(src), str(dest))
     _write_external_sidecar(
         dest,
+        original_name=original_name,
+        duplicate_index=duplicate_index,
         origin=origin,
         imported_by=imported_by,
         derived_from=derived_from,

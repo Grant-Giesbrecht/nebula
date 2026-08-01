@@ -31,6 +31,7 @@ import warnings
 from pathlib import Path
 from typing import Dict, List, Optional
 
+from nebula.annotations import ANNOTATIONS_FILE
 from nebula.refs import Ref, format_ref, parse_ref, SESSION_PREFIX
 from nebula.registry import Registry, resolve_archive
 from nebula.sidecar import (
@@ -268,8 +269,9 @@ def _allocate_new_id(archive_root: Path, year: int) -> str:
 
 def orphan_artifacts_in(session_dir: Path) -> List[Path]:
     """Artifact files in a session folder that have no sidecar. Excludes
-    session.yaml, the sidecars themselves, hidden files (including temp
-    files left by an interrupted atomic write), and subdirectories."""
+    session.yaml, annotations.yaml, the sidecars themselves, hidden files
+    (including temp files left by an interrupted atomic write), and
+    subdirectories."""
     orphans = []
     for entry in sorted(Path(session_dir).iterdir()):
         if not entry.is_file():
@@ -277,11 +279,55 @@ def orphan_artifacts_in(session_dir: Path) -> List[Path]:
         name = entry.name
         if name.startswith("."):
             continue
-        if name == SESSION_FILE or name.endswith(SIDECAR_SUFFIX):
+        if name in (SESSION_FILE, ANNOTATIONS_FILE) or name.endswith(SIDECAR_SUFFIX):
             continue
         if not sidecar_path_for(entry).exists():
             orphans.append(entry)
     return orphans
+
+
+# ---------------------------------------------------------------------
+# Overwrite protection
+# ---------------------------------------------------------------------
+
+#: Width of the automatic duplicate suffix: raw.csv -> raw-001.csv
+DUPLICATE_WIDTH = 3
+
+
+def duplicate_name(filename: str, n: int) -> str:
+    """The nth duplicate of a filename, keeping the extension where a
+    human expects it: raw.csv -> raw-001.csv, data.tar.gz -> data.tar-001.gz."""
+    path = Path(filename)
+    return f"{path.stem}-{n:0{DUPLICATE_WIDTH}d}{path.suffix}"
+
+
+def resolve_write_target(session_dir: Path, filename: str, policy: str):
+    """Where a write should actually land, given the archive's overwrite
+    policy. Returns (path, original_name, duplicate_index) where the last
+    two are None unless the file was renamed to avoid clobbering.
+
+    Called when the path is handed to the caller, not at close: by the time
+    a with-block exits the bytes are already on disk.
+    """
+    session_dir = Path(session_dir)
+    target = session_dir / filename
+    if not target.exists():
+        return target, None, None
+
+    if policy == "overwrite":
+        return target, None, None
+    if policy == "cancel":
+        raise FileExistsError(
+            f"{filename!r} already exists in {session_dir.name} and this archive's "
+            f"on_overwrite policy is 'cancel'. Write under a different name, or "
+            f"change the policy with 'nebula config <archive> --on-overwrite duplicate'."
+        )
+
+    for n in range(1, 1000):
+        candidate = session_dir / duplicate_name(filename, n)
+        if not candidate.exists():
+            return candidate, filename, n
+    raise RuntimeError(f"more than 999 duplicates of {filename!r} in {session_dir}")
 
 
 class Session:
@@ -308,6 +354,7 @@ class Session:
             )
         self.on_missing_meta = on_missing_meta
         self._closed_cleanly = False
+        self._settings = None
 
     @property
     def id(self) -> str:
@@ -352,7 +399,20 @@ class Session:
             pass
 
     def artifact_path(self, filename: str) -> Path:
+        """The path a name maps to, verbatim. Deliberately *not*
+        overwrite-aware: it is a pure helper, and callers use it to look
+        files up as well as to write them. Overwrite protection lives in
+        artifact(), the front door that hands out a path to write to."""
         return self.path / filename
+
+    @property
+    def settings(self):
+        """This archive's settings, read once per session."""
+        if self._settings is None:
+            from nebula.config import read_settings
+
+            self._settings = read_settings(self.archive_root)
+        return self._settings
 
     def artifact(
         self,
@@ -384,9 +444,13 @@ class Session:
         # frame layout is murkier.
         caller_file = _resolve_caller(2)
         produced_by = provenance_for(caller_file)
+        path, original_name, duplicate_index = resolve_write_target(
+            self.path, filename, self.settings.on_overwrite)
         return _ArtifactWriter(
             self,
-            self.artifact_path(filename),
+            path,
+            original_name=original_name,
+            duplicate_index=duplicate_index,
             produced_by=produced_by,
             derived_from=derived_from,
             inputs=inputs or {},
@@ -507,9 +571,13 @@ class _ArtifactWriter:
         inputs: Dict,
         extra: Dict,
         caller_file: Optional[str] = None,
+        original_name: Optional[str] = None,
+        duplicate_index: Optional[int] = None,
     ):
         self._session = session
         self.path = path
+        self._original_name = original_name
+        self._duplicate_index = duplicate_index
         self._produced_by = produced_by
         self._caller_file = caller_file
         self._derived_from = derived_from or []
@@ -532,6 +600,8 @@ class _ArtifactWriter:
             created=_now_iso(),
             produced_by=self._produced_by,
             inputs=self._inputs,
+            original_name=self._original_name,
+            duplicate_index=self._duplicate_index,
             extra=self._extra,
         )
         for ref in self._derived_from:

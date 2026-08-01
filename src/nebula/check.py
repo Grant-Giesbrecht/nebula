@@ -24,6 +24,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterator, List, Optional, Tuple
 
+from nebula import annotations
 from nebula.registry import get_registry, resolve_archive
 from nebula.session import DATA_DIR, HOLD_FOREVER, _ID_RE, orphan_artifacts_in
 from nebula.sidecar import (
@@ -231,6 +232,19 @@ def check(
                     registry=registry, label=label))
             issues.extend(_check_code_ref(
                 archive_root, meta.produced_by.code, run_id, artifact, label))
+
+        # Annotations naming files that aren't here (renamed, trashed, or
+        # never existed). Info, not error: a comment outliving its file is
+        # worth knowing about but is not corruption, and deleting it would
+        # break restoring the file from .trash.
+        for name in annotations.annotated_files(session_dir):
+            if not (session_dir / name).is_file():
+                issues.append(CheckIssue(
+                    "annotation_without_file", run_id, name,
+                    "annotations.yaml has notes for a file that is not in this session",
+                    fix=(f"restore the file, or drop the entry from "
+                         f"{session_dir / annotations.ANNOTATIONS_FILE}"),
+                    severity="info"))
 
         # Session-level related_runs.
         if smeta is not None:

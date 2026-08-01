@@ -32,8 +32,18 @@ ARCHIVE_CONFIG_FILE = "archive.yaml"
 CAPTURE_ENV = "NEBULA_CAPTURE_CODE"
 
 
+#: What to do when a write would land on an existing artifact.
+OVERWRITE_POLICIES = ("duplicate", "overwrite", "cancel")
+DEFAULT_OVERWRITE_POLICY = "duplicate"
+
+
 @dataclass
 class ArchiveSettings:
+    #: duplicate -- write alongside as <name>-001.<ext>, recording the name
+    #:              that was asked for (the default: nothing is ever lost)
+    #: overwrite -- replace the existing file
+    #: cancel    -- refuse the write and raise
+    on_overwrite: str = DEFAULT_OVERWRITE_POLICY
     #: Snapshot first-party source into <archive>/.code on every save.
     capture_code: bool = True
     #: Per-file ceiling for that snapshot.
@@ -42,7 +52,12 @@ class ArchiveSettings:
     @classmethod
     def from_dict(cls, d: Dict[str, Any]) -> "ArchiveSettings":
         known = {f.name for f in fields(cls)}
-        return cls(**{k: v for k, v in (d or {}).items() if k in known})
+        got = cls(**{k: v for k, v in (d or {}).items() if k in known})
+        # A typo here would silently change how writes behave, so fall back
+        # to the safe policy rather than trusting it.
+        if got.on_overwrite not in OVERWRITE_POLICIES:
+            got.on_overwrite = DEFAULT_OVERWRITE_POLICY
+        return got
 
     def to_dict(self) -> Dict[str, Any]:
         return asdict(self)

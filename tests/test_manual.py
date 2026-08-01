@@ -78,8 +78,23 @@ def test_import_move_removes_source(tmp_path):
     assert not src.exists()
 
 
-def test_import_duplicate_name_refused(tmp_path):
+def test_import_duplicate_name_lands_beside_the_first(tmp_path):
+    """Default policy is 'duplicate': a second copy is kept, not refused
+    and not clobbered (see tests/test_overwrite.py)."""
     archive = tmp_path / "archive"
+    s = nebula.new(archive, description="host"); s.close()
+    first = manual.import_file(archive, s.id, _src(tmp_path))
+    second = manual.import_file(archive, s.id, _src(tmp_path))
+    assert first.name == "incoming.csv" and second.name == "incoming-001.csv"
+    assert read_sidecar(second).original_name == "incoming.csv"
+
+
+def test_import_duplicate_name_refused_under_cancel_policy(tmp_path):
+    from nebula.config import ArchiveSettings, write_settings
+
+    archive = tmp_path / "archive"
+    archive.mkdir()
+    write_settings(archive, ArchiveSettings(on_overwrite="cancel"))
     s = nebula.new(archive, description="host"); s.close()
     manual.import_file(archive, s.id, _src(tmp_path))
     with pytest.raises(FileExistsError):
