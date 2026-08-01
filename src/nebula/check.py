@@ -255,7 +255,37 @@ def check(
                     registry=registry, label=label))
 
     issues.extend(_check_collections(archive_root, label))
+    issues.extend(_check_year_seals(archive_root, label))
     return issues
+
+
+def _check_year_seals(archive_root: Path, label: str) -> List[CheckIssue]:
+    """Sealed years that no longer match what their seal claims.
+
+    A seal is the one place nebula takes something on trust: freshness
+    sweeps skip a sealed year instead of looking at it. That trust is only
+    reasonable if something eventually checks, and this is that something.
+
+    A mismatch may be innocent -- a deliberate repair to an old session
+    would do it -- but it is still a real inconsistency between a recorded
+    claim and what is on disk, and it leaves the index quietly ignoring
+    that year, so it reports as an error with both ways out: re-seal to
+    accept the new state, or unseal to go back to checking it.
+    """
+    from nebula import index as index_mod
+
+    out: List[CheckIssue] = []
+    for seal in index_mod.sealed_years(archive_root):
+        got = index_mod.verify_year_seal(archive_root, seal["year"])
+        if got["ok"]:
+            continue
+        out.append(CheckIssue(
+            "year_seal_mismatch", None, None,
+            f"{got['detail']}; the index skips this year while it is sealed",
+            fix=(f"if the change was intended: 'nebula seal {label} {seal['year']} "
+                 f"--force'; to go back to checking it every time: "
+                 f"'nebula unseal {label} {seal['year']}'")))
+    return out
 
 
 def _check_collections(archive_root: Path, label: str) -> List[CheckIssue]:

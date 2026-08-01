@@ -539,10 +539,30 @@ class Session:
         self.meta.status = "closed"
         self._save_meta()
         self._closed_cleanly = True
+        self._note_in_index()
 
     def mark_crashed(self) -> None:
         self.meta.status = "crashed"
         self._save_meta()
+        self._note_in_index()
+
+    def _note_in_index(self) -> None:
+        """Re-index just this session, so a reader finds nothing to do.
+
+        Purely an optimisation: index.ensure_fresh() would spot the same
+        change on the next read from the session directory's signature.
+        That makes it safe to be entirely best-effort -- by now the data
+        and its sidecars are on disk, and no cache update is worth turning
+        a finished measurement into a traceback.
+        """
+        try:
+            if not self.settings.auto_index:
+                return
+            from nebula import index
+
+            index.update_session(self.archive_root, self.path)
+        except Exception:       # noqa: BLE001 -- the cache is never worth raising for
+            pass
 
     def __enter__(self) -> "Session":
         return self

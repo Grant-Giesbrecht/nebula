@@ -34,9 +34,15 @@ depend on" months later without a rigid, ever-breaking folder taxonomy.
   separate personal/startup archive) can cross-reference each other via a
   small registry (`~/.nebula/archives.yaml`) and an `archive|session/file`
   ref syntax.
-- **The SQLite index is disposable.** It's rebuilt from scratch by
-  walking `session.yaml` + `*.meta.json` files. The filesystem is the
-  source of truth; delete `index.db` and rebuild any time.
+- **The SQLite index is disposable, and keeps itself current.** Every row
+  is a copy of something in a `session.yaml` or `*.meta.json`; the
+  filesystem is the source of truth, and deleting `index.db` costs
+  nothing. Readers call `index.ensure_fresh()`, which compares a cheap
+  stat signature per session and re-indexes only what changed -- so a
+  crashed run, a hand-edited sidecar or a session synced in from another
+  machine is picked up without anyone remembering to rebuild. Paths are
+  stored relative to the archive root, so an archive (index included) can
+  be moved between machines.
 
 ## Quick example
 
@@ -173,15 +179,31 @@ stay unit-testable without a display, and the archive logic is shared with
 the CLI rather than duplicated. Edit actions (reconcile, reseal, replace,
 delete) hang off the same manual-ops API.
 
-Rebuilding the index and checking for crashed/abandoned sessions:
+Reading the index, and checking for crashed/abandoned sessions:
 
 ```python
 from nebula import index
 
-index.rebuild("postdoc")  # or a Path, for an unregistered archive
-conn = index.open_index("postdoc")
+conn = index.open_fresh("postdoc")   # sweeps for changes, then opens
 stale = index.flag_stale_open_sessions(conn)
+
+index.rebuild("postdoc")             # full rebuild, rarely needed
+index.pending_changes("postdoc")     # what a sweep would do, without doing it
+index.status("postdoc")              # size, session count, schema, seals
 ```
+
+A sweep costs one `scandir` per session and reads no file contents. On a
+very large archive, a finished year can be **sealed** so it is skipped
+entirely:
+
+```python
+index.seal_year("postdoc", 2025)     # refuses the current year, or open sessions
+```
+
+A seal is a claim, not a lock: nothing prevents a file under a sealed year
+from changing, and if one does the index will not notice -- that is the
+cost being traded for the speed. `nebula check` verifies every seal, and
+reports a mismatch with both ways out (re-seal, or unseal).
 
 Cross-archive reference, once both archives are registered:
 
@@ -225,7 +247,7 @@ directories, and no month nesting:
 ```
 <archive>/
     archive.yaml            # per-archive settings (optional)
-    index.db                # rebuildable cache
+    index.db                # rebuildable, self-refreshing cache
     code/                   # captured source (blobs + manifests)
     collections/            # one YAML per collection (optional)
     saved-searches/         # one YAML per saved search (optional)
@@ -233,6 +255,8 @@ directories, and no month nesting:
         2026/
             S-26-0001/      # session id carries its own two-digit year
             S-26-0002/
+        2025/
+            .year-seal.yaml # optional: "this year is finished" (see seal)
         2025/
             S-25-0184/
 ```
@@ -468,7 +492,19 @@ Inspect or change it with `nebula config`:
 nebula config <archive>                          # show effective settings
 nebula config <archive> --capture-code false     # write archive.yaml
 nebula config <archive> --max-file-bytes 500000
+nebula config <archive> --auto-index false       # let readers refresh the index instead
 ```
+
+| setting | default | what it does |
+|---|---|---|
+| `on_overwrite` | `duplicate` | what a colliding write does |
+| `capture_code` | `true` | snapshot first-party source on every save |
+| `code_max_file_bytes` | 1 MB | per-file ceiling for that snapshot |
+| `auto_index` | `true` | re-index a session in `index.db` as it closes |
+
+`auto_index` is only an optimisation: with it off, `index.ensure_fresh()`
+finds the same change on the next read. Turn it off if the index lives on
+storage slow enough that closing a session shouldn't touch it.
 
 `NEBULA_CAPTURE_CODE=0` overrides the file for a single run; `nebula
 config` reports when that is in effect and never writes the override into
@@ -487,6 +523,9 @@ live so a restore stays honest.
 
 ```
 nebula rebuild <archive>                           # rebuild the index from sidecars
+nebula index <archive> [--rebuild]                 # index status + freshness sweep
+nebula seal <archive> <year> [--force]             # declare a year finished (sweeps skip it)
+nebula unseal <archive> <year>                     # go back to checking it every time
 nebula ls <archive> [--tag T] [--status S] [--today]
 nebula show <archive> <run_id>                     # full detail incl. derived_from graph
 nebula upstream <archive> <run_id> <file>          # trace an artifact back to its inputs

@@ -875,29 +875,23 @@ def archive_stats(archive) -> dict:
     n_items = sum(s.n_items for s in sessions)
     n_problems = sum(s.n_problems for s in sessions)
 
-    index_path = root / "index.db"
-    index_info = {"exists": index_path.is_file(), "path": str(index_path),
-                  "built": None, "size": None, "sessions": None, "stale": None}
-    if index_info["exists"]:
-        st = index_path.stat()
-        index_info["size"] = st.st_size
-        index_info["built"] = datetime.datetime.fromtimestamp(
-            st.st_mtime).astimezone().isoformat(timespec="seconds")
-        try:
-            from nebula.index import open_index
+    from nebula import index as index_mod
 
-            conn = open_index(root)
-            try:
-                index_info["sessions"] = conn.execute(
-                    "SELECT count(*) FROM sessions").fetchone()[0]
-            finally:
-                conn.close()
-        except Exception:       # noqa: BLE001 -- a broken index is a fact to show
-            index_info["sessions"] = None
-        # The index is a cache; if sessions have appeared since it was built,
-        # say so rather than letting a stale count mislead.
-        if index_info["sessions"] is not None:
-            index_info["stale"] = index_info["sessions"] != len(sessions)
+    # Report the index as it is; don't sweep it here. This panel is a status
+    # display, and a status display that silently repairs what it is
+    # describing can never show you a problem.
+    index_info = index_mod.status(root)
+    index_info["human"] = _human_size(index_info["size"] or 0)
+    index_info["stale"] = None
+    if index_info["exists"]:
+        # Signatures, not session counts: an edited or resealed sidecar
+        # leaves the count identical, and reporting that as fresh would be
+        # a confident lie.
+        pending = index_mod.pending_changes(root)
+        index_info["stale"] = pending["stale"]
+        index_info["pending"] = {k: pending[k] for k in
+                                 ("added", "updated", "removed", "reason")}
+        index_info["skipped_years"] = pending["skipped_years"]
 
     blobs = list(codestore._iter_stored(root, codestore.BLOBS))
     manifests = list(codestore._iter_stored(root, codestore.MANIFESTS))

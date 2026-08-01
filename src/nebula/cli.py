@@ -23,6 +23,9 @@ Usage:
     nebula upstream <archive> <run_id> <filename>
     nebula downstream <archive> <run_id> <filename> [--also-search ARCHIVE ...]
     nebula stale <archive> [--hours N]
+    nebula index <archive> [--rebuild]          # index status / freshness
+    nebula seal <archive> <year> [--force]      # declare a year finished
+    nebula unseal <archive> <year>
     nebula archives
     nebula register <name> <root> [--git-org ORG]
 """
@@ -69,12 +72,68 @@ def _resolve_archive_cli(text: str):
 def cmd_rebuild(args):
     root, _ = _resolve_archive_cli(args.archive)
     path = index.rebuild(root)
-    print(f"rebuilt index at {path}")
+    st = index.status(root)
+    print(f"rebuilt index at {path} ({st['sessions']} session(s))")
+
+
+def cmd_index(args):
+    """Index status, and the freshness sweep on demand."""
+    root, _ = _resolve_archive_cli(args.archive)
+    if args.rebuild:
+        cmd_rebuild(args)
+        return
+    before = index.status(root)
+    if not before["exists"]:
+        print("no index yet (any read will build one; or run `nebula rebuild`)")
+        return
+    swept = index.ensure_fresh(root)
+    st = index.status(root)
+    print(f"index:     {st['path']}")
+    print(f"  built:      {st['built'] or '-'}")
+    print(f"  sessions:   {st['sessions']}")
+    print(f"  size:       {st['size']} bytes")
+    print(f"  schema:     v{st['schema_version'] or '?'} "
+          f"(current v{st['current_schema']})")
+    if swept.get("rebuilt"):
+        print(f"  swept:      full rebuild -- {swept.get('reason')}")
+    else:
+        print(f"  swept:      {swept['checked_sessions']} session(s) checked, "
+              f"{swept['added']} added, {swept['updated']} updated, "
+              f"{swept['removed']} removed")
+        if swept["skipped_years"]:
+            print(f"  skipped:    {', '.join(swept['skipped_years'])} (sealed)")
+    for seal in st["sealed_years"]:
+        print(f"  sealed:     {seal['year']}  {seal['sessions']} session(s)  "
+              f"{(seal['digest'] or '')[:12]}  {seal['sealed']}")
+
+
+def cmd_seal(args):
+    """Declare a year finished so freshness sweeps can skip it."""
+    root, _ = _resolve_archive_cli(args.archive)
+    try:
+        path = index.seal_year(root, args.year, force=args.force)
+    except index.IndexError_ as e:
+        print(str(e), file=sys.stderr)
+        sys.exit(1)
+    seal = index.read_seal(root, args.year) or {}
+    print(f"sealed {args.year}: {seal.get('sessions')} session(s), "
+          f"digest {(seal.get('digest') or '')[:12]}")
+    print(f"  {path}")
+    print("  freshness sweeps will now skip this year; "
+          "`nebula check` still verifies it")
+
+
+def cmd_unseal(args):
+    root, _ = _resolve_archive_cli(args.archive)
+    if index.unseal_year(root, args.year):
+        print(f"unsealed {args.year}; it will be swept normally again")
+    else:
+        print(f"{args.year} was not sealed")
 
 
 def cmd_ls(args):
     root, _ = _resolve_archive_cli(args.archive)
-    conn = index.open_index(root)
+    conn = index.open_fresh(root)
     query = "SELECT run_id, created, status, tags, description, hold_until FROM sessions"
     clauses = []
     params = []
@@ -102,7 +161,7 @@ def cmd_ls(args):
 
 def cmd_show(args):
     root, _ = _resolve_archive_cli(args.archive)
-    conn = index.open_index(root)
+    conn = index.open_fresh(root)
     session_row = conn.execute(
         "SELECT * FROM sessions WHERE run_id = ?", (args.run_id,)
     ).fetchone()
@@ -114,7 +173,7 @@ def cmd_show(args):
     print(f"  created:     {session_row['created']}")
     print(f"  tags:        {', '.join(json.loads(session_row['tags']))}")
     print(f"  description: {session_row['description']}")
-    print(f"  path:        {session_row['path']}")
+    print(f"  path:        {index.session_path(root, session_row)}")
     hold_until = session_row["hold_until"]
     if hold_until:
         active = _hold_value_active(hold_until)
@@ -339,6 +398,7 @@ def cmd_config(args):
         "capture_code": args.capture_code,
         "code_max_file_bytes": args.max_file_bytes,
         "on_overwrite": args.on_overwrite,
+        "auto_index": args.auto_index,
     }
     changes = {k: v for k, v in changes.items() if v is not None}
 
@@ -357,7 +417,7 @@ def cmd_config(args):
     on_disk = config_mod.read_settings(root, apply_env=False)
     effective = config_mod.read_settings(root)
     print(f"{path}{'' if path.exists() else '  (not present -- using defaults)'}")
-    for key in ("on_overwrite", "capture_code", "code_max_file_bytes"):
+    for key in ("on_overwrite", "capture_code", "code_max_file_bytes", "auto_index"):
         print(f"  {key}: {getattr(on_disk, key)}")
 
     override = config_mod.env_override()
@@ -506,14 +566,15 @@ def cmd_downstream(args):
 
 def cmd_stale(args):
     root, _ = _resolve_archive_cli(args.archive)
-    conn = index.open_index(root)
+    conn = index.open_fresh(root)
     stale = index.flag_stale_open_sessions(conn, older_than_hours=args.hours)
     conn.close()
     if not stale:
         print(f"no sessions open longer than {args.hours}h")
         return
     for row in stale:
-        print(f"{row['run_id']}  opened {row['created']}  {row['path']}")
+        print(f"{row['run_id']}  opened {row['created']}  "
+              f"{index.session_path(root, row)}")
 
 
 def cmd_archives(args):
@@ -766,6 +827,9 @@ def main(argv=None):
     p.add_argument("--on-overwrite", choices=OVERWRITE_POLICIES, dest="on_overwrite",
                    help="what a write that would clobber an artifact does: "
                         "duplicate (default), overwrite, or cancel")
+    p.add_argument("--auto-index", type=_bool_arg, metavar="true|false", dest="auto_index",
+                   help="re-index a session in index.db as it closes "
+                        "(off just means readers do that work instead)")
     p.set_defaults(func=cmd_config)
 
     p = sub.add_parser("collection", help="curated, nestable sets of refs")
@@ -872,6 +936,23 @@ def main(argv=None):
     p.add_argument("filename")
     p.add_argument("--also-search", nargs="*", help="other registered archive names to scan")
     p.set_defaults(func=cmd_downstream)
+
+    p = sub.add_parser("index", help="index status and freshness")
+    p.add_argument("archive", help="registered archive name, or a literal path")
+    p.add_argument("--rebuild", action="store_true", help="rebuild from scratch instead")
+    p.set_defaults(func=cmd_index)
+
+    p = sub.add_parser("seal", help="declare a past year finished (sweeps skip it)")
+    p.add_argument("archive", help="registered archive name, or a literal path")
+    p.add_argument("year")
+    p.add_argument("--force", action="store_true",
+                   help="seal even the current year, or one with open sessions")
+    p.set_defaults(func=cmd_seal)
+
+    p = sub.add_parser("unseal", help="remove a year's seal")
+    p.add_argument("archive", help="registered archive name, or a literal path")
+    p.add_argument("year")
+    p.set_defaults(func=cmd_unseal)
 
     p = sub.add_parser("stale", help="find sessions left open too long")
     p.add_argument("archive", help="registered archive name, or a literal path")

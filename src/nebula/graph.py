@@ -22,7 +22,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, List, Optional, Set, Tuple
 
-from nebula.index import open_index
+from nebula.index import open_fresh
 from nebula.registry import Registry, get_registry, resolve_archive
 
 
@@ -53,6 +53,60 @@ def _resolve_archive_root(
     return cfg.root if cfg else None
 
 
+class _Indexes:
+    """One connection per archive for the life of a traversal.
+
+    Both directions revisit the same archives many times, and each open
+    would otherwise re-run the freshness sweep. Sweeping once per archive
+    per query keeps a deep traversal proportional to the graph rather than
+    to the graph times the size of the archive.
+    """
+
+    def __init__(self):
+        self._conns: Dict[str, Optional[object]] = {}
+        self._sessions: Dict[Tuple[str, str], Optional[str]] = {}
+
+    def get(self, archive_root: Path):
+        key = str(archive_root)
+        if key not in self._conns:
+            try:
+                self._conns[key] = open_fresh(archive_root)
+            except Exception:   # noqa: BLE001 -- no index, or an unusable one
+                self._conns[key] = None
+        return self._conns[key]
+
+    def artifact_path(self, archive_root: Path, run_id: str, filename: str) -> Optional[str]:
+        """Where an artifact actually lives. Session paths are stored
+        relative to the archive root, so this resolves correctly for an
+        archive that has moved or is mounted elsewhere on this machine.
+        Returns None when the session isn't indexed, rather than inventing
+        a path that may not exist."""
+        key = (str(archive_root), run_id)
+        if key not in self._sessions:
+            conn = self.get(archive_root)
+            rel = None
+            if conn is not None:
+                try:
+                    row = conn.execute(
+                        "SELECT rel_path FROM sessions WHERE run_id = ?", (run_id,)
+                    ).fetchone()
+                    rel = row["rel_path"] if row else None
+                except Exception:   # noqa: BLE001 -- a broken index isn't fatal here
+                    rel = None
+            self._sessions[key] = rel
+        rel = self._sessions[key]
+        return str(Path(archive_root) / rel / filename) if rel else None
+
+    def close(self) -> None:
+        for conn in self._conns.values():
+            if conn is not None:
+                try:
+                    conn.close()
+                except Exception:   # noqa: BLE001
+                    pass
+        self._conns.clear()
+
+
 def upstream(
     archive: "str | Path",
     run_id: str,
@@ -81,60 +135,62 @@ def upstream(
         (archive_name, Path(local_archive_root), run_id, filename)
     ]
     depth = 0
+    indexes = _Indexes()
 
-    while frontier and depth < max_depth:
-        depth += 1
-        next_frontier = []
-        for cur_archive_name, cur_root, cur_run_id, cur_filename in frontier:
-            key = (cur_archive_name, cur_run_id, cur_filename)
-            if key in visited:
-                continue
-            visited.add(key)
+    try:
+        while frontier and depth < max_depth:
+            depth += 1
+            next_frontier = []
+            for cur_archive_name, cur_root, cur_run_id, cur_filename in frontier:
+                key = (cur_archive_name, cur_run_id, cur_filename)
+                if key in visited:
+                    continue
+                visited.add(key)
 
-            try:
-                conn = open_index(cur_root)
-            except FileNotFoundError:
-                continue
-
-            rows = conn.execute(
-                "SELECT ref_archive, ref_session, ref_file FROM derived_from "
-                "WHERE run_id = ? AND filename = ?",
-                (cur_run_id, cur_filename),
-            ).fetchall()
-            conn.close()
-
-            for row in rows:
-                parent_archive = row["ref_archive"] or cur_archive_name
-                parent_session = row["ref_session"] or cur_run_id
-                parent_file = row["ref_file"]
-                if parent_file is None:
-                    continue  # whole-session ref, not an artifact edge
-
-                parent_root = _resolve_archive_root(
-                    parent_archive, Path(local_archive_root), archive_name, registry
-                )
-                if parent_root is None:
-                    result.append(
-                        ArtifactNode(
-                            archive=parent_archive,
-                            run_id=parent_session,
-                            filename=parent_file,
-                            unresolved=True,
-                        )
-                    )
+                conn = indexes.get(cur_root)
+                if conn is None:
                     continue
 
-                node = ArtifactNode(
-                    archive=parent_archive,
-                    run_id=parent_session,
-                    filename=parent_file,
-                    path=str(parent_root / "**" / parent_session / parent_file),
-                )
-                result.append(node)
-                next_frontier.append(
-                    (parent_archive, parent_root, parent_session, parent_file)
-                )
-        frontier = next_frontier
+                rows = conn.execute(
+                    "SELECT ref_archive, ref_session, ref_file FROM derived_from "
+                    "WHERE run_id = ? AND filename = ?",
+                    (cur_run_id, cur_filename),
+                ).fetchall()
+
+                for row in rows:
+                    parent_archive = row["ref_archive"] or cur_archive_name
+                    parent_session = row["ref_session"] or cur_run_id
+                    parent_file = row["ref_file"]
+                    if parent_file is None:
+                        continue  # whole-session ref, not an artifact edge
+
+                    parent_root = _resolve_archive_root(
+                        parent_archive, Path(local_archive_root), archive_name, registry
+                    )
+                    if parent_root is None:
+                        result.append(
+                            ArtifactNode(
+                                archive=parent_archive,
+                                run_id=parent_session,
+                                filename=parent_file,
+                                unresolved=True,
+                            )
+                        )
+                        continue
+
+                    node = ArtifactNode(
+                        archive=parent_archive,
+                        run_id=parent_session,
+                        filename=parent_file,
+                        path=indexes.artifact_path(parent_root, parent_session, parent_file),
+                    )
+                    result.append(node)
+                    next_frontier.append(
+                        (parent_archive, parent_root, parent_session, parent_file)
+                    )
+            frontier = next_frontier
+    finally:
+        indexes.close()
 
     return result
 
@@ -172,64 +228,67 @@ def downstream(
     result: List[ArtifactNode] = []
     frontier: List[Tuple[str, str, str]] = [(archive_name, run_id, filename)]
     depth = 0
+    indexes = _Indexes()
 
-    while frontier and depth < max_depth:
-        depth += 1
-        next_frontier = []
-        for cur_archive_name, cur_run_id, cur_filename in frontier:
-            key = (cur_archive_name, cur_run_id, cur_filename)
-            if key in visited:
-                continue
-            visited.add(key)
-
-            for scan_archive_name, scan_root in archives_to_scan:
-                try:
-                    conn = open_index(scan_root)
-                except FileNotFoundError:
+    try:
+        while frontier and depth < max_depth:
+            depth += 1
+            next_frontier = []
+            for cur_archive_name, cur_run_id, cur_filename in frontier:
+                key = (cur_archive_name, cur_run_id, cur_filename)
+                if key in visited:
                     continue
+                visited.add(key)
 
-                # A derived_from row in this archive's index points at
-                # (cur_run_id, cur_filename) via a ref that's either
-                # implicit-same-archive (ref_archive IS NULL, only valid
-                # when scan_archive_name == cur_archive_name, and
-                # ref_session IS NULL means "same session as the row's
-                # own run_id") or fully explicit (ref_archive = X,
-                # ref_session = Y).
-                if scan_archive_name == cur_archive_name:
-                    rows = conn.execute(
-                        """
-                        SELECT run_id, filename FROM derived_from
-                        WHERE ref_file = ?
-                          AND (ref_archive IS NULL OR ref_archive = ?)
-                          AND (
-                                ref_session = ?
-                             OR (ref_session IS NULL AND run_id = ?)
-                          )
-                        """,
-                        (cur_filename, cur_archive_name, cur_run_id, cur_run_id),
-                    ).fetchall()
-                else:
-                    rows = conn.execute(
-                        """
-                        SELECT run_id, filename FROM derived_from
-                        WHERE ref_file = ?
-                          AND ref_archive = ?
-                          AND ref_session = ?
-                        """,
-                        (cur_filename, cur_archive_name, cur_run_id),
-                    ).fetchall()
-                conn.close()
-
-                for row in rows:
-                    node = ArtifactNode(
-                        archive=scan_archive_name,
-                        run_id=row["run_id"],
-                        filename=row["filename"],
-                    )
-                    if node.key() in visited:
+                for scan_archive_name, scan_root in archives_to_scan:
+                    conn = indexes.get(scan_root)
+                    if conn is None:
                         continue
-                    result.append(node)
-                    next_frontier.append((scan_archive_name, row["run_id"], row["filename"]))
-        frontier = next_frontier
+
+                    # A derived_from row in this archive's index points at
+                    # (cur_run_id, cur_filename) via a ref that's either
+                    # implicit-same-archive (ref_archive IS NULL, only valid
+                    # when scan_archive_name == cur_archive_name, and
+                    # ref_session IS NULL means "same session as the row's
+                    # own run_id") or fully explicit (ref_archive = X,
+                    # ref_session = Y).
+                    if scan_archive_name == cur_archive_name:
+                        rows = conn.execute(
+                            """
+                            SELECT run_id, filename FROM derived_from
+                            WHERE ref_file = ?
+                              AND (ref_archive IS NULL OR ref_archive = ?)
+                              AND (
+                                    ref_session = ?
+                                 OR (ref_session IS NULL AND run_id = ?)
+                              )
+                            """,
+                            (cur_filename, cur_archive_name, cur_run_id, cur_run_id),
+                        ).fetchall()
+                    else:
+                        rows = conn.execute(
+                            """
+                            SELECT run_id, filename FROM derived_from
+                            WHERE ref_file = ?
+                              AND ref_archive = ?
+                              AND ref_session = ?
+                            """,
+                            (cur_filename, cur_archive_name, cur_run_id),
+                        ).fetchall()
+
+                    for row in rows:
+                        node = ArtifactNode(
+                            archive=scan_archive_name,
+                            run_id=row["run_id"],
+                            filename=row["filename"],
+                            path=indexes.artifact_path(scan_root, row["run_id"], row["filename"]),
+                        )
+                        if node.key() in visited:
+                            continue
+                        result.append(node)
+                        next_frontier.append((scan_archive_name, row["run_id"], row["filename"]))
+            frontier = next_frontier
+    finally:
+        indexes.close()
 
     return result

@@ -47,17 +47,35 @@ def test_rebuild_then_stats_reports_the_build(tmp_path):
     assert st["index"]["stale"] is False
 
 
-def test_stats_flags_a_stale_index(tmp_path):
-    """The index is a cache; a panel that shows its count must say when the
-    archive has moved on."""
+def test_closing_a_session_keeps_the_index_current(tmp_path):
+    """Sessions index themselves as they close, so the panel shouldn't be
+    nagging about a rebuild for the ordinary case of having done some work."""
     archive, _ = _archive(tmp_path)
     api.dispatch("rebuild_index", {"archive": str(archive)})
     s2 = nebula.new(archive, description="two")
     s2.close()
 
     st = api.dispatch("archive_stats", {"archive": str(archive)})
-    assert st["n_sessions"] == 2 and st["index"]["sessions"] == 1
+    assert st["n_sessions"] == 2 and st["index"]["sessions"] == 2
+    assert st["index"]["stale"] is False
+
+
+def test_stats_flags_an_index_that_missed_a_change(tmp_path):
+    """Staleness is judged by session signatures, not by counting sessions:
+    an edit behind the index's back leaves the count identical, and calling
+    that 'fresh' would be a confident lie."""
+    archive, s = _archive(tmp_path)
+    api.dispatch("rebuild_index", {"archive": str(archive)})
+    assert api.dispatch("archive_stats", {"archive": str(archive)})["index"]["stale"] is False
+
+    time.sleep(0.01)
+    sidecar = Path(s.path) / "raw.csv.meta.json"
+    sidecar.write_text(sidecar.read_text())      # same session count, new mtime
+
+    st = api.dispatch("archive_stats", {"archive": str(archive)})
+    assert st["index"]["sessions"] == 1 and st["n_sessions"] == 1
     assert st["index"]["stale"] is True
+    assert st["index"]["pending"]["updated"] == 1
 
 
 def test_stats_flags_stale_open_sessions(tmp_path):

@@ -2069,14 +2069,31 @@ function renderArchivePanel() {
         + `(${a.stale_open.map((s) => s.run_id).join(", ")}) — likely a script that never closed.`)
     : "";
 
+  const pend = idx.pending || {};
+  // Staleness is measured by session signatures, so say what actually
+  // differs rather than quoting a session count that may well match.
+  const pendBits = [
+    pend.added ? `${pend.added} new` : "",
+    pend.updated ? `${pend.updated} changed` : "",
+    pend.removed ? `${pend.removed} gone` : "",
+  ].filter(Boolean).join(", ");
+  const sealed = idx.sealed_years || [];
   const index = `<div class="mg"><div class="mg-h">Index <span class="issue-w">rebuildable cache</span></div>` +
     (idx.exists
-      ? row("Last rebuilt", fmtCreated(idx.built)) +
+      ? row("Last built", fmtCreated(idx.built)) +
         row("Sessions indexed", idx.sessions === null ? "unreadable" : String(idx.sessions)) +
-        (idx.stale ? noteBox("info", `The index lists ${idx.sessions} session(s) but the archive has `
-          + `${a.n_sessions}. Rebuild to bring it up to date.`) : "")
-      : noteBox("info", "No index yet. `nebula ls` and the CLI's graph queries need one; "
-          + "the Navigator reads the filesystem directly and works without it.")) +
+        (sealed.length ? row("Sealed years",
+                             sealed.map((y) => `${y.year} (${y.sessions})`).join(", ")) : "") +
+        (idx.usable === false
+          ? noteBox("info", "This index was written by a different version of nebula; "
+              + "it will be rebuilt automatically the next time anything reads it.")
+          : idx.stale
+            ? noteBox("info", "Sessions on disk have moved on since this was built"
+                + (pendBits ? ` — ${pendBits}` : "") + ". Reads bring it up to date "
+                + "automatically; rebuild only if you want it done now.")
+            : "")
+      : noteBox("info", "No index yet. `nebula ls` and the CLI's graph queries build one on "
+          + "demand; the Navigator reads the filesystem directly and works without it.")) +
     `<div class="mg-actions"><button class="dbtn ghost" id="arcRebuild">Rebuild index</button></div></div>`;
 
   const issues = checkResult ? checkIssuesHTML(checkResult) : "";

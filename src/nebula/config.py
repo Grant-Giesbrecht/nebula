@@ -48,6 +48,11 @@ class ArchiveSettings:
     capture_code: bool = True
     #: Per-file ceiling for that snapshot.
     code_max_file_bytes: int = DEFAULT_MAX_FILE_BYTES
+    #: Re-index a session in <archive>/index.db as it closes. Off just
+    #: means readers do that work instead (index.ensure_fresh finds the
+    #: change either way); worth turning off only if the index lives on
+    #: storage slow enough that closing a session should not touch it.
+    auto_index: bool = True
 
     @classmethod
     def from_dict(cls, d: Dict[str, Any]) -> "ArchiveSettings":

@@ -73,13 +73,28 @@ Lineage
       → figure-3.png    S-26-0040   ✎ paper:2026
 ```
 
-**Do:** recurse `lineage` filesystem-side with a depth cap, and offer
-`graph.py` as the "search other archives too" escape hatch (it needs an
-index; say so in the UI rather than failing silently).
+**Do:** traverse index-first via `graph.py`, falling back to the filesystem
+scan when the index can't be trusted, with a depth cap and an "expand".
 
-**Open:** unbounded depth, or 2–3 hops with an "expand" affordance? Each hop
-downstream is a full-archive sidecar scan (`check.dependents_of`), so depth
-costs real time on a large archive. A cap with expansion is the safe default.
+**The index groundwork is done** (2026-08-01). What changed:
+
+- `index.ensure_fresh()` sweeps by per-session stat signature, so the index
+  is current without anyone remembering to rebuild — `graph.py` traversals
+  now open through `open_fresh()`.
+- `derived_from(ref_file, ref_session)` is indexed, so the *downstream*
+  direction is no longer a full table scan per hop.
+- `graph.py` pools one connection per archive per traversal, so a deep walk
+  costs the graph, not the graph times the archive.
+- Session paths are stored relative, so nodes resolve to real paths on
+  whichever machine the archive is mounted on.
+
+That removes the performance half of the depth question: hops are now
+cheap. What remains is a *display* decision — how much to show at once —
+which argues for putting depth in the GUI (default 3, with expand) rather
+than in `archive.yaml`, where it would be an archive-wide answer to a
+per-question choice.
+
+**Open:** the default depth, and whether "expand" is per-node or global.
 
 ### 3. Session-level provenance view — **WANTED**, form **OPEN**
 
@@ -169,7 +184,8 @@ does this with the `script?` chip.
 
 ## Open questions
 
-- **Transitive depth** — unbounded vs capped-with-expand (item 2).
+- **Transitive depth** — now a display question, not a performance one (see
+  item 2): what default, and is "expand" per-node or global?
 - **Session view form** — indented tree vs node-link (item 3).
 - **Cross-archive traversal** — `graph.py` needs an index and the registry.
   Show unreachable archives as "unresolved" nodes (as `_resolve_ref` already
@@ -189,6 +205,8 @@ does this with the `script?` chip.
 
 1. ~~`related_runs` resolved + clickable (item 1)~~ — **done**
 2. ~~Rail date grouping + activity strip (item 4a, 4b)~~ — **done**
-3. Transitive lineage with a depth cap (item 2) — next, needs the depth decision.
-4. Session provenance view, indented tree first (item 3) — needs the form decision.
-5. Reassess the timeline canvas and the `source` facet (items 5, 6).
+3. ~~Index freshness, relative paths, reverse edge index, year seals~~ —
+   **done** (2026-08-01); the prerequisite for cheap multi-hop traversal.
+4. Transitive lineage with a depth cap (item 2) — next, needs the depth decision.
+5. Session provenance view, indented tree first (item 3) — needs the form decision.
+6. Reassess the timeline canvas and the `source` facet (items 5, 6).
