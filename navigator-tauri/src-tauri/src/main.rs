@@ -298,9 +298,16 @@ fn bridge(op: String, args: Option<Value>, state: State<BridgeState>) -> Result<
 /// front-end's shortcuts: AppKit consumes menu accelerators *before* the
 /// webview sees a key event, so anything bound here is unavailable to
 /// main.js. That is why "show metadata" is Cmd-Shift-M rather than Cmd-M.
+///
+/// The View submenu exists to make the app's own shortcuts *findable*.
+/// Because of that same interception, those items cannot simply be labels:
+/// once an accelerator is in the menu, the webview stops receiving it. So
+/// each one emits `menu://action` with its id, and the front-end runs the
+/// same handler the keyboard path would have. Keep the ids in sync with
+/// MENU_ACTIONS in main.js.
 #[cfg(target_os = "macos")]
 fn install_menu(app: &tauri::App) -> tauri::Result<()> {
-    use tauri::menu::{AboutMetadata, MenuBuilder, SubmenuBuilder};
+    use tauri::menu::{AboutMetadata, MenuBuilder, MenuItemBuilder, SubmenuBuilder};
 
     let app_menu = SubmenuBuilder::new(app, "Nebula Navigator")
         .about(Some(AboutMetadata::default()))
@@ -322,6 +329,36 @@ fn install_menu(app: &tauri::App) -> tauri::Result<()> {
         .select_all()
         .build()?;
 
+    // Ids match the MENU_ACTIONS table in main.js.
+    let metadata = MenuItemBuilder::with_id("menu:metadata", "Show File Metadata")
+        .accelerator("CmdOrCtrl+Shift+M")
+        .build(app)?;
+    let session = MenuItemBuilder::with_id("menu:session", "Show Session Info")
+        .accelerator("CmdOrCtrl+Shift+S")
+        .build(app)?;
+    let archive = MenuItemBuilder::with_id("menu:archive", "Archive Management…")
+        .build(app)?;
+    let reload = MenuItemBuilder::with_id("menu:reload", "Reload Archive")
+        .accelerator("CmdOrCtrl+R")
+        .build(app)?;
+    let open_sel = MenuItemBuilder::with_id("menu:open", "Open Selected File")
+        .accelerator("CmdOrCtrl+O")
+        .build(app)?;
+    let import = MenuItemBuilder::with_id("menu:import", "Import Files…")
+        .accelerator("CmdOrCtrl+Shift+I")
+        .build(app)?;
+
+    let view_menu = SubmenuBuilder::new(app, "View")
+        .item(&metadata)
+        .item(&session)
+        .separator()
+        .item(&archive)
+        .item(&reload)
+        .separator()
+        .item(&open_sel)
+        .item(&import)
+        .build()?;
+
     let window_menu = SubmenuBuilder::new(app, "Window")
         .minimize()
         .maximize()
@@ -331,7 +368,7 @@ fn install_menu(app: &tauri::App) -> tauri::Result<()> {
         .build()?;
 
     let menu = MenuBuilder::new(app)
-        .items(&[&app_menu, &edit_menu, &window_menu])
+        .items(&[&app_menu, &edit_menu, &view_menu, &window_menu])
         .build()?;
     app.set_menu(menu)?;
     Ok(())
@@ -356,6 +393,15 @@ fn main() {
             #[cfg(target_os = "macos")]
             install_menu(_app)?;
             Ok(())
+        })
+        // A menu accelerator never reaches the webview, so the item hands
+        // the action to the front-end itself. Ids are "menu:<action>".
+        .on_menu_event(|app, event| {
+            use tauri::Emitter;
+
+            if let Some(action) = event.id().0.strip_prefix("menu:") {
+                let _ = app.emit("menu://action", action);
+            }
         })
         .run(tauri::generate_context!())
         .expect("error while running Nebula Navigator");

@@ -1816,23 +1816,47 @@ async function refreshAll() {
   toast(`Reloaded ${activeLabel()}`);
 }
 
+// One table, two entry points: the macOS menu (which owns these
+// accelerators and emits menu://action) and the keydown handler used
+// everywhere else. Ids match install_menu() in main.rs.
+const MENU_ACTIONS = {
+  metadata: toggleMetadataPanel,
+  session: toggleSessionPanel,
+  archive: openArchivePanel,
+  reload: refreshAll,
+  import: startImport,
+  open: openSelectedExternally,
+};
+
+function runAction(name) {
+  const action = MENU_ACTIONS[name];
+  if (!action) return;
+  Promise.resolve(action()).catch((err) => toast(`${err}`));
+}
+
 function initShortcuts() {
+  // Menu items can't just be labels: an accelerator in the menu is
+  // swallowed by the OS before the webview sees it, so the item sends the
+  // action here instead.
+  tauriEvent.listen("menu://action", (e) => runAction(e.payload))
+    .catch((e) => console.error("menu listener failed", e));
+
   document.addEventListener("keydown", (e) => {
     if (e.key === "Escape") { closePops(null); return; }
     if (!hasMod(e) || e.altKey) return;
     const k = (e.key || "").toLowerCase();
     const shift = e.shiftKey;
 
-    let action = null;
-    if (k === "m" && shift) action = toggleMetadataPanel;
-    else if (k === "s" && shift) action = toggleSessionPanel;
-    else if (k === "r" && !shift) action = refreshAll;
-    else if (k === "i" && shift) action = startImport;
-    else if (k === "o" && !shift) action = openSelectedExternally;
-    if (!action) return;
+    let name = null;
+    if (k === "m" && shift) name = "metadata";
+    else if (k === "s" && shift) name = "session";
+    else if (k === "r" && !shift) name = "reload";
+    else if (k === "i" && shift) name = "import";
+    else if (k === "o" && !shift) name = "open";
+    if (!name) return;
 
     e.preventDefault();   // Ctrl-R would otherwise reload the webview
-    Promise.resolve(action()).catch((err) => toast(`${err}`));
+    runAction(name);
   });
 }
 

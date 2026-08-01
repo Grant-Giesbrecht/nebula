@@ -125,13 +125,20 @@ modifier; tooltips are rewritten to ⌘ / ⇧⌘ at boot on macOS):
 | `Mod-Shift-I` | Import files… |
 | `Mod-O`       | Open the selection in the default app |
 
-⚠️ On macOS these live *around* the menu bar, not in it: AppKit dispatches
-menu accelerators before the webview gets a `keydown`, so any key the menu
-claims is unreachable from `main.js`. That is why metadata is
-`Cmd-Shift-M` — plain `Cmd-M` belongs to Window ▸ Minimize. `main.rs`
-installs a deliberately small menu (app / Edit / Window); **keep Edit**,
-since WKWebView's copy, paste and select-all are driven by those items.
-If you add a menu item, check its accelerator against the table above.
+On macOS these are listed in the **View** menu so they can be found without
+memorising them. That has an implementation consequence worth knowing:
+AppKit dispatches menu accelerators *before* the webview gets a `keydown`,
+so a menu item cannot be a mere label — once it owns an accelerator, the
+keyboard path stops firing. Each item therefore emits `menu://action` with
+its id, and the front-end runs the same handler (`MENU_ACTIONS` in
+`main.js`, ids matching `install_menu()` in `main.rs` — keep them in sync).
+The `keydown` handler still serves Windows/Linux, where no menu is installed.
+
+`main.rs` installs a deliberately small menu (app / Edit / View / Window);
+**keep Edit**, since WKWebView's copy, paste and select-all are driven by
+those items. Plain `Cmd-M` belongs to Window ▸ Minimize, which is why
+metadata is `Cmd-Shift-M`. Archive Management is in the menu without an
+accelerator.
 
 ### ⚠️ Gotcha: once you have built a sidecar, `npm run dev` stops using your live Python
 
