@@ -61,10 +61,34 @@
               <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/><rect x="14" y="14" width="7" height="7" rx="1"/></svg>
             </button>
           </div>
+          <div class="pop-wrap">
+            <button class="tbtn" id="sortBtn" title="Sort &amp; filter files">
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M7 4v16"/><polyline points="4 17 7 20 10 17"/><path d="M17 20V4"/><polyline points="14 7 17 4 20 7"/></svg>
+              Sort
+            </button>
+            <div class="pop anchored hidden" id="sortCfg">
+              <div class="pop-h">Sort by</div>
+              <label class="check"><input type="radio" name="sortby" id="sortDate" checked /> Date created</label>
+              <label class="check"><input type="radio" name="sortby" id="sortTitle" /> Title</label>
+              <label class="check"><input type="radio" name="sortby" id="sortStatus" /> File status</label>
+              <div class="pop-h">Order</div>
+              <label class="check"><input type="radio" name="sortdir" id="sortDesc" checked /> <span id="sortDescLbl">Newest first</span></label>
+              <label class="check"><input type="radio" name="sortdir" id="sortAsc" /> <span id="sortAscLbl">Oldest first</span></label>
+              <div class="pop-h">Show</div>
+              <label class="check"><input type="checkbox" id="fltPaired" checked /> OK</label>
+              <label class="check"><input type="checkbox" id="fltDrifted" checked /> Modified</label>
+              <label class="check"><input type="checkbox" id="fltOrphan" checked /> No metadata</label>
+              <label class="check"><input type="checkbox" id="fltStray" checked /> Data missing</label>
+            </div>
+          </div>
           <div class="vdiv"></div>
           <label class="check"><input type="checkbox" id="verify" /> Verify checksums</label>
           <label class="check"><input type="checkbox" id="meta" checked /> Show metadata</label>
           <div class="vdiv"></div>
+          <button class="tbtn" id="arcBtn" title="Archive management">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="4" width="20" height="5" rx="1"/><path d="M4 9v9a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V9"/><line x1="10" y1="13" x2="14" y2="13"/></svg>
+            Archive
+          </button>
           <button class="tbtn" id="sessInfoBtn" title="Session info — session.yaml  (Ctrl-Shift-S)">
             <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><line x1="12" y1="11" x2="12" y2="16"/><line x1="12" y1="8" x2="12.01" y2="8"/></svg>
             Session info
@@ -112,6 +136,18 @@
             <button class="lbtn" id="openSc" title="Show the sidecar panel  (Ctrl-Shift-M)" disabled>
               <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><line x1="12" y1="16" x2="12" y2="12"/><line x1="12" y1="8" x2="12.01" y2="8"/></svg>
               Open sidecar
+            </button>
+            <button class="lbtn" id="resealBtn" title="Re-record the checksum after an intended edit" disabled>
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="11" width="18" height="10" rx="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></svg>
+              Reseal
+            </button>
+            <button class="lbtn" id="adoptBtn" title="Write a sidecar for this untracked file" disabled>
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="12" y1="18" x2="12" y2="12"/><line x1="9" y1="15" x2="15" y2="15"/></svg>
+              Write sidecar
+            </button>
+            <button class="lbtn danger" id="delBtn" title="Move this artefact to the session's .trash/" disabled>
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></svg>
+              Delete
             </button>
             <button class="lbtn" id="editSc" disabled>
               <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/><path d="M18.5 2.5a2.12 2.12 0 0 1 3 3L12 15l-4 1 1-4Z"/></svg>
@@ -189,6 +225,27 @@
       <div class="dlg-actions">
         <button class="dbtn ghost" id="dlgCancel">Cancel</button>
         <button class="dbtn fill" id="dlgImport">Import</button>
+      </div>
+    </div>
+  </div>
+
+  <div class="scrim" id="arcScrim">
+    <div class="dialog wide" role="dialog" aria-modal="true" aria-labelledby="arcHead">
+      <div class="dlg-head row" id="arcHead">
+        <span>Archive management</span>
+        <button class="p-btn" id="arcClose" title="Close">✕</button>
+      </div>
+      <div class="dlg-body scroll" id="arcBody"></div>
+    </div>
+  </div>
+
+  <div class="scrim" id="cfmScrim">
+    <div class="dialog" role="dialog" aria-modal="true" aria-labelledby="cfmHead">
+      <div class="dlg-head" id="cfmHead">Are you sure?</div>
+      <div class="dlg-body"><div class="cfm-body" id="cfmBody"></div></div>
+      <div class="dlg-actions">
+        <button class="dbtn ghost" id="cfmCancel">Cancel</button>
+        <button class="dbtn fill danger" id="cfmOk">Confirm</button>
       </div>
     </div>
   </div>

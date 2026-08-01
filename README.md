@@ -280,8 +280,12 @@ second copy of `raw.csv` lands beside the first instead of being refused.
 `artifact_path()` stays a pure path helper and is deliberately *not*
 overwrite-aware.
 
-In the Navigator, duplicates render under **the name that was asked for**
-with a `2 of 3` badge showing write order; hovering reveals the real
+Files are listed **newest first** by default. The Navigator's **⇅ Sort**
+button re-orders by date, title or file status in either direction, and
+filters by status (OK / modified / no metadata / data missing); the choice
+is remembered. In the Navigator, duplicates
+render under **the name that was asked for** with a `2 of 3` badge showing
+write order; hovering reveals the real
 filename and why it was renamed. The `.meta.json` rows still show the name
 on disk, so a file can always be found.
 
@@ -396,7 +400,10 @@ nebula downstream <archive> <run_id> <file> [--also-search ARCHIVE ...]
 nebula stale <archive> [--hours N]                 # find abandoned "open" sessions
 nebula archives                                    # list registered archives
 nebula register <name> <root> [--git-org ORG]      # add an archive to the registry
-nebula config <archive> [--capture-code B] [--max-file-bytes N]   # archive settings
+nebula config <archive> [--capture-code B] [--max-file-bytes N] [--on-overwrite P]
+nebula hold <archive> <run_id> / nebula release <archive> <run_id>
+nebula rm <archive> <run_id> <file> / nebula rm-session <archive> <run_id>
+nebula reseal <archive> <run_id> <file>            # re-record a checksum
 nebula check <archive> [--no-checksums]            # fsck, incl. dangling code refs
 nebula gc <archive> [--delete] [--ignore-trash]    # sweep unreferenced captured code
 ```

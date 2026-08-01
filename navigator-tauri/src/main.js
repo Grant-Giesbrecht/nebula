@@ -48,6 +48,13 @@ let itemCfg = { name: true, tags: true, origin: true, session: true,
                 dates: false, from: "", to: "" };
 let searchMode = false, searchMeta = null, searchTimer = null;
 
+// How the file list is ordered and which statuses are shown. The backend
+// hands items over newest-first; this re-sorts client-side so changing it
+// is instant and works on search results too.
+let shownItems = [];
+let itemSort = { by: "date", desc: true,
+                 show: { paired: true, drifted: true, orphan: true, stray: true } };
+
 // panels
 let showSess = false, showSc = false;
 let sessInfo = null, sessRaw = false;
@@ -210,7 +217,7 @@ function closeArchive() {
   archive = archives.length ? archives[0].id : null;
   saveArchives();
   if (archive) { loadArchive(archive); return; }
-  sessions = []; curSession = null; items = []; selected = null;
+  sessions = []; curSession = null; items = []; shownItems = []; selected = null;
   sessInfo = null; scInfo = null; searchMode = false; searchMeta = null;
   renderArchiveSelect();
   applySessionFilter();
@@ -346,7 +353,7 @@ async function runItemSearch() {
     searchMeta = res;
     items = res.items;
     selected = null; selectedIsSidecar = false;
-    renderItemArea();
+    applyItemView();
     updateDetails();
     const bits = [`${res.items.length}${res.truncated ? "+" : ""} match(es)`,
                   `${res.n_scanned} artefact(s) in ${res.n_sessions} session(s)`];
@@ -361,7 +368,7 @@ async function exitSearch() {
   searchMode = false; searchMeta = null;
   selected = null; selectedIsSidecar = false;
   if (curSession) await reloadItems();
-  else { items = []; renderItemArea(); updateDetails(); }
+  else { items = []; applyItemView(); updateDetails(); }
 }
 
 function clearItemSearch() {
@@ -405,10 +412,93 @@ async function reloadItems() {
   if (!curSession) return;
   if (searchMode) return;   // a search owns the item area until it's cleared
   items = await call("list_items", { session_path: curSession.path, verify });
-  $("itemArea").innerHTML = listView ? listHTML() : gridHTML();
-  wireItems();
+  applyItemView();
   const problems = items.filter((i) => i.status !== "paired").length;
   $("statusbar").textContent = `${activeLabel()} — ${curSession.run_id}: ${items.length} item(s), ${problems} problem(s)`;
+}
+
+// ---- ordering and filtering --------------------------------------------
+// Worst first when ascending: the files that need attention lead.
+const STATUS_RANK = { orphan: 0, stray: 1, drifted: 2, paired: 3 };
+
+function itemTime(it) {
+  const t = Date.parse(it.timestamp || "");
+  return Number.isNaN(t) ? null : t;
+}
+
+function applyItemView() {
+  const show = itemSort.show;
+  shownItems = items.filter((it) => show[it.status] !== false);
+
+  const dir = itemSort.desc ? -1 : 1;
+  shownItems.sort((a, b) => {
+    let d = 0;
+    if (itemSort.by === "date") {
+      const ta = itemTime(a), tb = itemTime(b);
+      // Undated items sort last whichever way the list runs.
+      if (ta === null || tb === null) return ta === tb ? 0 : (ta === null ? 1 : -1);
+      d = ta - tb;
+    } else if (itemSort.by === "title") {
+      d = (a.display_name || a.name).localeCompare(b.display_name || b.name);
+    } else {
+      d = (STATUS_RANK[a.status] ?? 9) - (STATUS_RANK[b.status] ?? 9);
+    }
+    if (d) return d * dir;
+    // Stable tail: duplicates always read 1, 2, 3 within their group.
+    return (a.display_name || a.name).localeCompare(b.display_name || b.name)
+      || (a.position || 1) - (b.position || 1);
+  });
+
+  $("sortBtn").classList.toggle("on", isSortNarrowed());
+  renderItemArea();
+}
+
+function isSortNarrowed() {
+  const s = itemSort.show;
+  return itemSort.by !== "date" || !itemSort.desc
+    || !(s.paired && s.drifted && s.orphan && s.stray);
+}
+
+function syncSortUI() {
+  $("sortDate").checked = itemSort.by === "date";
+  $("sortTitle").checked = itemSort.by === "title";
+  $("sortStatus").checked = itemSort.by === "status";
+  $("sortDesc").checked = itemSort.desc;
+  $("sortAsc").checked = !itemSort.desc;
+  // The direction labels only make sense against the chosen field.
+  const labels = { date: ["Newest first", "Oldest first"],
+                   title: ["Z to A", "A to Z"],
+                   status: ["Best first", "Problems first"] };
+  const [descLbl, ascLbl] = labels[itemSort.by] || labels.date;
+  $("sortDescLbl").textContent = descLbl;
+  $("sortAscLbl").textContent = ascLbl;
+  $("fltPaired").checked = itemSort.show.paired !== false;
+  $("fltDrifted").checked = itemSort.show.drifted !== false;
+  $("fltOrphan").checked = itemSort.show.orphan !== false;
+  $("fltStray").checked = itemSort.show.stray !== false;
+}
+
+function wireSort() {
+  const set = (patch) => {
+    Object.assign(itemSort, patch);
+    LS.set("nebula.itemSort", itemSort);
+    syncSortUI();
+    applyItemView();
+  };
+  $("sortDate").onchange = () => set({ by: "date" });
+  $("sortTitle").onchange = () => set({ by: "title" });
+  $("sortStatus").onchange = () => set({ by: "status" });
+  $("sortDesc").onchange = () => set({ desc: true });
+  $("sortAsc").onchange = () => set({ desc: false });
+  for (const [id, key] of [["fltPaired", "paired"], ["fltDrifted", "drifted"],
+                           ["fltOrphan", "orphan"], ["fltStray", "stray"]]) {
+    $(id).onchange = (e) => {
+      itemSort.show[key] = e.target.checked;
+      set({});
+    };
+  }
+  $("sortBtn").onclick = (e) => { e.stopPropagation(); togglePop("sortCfg"); };
+  $("sortCfg").onclick = (e) => e.stopPropagation();
 }
 
 // ---- views --------------------------------------------------------------
@@ -420,10 +510,8 @@ function sessionCell(it) {
 }
 
 function listHTML() {
-  if (searchMode && !items.length) {
-    return `<div class="empty">Nothing matched. Try fewer words, or widen the search under ⚙ Advanced.</div>`;
-  }
-  const rows = items.map((it, idx) => {
+  if (!shownItems.length) return emptyItemsHTML();
+  const rows = shownItems.map((it, idx) => {
     const created = fmtCreated(it.timestamp);
     let r = `<tr data-i="${idx}" data-sc="0" class="${sameSel(idx, false) ? 'sel' : ''}">
       <td><div class="namecell">${fileGlyph(it, 20)}<span class="fname">${escapeHtml(it.display_name || it.name)}</span>${dupBadge(it)}</div></td>
@@ -442,11 +530,19 @@ function listHTML() {
   const sessHead = searchMode ? `<th class="c-sess">Session</th>` : "";
   return `<table><thead><tr><th>Name</th>${sessHead}<th class="c-created">Created</th><th class="c-status">Status</th></tr></thead><tbody>${rows}</tbody></table>`;
 }
-function gridHTML() {
+function emptyItemsHTML() {
   if (searchMode && !items.length) {
     return `<div class="empty">Nothing matched. Try fewer words, or widen the search under ⚙ Advanced.</div>`;
   }
-  return `<div class="grid">${items.map((it, idx) => `
+  if (items.length) {
+    return `<div class="empty">No files match the status filter — check ⇅ Sort.</div>`;
+  }
+  return `<div class="empty">This session has no files.</div>`;
+}
+
+function gridHTML() {
+  if (!shownItems.length) return emptyItemsHTML();
+  return `<div class="grid">${shownItems.map((it, idx) => `
     <div class="cell ${sameSel(idx, false) ? 'sel' : ''}" data-i="${idx}" data-sc="0" title="${escapeHtml(it.detail)}">
       ${fileGlyph(it, 54)}<span class="cname">${escapeHtml(it.display_name || it.name)}${dupBadge(it)}</span>
       ${searchMode ? `<span class="cell-sess">${escapeHtml(it.run_id)}</span>` : ""}</div>`).join("")}</div>`;
@@ -460,11 +556,11 @@ function dupBadge(it) {
     `${it.position} of ${it.total}</span>`;
 }
 
-function sameSel(idx, isSc) { return selected === items[idx] && selectedIsSidecar === isSc; }
+function sameSel(idx, isSc) { return selected === shownItems[idx] && selectedIsSidecar === isSc; }
 
 function wireItems() {
   $("itemArea").querySelectorAll("[data-i]").forEach((el) => {
-    const it = items[+el.dataset.i];
+    const it = shownItems[+el.dataset.i];
     const isSc = el.dataset.sc === "1";
     el.onclick = (ev) => {
       const jump = ev.target.getAttribute && ev.target.getAttribute("data-jump");
@@ -477,8 +573,7 @@ function wireItems() {
 
 function selectItem(it, isSc) {
   selected = it; selectedIsSidecar = isSc;
-  $("itemArea").innerHTML = listView ? listHTML() : gridHTML();
-  wireItems();
+  renderItemArea();
   updateDetails();
   if (showSc && it.has_sidecar) openSidecarPanel(it);
 }
@@ -496,6 +591,11 @@ function updateDetails() {
   $("openArt").disabled = !hasArt;
   $("openSc").disabled = !hasSc;
   $("editSc").disabled = !hasSc;
+  // Reseal needs both halves (it re-records the file's hash in its sidecar);
+  // "write sidecar" is for the opposite case, a file with no sidecar at all.
+  $("resealBtn").disabled = !(hasArt && hasSc);
+  $("adoptBtn").disabled = !(hasArt && !hasSc);
+  $("delBtn").disabled = !it;
   if (!it) {
     $("detText").textContent = "Select an item to see its provenance.";
     $("detProv").innerHTML = "";
@@ -777,6 +877,301 @@ function renderSidecarPanel() {
   }
 }
 
+// ---- item management ----------------------------------------------------
+function selectedSession() {
+  if (!selected) return null;
+  const path = selected.session_path || (curSession && curSession.path);
+  const runId = selected.run_id || (curSession && curSession.run_id);
+  return path && runId ? { path, runId } : null;
+}
+
+async function deleteSelected() {
+  const ctx = selectedSession();
+  if (!selected || !ctx) return;
+  const ok = await confirmAction({
+    body: `Move <b>${escapeHtml(selected.name)}</b> to <span class="mono">${escapeHtml(ctx.runId)}/.trash/</span>?`
+      + `<br><br>Its sidecar goes with it and the deletion is logged in the session history. `
+      + `Nothing is erased — you can move it back by hand.`,
+    confirmLabel: "Move to trash",
+  });
+  if (!ok) return;
+  try {
+    await call("delete_file", { archive, run_id: ctx.runId, filename: selected.name });
+    toast(`${selected.name} moved to .trash/`);
+    selected = null;
+    await reload();
+  } catch (e) {
+    // The delete guard refuses if another artefact derives from this one.
+    const again = String(e).includes("derives from") || String(e).includes("still")
+      ? await confirmAction({
+          body: `nebula refused: <span class="mono">${escapeHtml(String(e))}</span>`
+            + `<br><br>Delete anyway? The dependent file's provenance will point at something missing.`,
+          confirmLabel: "Delete anyway",
+        })
+      : false;
+    if (!again) { toast(`Delete failed: ${e}`); return; }
+    try {
+      await call("delete_file", { archive, run_id: ctx.runId, filename: selected.name, force: true });
+      toast(`${selected.name} moved to .trash/ (forced)`);
+      selected = null;
+      await reload();
+    } catch (e2) {
+      toast(`Delete failed: ${e2}`);
+    }
+  }
+}
+
+async function resealSelected() {
+  const ctx = selectedSession();
+  if (!selected || !ctx) return;
+  const ok = await confirmAction({
+    body: `Re-record the checksum of <b>${escapeHtml(selected.name)}</b> from its current bytes?`
+      + `<br><br>Only do this when you meant to change the file: it makes the sidecar agree `
+      + `with whatever is on disk now, so genuine corruption would stop being detectable.`,
+    confirmLabel: "Reseal",
+  });
+  if (!ok) return;
+  try {
+    const res = await call("reseal", { archive, run_id: ctx.runId, filename: selected.name });
+    toast(`Resealed — sha256 ${String(res.sha256).slice(0, 12)}…`);
+    await reloadItems();
+  } catch (e) {
+    toast(`Reseal failed: ${e}`);
+  }
+}
+
+async function adoptSelected() {
+  if (!selected || !selected.artifact_path) return;
+  try {
+    await call("adopt_file", { path: selected.artifact_path, origin: "adopted in Navigator" });
+    toast(`Wrote a sidecar for ${selected.name}`);
+    await reloadItems();
+  } catch (e) {
+    toast(`Could not write a sidecar: ${e}`);
+  }
+}
+
+// ---- session management -------------------------------------------------
+async function holdSession(release) {
+  if (!curSession) return;
+  try {
+    if (release) {
+      const res = await call("release", { archive, run_id: curSession.run_id });
+      toast(res.had_hold ? `Hold released on ${curSession.run_id}` : "That session had no hold");
+    } else {
+      await call("hold", { archive, run_id: curSession.run_id });
+      toast(`${curSession.run_id} held — it stays appendable past today`);
+    }
+    await reload();
+  } catch (e) {
+    toast(`Failed: ${e}`);
+  }
+}
+
+async function deleteSession() {
+  if (!curSession) return;
+  const ok = await confirmAction({
+    body: `Move the whole session <b>${escapeHtml(curSession.run_id)}</b> `
+      + `(${curSession.n_items} file(s)) to the archive's <span class="mono">.trash/</span>?`
+      + `<br><br>Nothing is erased, but anything deriving from its files will point at a `
+      + `session that is no longer in the archive.`,
+    confirmLabel: "Move to trash",
+  });
+  if (!ok) return;
+  try {
+    await call("delete_session", { archive, run_id: curSession.run_id });
+    toast(`${curSession.run_id} moved to .trash/`);
+    curSession = null; selected = null;
+    await reload();
+  } catch (e) {
+    toast(`Delete failed: ${e}`);
+  }
+}
+
+// ---- confirmation -------------------------------------------------------
+// Destructive management actions ask first. Resolves true/false.
+let cfmResolve = null;
+function confirmAction({ body, confirmLabel = "Confirm", danger = true }) {
+  $("cfmBody").innerHTML = body;
+  $("cfmOk").textContent = confirmLabel;
+  $("cfmOk").classList.toggle("danger", danger);
+  $("cfmScrim").classList.add("show");
+  return new Promise((resolve) => { cfmResolve = resolve; });
+}
+function closeConfirm(result) {
+  $("cfmScrim").classList.remove("show");
+  if (cfmResolve) { cfmResolve(result); cfmResolve = null; }
+}
+
+// ---- archive management -------------------------------------------------
+let arcStats = null, checkResult = null, gcPreview = null;
+
+async function openArchivePanel() {
+  if (!archive) { toast("Open an archive first."); return; }
+  $("arcScrim").classList.add("show");
+  $("arcBody").innerHTML = `<div class="mg-note">Reading the archive…</div>`;
+  await refreshArchiveStats();
+}
+
+async function refreshArchiveStats() {
+  try {
+    arcStats = await call("archive_stats", { archive });
+  } catch (e) {
+    $("arcBody").innerHTML = noteBox("err", `Could not read the archive: ${e}`);
+    return;
+  }
+  renderArchivePanel();
+}
+
+function renderArchivePanel() {
+  const a = arcStats;
+  if (!a) return;
+  const idx = a.index || {}, code = a.code || {}, cfg = a.settings || {};
+
+  const overview = `<div class="mg"><div class="mg-h">Overview</div>` +
+    row("Archive", `<span class="link" data-open-path="${escapeHtml(a.root)}">${escapeHtml(a.root)}</span>`,
+        { mono: true, wrap: true, html: true }) +
+    row("Sessions", String(a.n_sessions)) +
+    row("Artefacts", `${a.n_items}` + (a.n_problems ? ` — <span class="warn-text">${a.n_problems} with problems</span>` : ""),
+        { html: !!a.n_problems }) +
+    row("Size", _human(a.size)) + `</div>`;
+
+  const staleWarn = (a.stale_open || []).length
+    ? noteBox("err", `${a.stale_open.length} session(s) still marked open from an earlier day `
+        + `(${a.stale_open.map((s) => s.run_id).join(", ")}) — likely a script that never closed.`)
+    : "";
+
+  const index = `<div class="mg"><div class="mg-h">Index <span class="issue-w">rebuildable cache</span></div>` +
+    (idx.exists
+      ? row("Last rebuilt", fmtCreated(idx.built)) +
+        row("Sessions indexed", idx.sessions === null ? "unreadable" : String(idx.sessions)) +
+        (idx.stale ? noteBox("info", `The index lists ${idx.sessions} session(s) but the archive has `
+          + `${a.n_sessions}. Rebuild to bring it up to date.`) : "")
+      : noteBox("info", "No index yet. `nebula ls` and the CLI's graph queries need one; "
+          + "the Navigator reads the filesystem directly and works without it.")) +
+    `<div class="mg-actions"><button class="dbtn ghost" id="arcRebuild">Rebuild index</button></div></div>`;
+
+  const issues = checkResult ? checkIssuesHTML(checkResult) : "";
+  const integrity = `<div class="mg"><div class="mg-h">Integrity</div>` +
+    `<div class="mg-note">Reports orphans, stray sidecars, dangling refs and missing code blobs.</div>` +
+    `<div class="mg-actions">
+       <button class="dbtn ghost" id="arcCheck">Run check</button>
+       <label class="check"><input type="checkbox" id="arcVerify" /> Verify checksums <span class="hint">(re-hashes every file)</span></label>
+     </div>${issues}</div>`;
+
+  const gc = `<div class="mg"><div class="mg-h">Captured source</div>` +
+    row("Stored", `${code.blobs} blob(s), ${code.manifests} snapshot(s)`) +
+    row("Size", code.human || "0 B") +
+    pathRow("Folder", code.dir) +
+    `<div class="mg-actions">
+       <button class="dbtn ghost" id="arcGc">Find unreferenced (dry run)</button>
+       ${gcPreview && (gcPreview.manifests.length || gcPreview.blobs.length)
+         ? `<button class="dbtn danger" id="arcGcDelete">Delete ${gcPreview.manifests.length + gcPreview.blobs.length} object(s)</button>`
+         : ""}
+     </div>` +
+    (gcPreview ? gcHTML(gcPreview) : "") + `</div>`;
+
+  const settings = `<div class="mg"><div class="mg-h">Settings</div>` +
+    row("On overwrite", cfg.on_overwrite) +
+    row("Capture source", cfg.capture_code ? "on" : "off") +
+    pathRow("archive.yaml", cfg.config_file) +
+    (cfg.config_exists ? "" : `<div class="mg-note">Not present — these are the defaults. `
+      + `Change them with <span class="mono">nebula config</span>.</div>`) + `</div>`;
+
+  const body = $("arcBody");
+  body.innerHTML = staleWarn + overview + index + integrity + gc + settings;
+  wirePaths(body);
+  $("arcRebuild").onclick = rebuildIndex;
+  $("arcCheck").onclick = runCheck;
+  $("arcGc").onclick = () => runGc(false);
+  if ($("arcGcDelete")) $("arcGcDelete").onclick = () => runGc(true);
+}
+
+function _human(n) {
+  if (n === null || n === undefined) return "";
+  const units = ["B", "KB", "MB", "GB", "TB"];
+  let size = n, i = 0;
+  while (size >= 1024 && i < units.length - 1) { size /= 1024; i++; }
+  return i === 0 ? `${size} B` : `${size.toFixed(1)} ${units[i]}`;
+}
+
+function checkIssuesHTML(res) {
+  if (!res.issues.length) {
+    return noteBox("info", res.verified
+      ? "No problems found, checksums included."
+      : "No problems found (checksums not verified).");
+  }
+  const rows = res.issues.map((i) => `
+    <div class="issue ${i.severity === "error" ? "" : "info"}">
+      <div><span class="issue-k">${escapeHtml(i.kind)}</span>
+        <span class="issue-w">${escapeHtml([i.session, i.file].filter(Boolean).join("/"))}</span></div>
+      <div class="issue-d">${escapeHtml(i.detail)}</div>
+      ${i.fix ? `<div class="issue-f">fix: ${escapeHtml(i.fix)}</div>` : ""}
+    </div>`).join("");
+  return `<div class="mg-note">${res.n_errors} error(s), ${res.n_info} info</div>`
+    + `<div class="issues">${rows}</div>`;
+}
+
+function gcHTML(res) {
+  const n = res.manifests.length + res.blobs.length;
+  if (!n) {
+    return noteBox("info", `Nothing unreferenced: ${res.live_manifests} snapshot(s) and `
+      + `${res.live_blobs} blob(s) are all still pointed at by a sidecar.`);
+  }
+  return noteBox("info", `${res.manifests.length} snapshot(s) and ${res.blobs.length} blob(s) `
+    + `(${res.human}) are not referenced by any sidecar${res.dry_run ? " — nothing deleted yet" : ""}.`);
+}
+
+async function rebuildIndex() {
+  const btn = $("arcRebuild");
+  btn.disabled = true; btn.textContent = "Rebuilding…";
+  try {
+    const res = await call("rebuild_index", { archive });
+    arcStats = res.stats;
+    toast("Index rebuilt");
+  } catch (e) {
+    toast(`Rebuild failed: ${e}`);
+  }
+  renderArchivePanel();
+}
+
+async function runCheck() {
+  const btn = $("arcCheck");
+  const verify = $("arcVerify").checked;
+  btn.disabled = true; btn.textContent = verify ? "Checking (hashing)…" : "Checking…";
+  try {
+    checkResult = await call("check", { archive, verify });
+  } catch (e) {
+    toast(`Check failed: ${e}`);
+  }
+  renderArchivePanel();
+  if (checkResult) $("arcVerify").checked = verify;
+}
+
+async function runGc(really) {
+  if (really) {
+    const n = gcPreview.manifests.length + gcPreview.blobs.length;
+    const ok = await confirmAction({
+      body: `Permanently delete <b>${n}</b> unreferenced object(s) (${escapeHtml(gcPreview.human)}) `
+        + `from the code store?<br><br>Snapshots referenced by any sidecar — including trashed `
+        + `sessions — are kept. This cannot be undone.`,
+      confirmLabel: "Delete",
+    });
+    if (!ok) return;
+  }
+  try {
+    gcPreview = await call("gc", { archive, delete: really });
+    if (really) {
+      toast(`Deleted ${gcPreview.manifests.length + gcPreview.blobs.length} object(s)`);
+      await refreshArchiveStats();
+      return;
+    }
+  } catch (e) {
+    toast(`gc failed: ${e}`);
+  }
+  renderArchivePanel();
+}
+
 // ---- user annotations ---------------------------------------------------
 // Mutable tags and a comment, stored in the session's annotations.yaml.
 // Kept visually and conceptually apart from creation-time tags: those are
@@ -1018,9 +1413,15 @@ function renderSessionPanel() {
   const notesDraft = sessNotes || {
     tags: info.user_tags || [], comment: info.user_comment || "",
   };
-  body.innerHTML = head + about + counts + notesHTML("sess", notesDraft) + related +
+  const actions = `<div class="mg-actions">
+      <button class="dbtn ghost" id="sessHold">${info.held ? "Release hold" : "Hold"}</button>
+      <button class="dbtn ghost danger-text" id="sessDelete">Move session to trash</button>
+    </div>`;
+  body.innerHTML = head + about + counts + actions + notesHTML("sess", notesDraft) + related +
     (history || noteBox("info", "No manual operations recorded."));
   wirePaths(body);
+  $("sessHold").onclick = () => holdSession(!!info.held);
+  $("sessDelete").onclick = deleteSession;
   wireNotes("sess", info.session_path, null, (saved) => {
     sessInfo.user_tags = saved.tags;
     sessInfo.user_comment = saved.comment;
@@ -1294,7 +1695,7 @@ function syncCfgUI() {
 }
 
 function closePops(except) {
-  for (const id of ["sessCfg", "itemCfg"]) {
+  for (const id of ["sessCfg", "itemCfg", "sortCfg"]) {
     if (id !== except) $(id).classList.add("hidden");
   }
 }
@@ -1303,6 +1704,23 @@ function togglePop(id) {
   const willShow = el.classList.contains("hidden");
   closePops(willShow ? id : null);
   el.classList.toggle("hidden", !willShow);
+  if (willShow) placePop(el);
+}
+
+// A fixed popover has to be told where to go. Anchored under its button,
+// nudged left if it would run off the right edge.
+function placePop(el) {
+  // Keyed off a class rather than the computed position: the style may not
+  // be loaded yet, and this way the placement is testable.
+  if (!el.classList.contains("anchored")) return;
+  const anchor = el.parentElement && el.parentElement.querySelector("button");
+  if (!anchor) return;
+  const r = anchor.getBoundingClientRect();
+  el.style.top = `${r.bottom + 4}px`;
+  el.style.left = "0px";                       // measure at a known origin
+  const width = el.getBoundingClientRect().width;
+  const left = Math.max(8, Math.min(r.left, window.innerWidth - width - 8));
+  el.style.left = `${left}px`;
 }
 
 function wireSearchOptions() {
@@ -1425,7 +1843,7 @@ $("archiveSel").onchange = (e) => onArchivePicked(e.target.value);
 $("refresh").onclick = () => reload();
 $("viewList").onclick = () => setView(true);
 $("viewGrid").onclick = () => setView(false);
-$("meta").onchange = (e) => { showMeta = e.target.checked; if (curSession) { $("itemArea").innerHTML = listHTML(); wireItems(); } };
+$("meta").onchange = (e) => { showMeta = e.target.checked; if (curSession || searchMode) renderItemArea(); };
 $("verify").onchange = (e) => { verify = e.target.checked; reloadItems(); };
 $("openArt").onclick = () => selected && selected.artifact_path && call("open_path", { path: selected.artifact_path });
 $("editSc").onclick = () => selected && selected.sidecar_path && call("open_path", { path: selected.sidecar_path });
@@ -1436,6 +1854,15 @@ $("sessInfoBtn").onclick = toggleSessionPanel;
 $("sessClose").onclick = () => { showSess = false; savePanels(); updateDock(); };
 $("sessRaw").onclick = () => { sessRaw = !sessRaw; renderSessionPanel(); };
 $("importBtn").onclick = startImport;
+$("arcBtn").onclick = openArchivePanel;
+$("arcClose").onclick = () => $("arcScrim").classList.remove("show");
+$("arcScrim").onclick = (e) => { if (e.target === $("arcScrim")) $("arcScrim").classList.remove("show"); };
+$("cfmCancel").onclick = () => closeConfirm(false);
+$("cfmOk").onclick = () => closeConfirm(true);
+$("cfmScrim").onclick = (e) => { if (e.target === $("cfmScrim")) closeConfirm(false); };
+$("resealBtn").onclick = resealSelected;
+$("adoptBtn").onclick = adoptSelected;
+$("delBtn").onclick = deleteSelected;
 $("modeExisting").onchange = syncMode;
 $("modeNew").onchange = syncMode;
 $("dlgSession").onchange = refreshDerivedCandidates;
@@ -1457,6 +1884,11 @@ async function boot() {
 
   sessCfg = Object.assign(sessCfg, LS.get("nebula.sessCfg", {}));
   itemCfg = Object.assign(itemCfg, LS.get("nebula.itemCfg", {}));
+  itemSort = Object.assign(itemSort, LS.get("nebula.itemSort", {}));
+  itemSort.show = Object.assign({ paired: true, drifted: true, orphan: true, stray: true },
+                                itemSort.show || {});
+  syncSortUI();
+  wireSort();
   syncCfgUI();
   wireSearchOptions();
   initShortcuts();

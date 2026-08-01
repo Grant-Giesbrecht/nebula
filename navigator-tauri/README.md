@@ -99,6 +99,18 @@ Other things worth knowing about the window:
   whole snapshot back out as a real directory tree.
 - The rail, the right-hand dock, and the split between the two docked
   panels are all **draggable**.
+- **Archive** (toolbar) opens the management panel: session/artefact counts,
+  index age with a *Rebuild* button, `nebula check` (checksum verification
+  optional, since it re-hashes everything), the code store's size with a
+  **dry-run-first** `gc`, and the effective `archive.yaml` settings. A stale
+  index or a session left open from an earlier day is called out here.
+- Per-file maintenance sits in the detail bar: **Reseal** (re-record a
+  checksum after an intended edit), **Write sidecar** (adopt a file dropped
+  in by hand), and **Delete** (soft-delete to the session's `.trash/`).
+  The session panel has **Hold / Release** and **Move session to trash**.
+  Every destructive action confirms first and says what it will and won't
+  undo; `delete` offers a forced retry if another artefact still derives
+  from the file.
 
 ### Keyboard shortcuts
 
@@ -225,7 +237,9 @@ One JSON object per line, request and response:
 Ops: `ping`, `resolve`, `list_archives`, `list_sessions`, `list_items`,
 `sidecar_display`, `sidecar_info`, `session_info`, `search_items`,
 `lineage`, `resolve_refs`, `code_info`, `restore_code`, `entry_point_link`,
-`open_url`, `get_annotations`, `set_annotation`,
+`open_url`, `get_annotations`, `set_annotation`, `archive_stats`,
+`rebuild_index`, `check`, `gc`, `delete_file`, `reseal`, `adopt_file`,
+`delete_session`, `hold`, `release`,
 `importable_sessions`,
 `frozen_sessions`, `import_new`, `import_file`, `open_path`,
 `file_manager_name`. Test any of them without the GUI:

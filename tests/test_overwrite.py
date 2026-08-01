@@ -21,6 +21,19 @@ def _archive(tmp_path, policy=None):
     return archive
 
 
+def _force_same_timestamp(session_dir, when="2026-01-01T00:00:00+00:00"):
+    """Give every sidecar an identical `created`.
+
+    Timestamps have second resolution, so ties are common in real use --
+    but whether a test produces one depends on where the clock happens to
+    fall, which makes assertions about tie-breaking flaky. Force it.
+    """
+    for sc in Path(session_dir).glob("*.meta.json"):
+        data = json.loads(sc.read_text())
+        data["created"] = when
+        sc.write_text(json.dumps(data))
+
+
 def _write(session, name, text):
     with session.artifact(name) as fn:
         fn.write_text(text)
@@ -186,8 +199,12 @@ def test_items_group_duplicates_in_write_order(tmp_path):
 
     items = model.list_items(s.path)
     raws = [it for it in items if it.display_name == "raw.csv"]
-    assert [it.name for it in raws] == ["raw.csv", "raw-001.csv", "raw-002.csv"]
-    assert [(it.position, it.total) for it in raws] == [(1, 3), (2, 3), (3, 3)]
+    # Every write is kept and numbered; the list itself is newest-first, so
+    # the group reads downwards from the latest write.
+    assert {it.name for it in raws} == {"raw.csv", "raw-001.csv", "raw-002.csv"}
+    assert sorted((it.position, it.name) for it in raws) == [
+        (1, "raw.csv"), (2, "raw-001.csv"), (3, "raw-002.csv")]
+    assert {it.total for it in raws} == {3}
     assert all(it.is_duplicate for it in raws)
 
     other = [it for it in items if it.name == "other.csv"][0]
@@ -203,6 +220,7 @@ def test_group_members_stay_adjacent(tmp_path):
     _write(s, "raw.csv", "b")
     _write(s, "rax.csv", "c")        # sorts between raw-001.csv and raw.csv
     s.close()
+    _force_same_timestamp(s.path)
 
     names = [it.name for it in model.list_items(s.path)]
     assert names == ["raw.csv", "raw-001.csv", "rax.csv"]
@@ -234,3 +252,48 @@ def test_resolve_write_target_fills_gaps_in_order(tmp_path):
     (tmp_path / "raw-001.csv").write_text("b")
     path, original, index = resolve_write_target(tmp_path, "raw.csv", "duplicate")
     assert path.name == "raw-002.csv" and original == "raw.csv" and index == 2
+
+
+# ---------------------------------------------------------------------
+# ordering
+# ---------------------------------------------------------------------
+
+def test_items_sort_newest_first_not_by_name(tmp_path):
+    import time
+
+    archive = _archive(tmp_path)
+    s = nebula.new(archive, description="d")
+    for name in ("zebra.csv", "apple.csv", "middle.csv"):
+        _write(s, name, "x")
+        time.sleep(1.1)          # timestamps have second resolution
+    s.close()
+
+    assert [it.name for it in model.list_items(s.path)] == [
+        "middle.csv", "apple.csv", "zebra.csv"]
+
+
+def test_duplicates_stay_in_write_order_when_timestamps_tie(tmp_path):
+    """Files written within the same second must not fall back to a
+    filename sort, which would put raw-001.csv before raw.csv."""
+    archive = _archive(tmp_path)
+    s = nebula.new(archive, description="d")
+    _write(s, "raw.csv", "a")
+    _write(s, "raw.csv", "b")
+    _write(s, "rax.csv", "c")
+    s.close()
+    _force_same_timestamp(s.path)
+
+    names = [it.name for it in model.list_items(s.path)]
+    assert names.index("raw.csv") < names.index("raw-001.csv")   # 1 of 2 before 2 of 2
+
+
+def test_undated_items_sort_last(tmp_path):
+    archive = _archive(tmp_path)
+    s = nebula.new(archive, description="d")
+    _write(s, "dated.csv", "x")
+    s.close()
+    # a stray sidecar with no timestamp and no file to take an mtime from
+    (s.path / "mystery.csv.meta.json").write_text('{"created": null, "produced_by": {}}')
+
+    names = [it.name for it in model.list_items(s.path)]
+    assert names[-1] == "mystery.csv"

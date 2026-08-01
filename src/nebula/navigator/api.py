@@ -186,6 +186,96 @@ def op_set_annotation(args: Dict[str, Any]) -> Dict[str, Any]:
     )
 
 
+def op_archive_stats(args: Dict[str, Any]) -> Dict[str, Any]:
+    return model.archive_stats(args["archive"])
+
+
+def op_rebuild_index(args: Dict[str, Any]) -> Dict[str, Any]:
+    from nebula import index as index_mod
+
+    root, _ = model.resolve(args["archive"])
+    path = index_mod.rebuild(root)
+    return {"path": str(path), "stats": model.archive_stats(root)}
+
+
+def op_check(args: Dict[str, Any]) -> Dict[str, Any]:
+    """Run the fsck. Checksum verification is off by default here: it
+    re-hashes every file, which is fine from a terminal but not something a
+    panel should do without being asked."""
+    from nebula import check as check_mod
+
+    root, label = model.resolve(args["archive"])
+    issues = check_mod.check(root, verify_checksums=bool(args.get("verify", False)),
+                             archive_label=label)
+    return {
+        "issues": [
+            {"kind": i.kind, "session": i.session, "file": i.file,
+             "detail": i.detail, "fix": i.fix, "severity": i.severity}
+            for i in issues
+        ],
+        "n_errors": sum(1 for i in issues if i.severity == "error"),
+        "n_info": sum(1 for i in issues if i.severity != "error"),
+        "verified": bool(args.get("verify", False)),
+    }
+
+
+def op_gc(args: Dict[str, Any]) -> Dict[str, Any]:
+    """Sweep unreferenced captured source. Dry run unless told otherwise --
+    the caller is expected to show the dry run first."""
+    from nebula import codestore
+
+    root, _ = model.resolve(args["archive"])
+    res = codestore.gc(root, dry_run=not args.get("delete", False),
+                       include_trash=not args.get("ignore_trash", False))
+    res["human"] = model._human_size(res["bytes"])
+    return res
+
+
+def op_delete_file(args: Dict[str, Any]) -> Dict[str, Any]:
+    root, _ = model.resolve(args["archive"])
+    trashed = manual.delete_file(root, args["run_id"], args["filename"],
+                                 reason=args.get("reason") or None,
+                                 force=bool(args.get("force", False)))
+    return {"trashed": str(trashed)}
+
+
+def op_reseal(args: Dict[str, Any]) -> Dict[str, Any]:
+    root, _ = model.resolve(args["archive"])
+    return {"sha256": manual.reseal(root, args["run_id"], args["filename"])}
+
+
+def op_adopt_file(args: Dict[str, Any]) -> Dict[str, Any]:
+    """Write a sidecar for a file someone dropped into a session by hand."""
+    return {"sidecar": str(manual.adopt_file(args["path"],
+                                             origin=args.get("origin") or None))}
+
+
+def op_delete_session(args: Dict[str, Any]) -> Dict[str, Any]:
+    root, _ = model.resolve(args["archive"])
+    trashed = manual.delete_session(root, args["run_id"],
+                                    reason=args.get("reason") or None,
+                                    force=bool(args.get("force", False)))
+    return {"trashed": str(trashed)}
+
+
+def op_hold(args: Dict[str, Any]) -> Dict[str, Any]:
+    # nebula.session is the context-manager *function* in the package
+    # namespace, not the module -- take these from the package exports.
+    from nebula import hold as hold_session
+
+    root, _ = model.resolve(args["archive"])
+    seconds = args.get("seconds")
+    return {"hold_until": hold_session(root, args["run_id"],
+                                       seconds=float(seconds) if seconds else None)}
+
+
+def op_release(args: Dict[str, Any]) -> Dict[str, Any]:
+    from nebula import release as release_session
+
+    root, _ = model.resolve(args["archive"])
+    return {"had_hold": release_session(root, args["run_id"])}
+
+
 def op_list_archives(args: Dict[str, Any]) -> List[Dict[str, Any]]:
     return model.registered_archives()
 
@@ -254,6 +344,16 @@ OPS = {
     "resolve_refs": op_resolve_refs,
     "code_info": op_code_info,
     "restore_code": op_restore_code,
+    "archive_stats": op_archive_stats,
+    "rebuild_index": op_rebuild_index,
+    "check": op_check,
+    "gc": op_gc,
+    "delete_file": op_delete_file,
+    "reseal": op_reseal,
+    "adopt_file": op_adopt_file,
+    "delete_session": op_delete_session,
+    "hold": op_hold,
+    "release": op_release,
     "get_annotations": op_get_annotations,
     "set_annotation": op_set_annotation,
     "entry_point_link": op_entry_point_link,

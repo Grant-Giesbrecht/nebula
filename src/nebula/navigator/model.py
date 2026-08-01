@@ -275,20 +275,46 @@ def list_items(session_dir, *, verify_checksums: bool = False) -> List[Item]:
     return _group_duplicates(items)
 
 
-def _group_duplicates(items: List[Item]) -> List[Item]:
-    """Number each duplicate group and keep its members together.
+def _sort_key(it: "Item"):
+    """Newest first -- the run you just did is the one you want to see.
 
-    Sorting by filename alone would split a group up ("raw-001.csv" sorts
-    before "raw.csv", since '-' < '.'), which is exactly backwards from the
-    order they were written in.
+    (The Navigator can re-sort this however the user asks; this is the
+    default order every consumer gets.)
+
+    Timestamps are parsed rather than compared as strings, since a sidecar
+    'created' carries a UTC offset and two files either side of a DST
+    change would otherwise sort wrongly. Undated items (an unreadable
+    sidecar with no mtime to fall back on) go last rather than to 1970.
+
+    Ties -- common, since timestamps have second resolution -- fall back to
+    the requested name and then write order, so a duplicate group stays
+    together and in order instead of interleaving.
     """
+    ts = _parse_timestamp(it.timestamp)
+    # Negated rather than reverse=True so the tie-breakers stay ascending:
+    # a duplicate group must read 1, 2, 3 even though the list is newest-first.
+    return (ts is None, -(ts or 0.0), it.display_name, it.position)
+
+
+def _parse_timestamp(ts: Optional[str]) -> Optional[float]:
+    if not ts:
+        return None
+    try:
+        return datetime.datetime.fromisoformat(ts).timestamp()
+    except (ValueError, OSError):
+        return None
+
+
+def _group_duplicates(items: List[Item]) -> List[Item]:
+    """Number each duplicate group, then order everything by creation
+    time (see _sort_key)."""
     groups: dict = {}
     for it in items:
         groups.setdefault(it.display_name, []).append(it)
     for name, members in groups.items():
         for it in members:
             it.total = len(members)
-    return sorted(items, key=lambda it: (it.display_name, it.position, it.name))
+    return sorted(items, key=_sort_key)
 
 
 def sidecar_display(sidecar_path) -> str:
@@ -797,6 +823,90 @@ def restore_code(archive, code: str, dest_parent) -> dict:
         dest = parent / f"{base}-{n}"
         n += 1
     return codestore.restore(root, code, dest)
+
+
+def archive_stats(archive) -> dict:
+    """Everything the archive-management panel shows at a glance: size of
+    the archive, when the index was last rebuilt, what the code store holds,
+    and any sessions still marked open long after they should be."""
+    from nebula import codestore
+    from nebula.config import ARCHIVE_CONFIG_FILE, read_settings
+
+    root, label = resolve(archive)
+    sessions = list_sessions(root)
+    n_items = sum(s.n_items for s in sessions)
+    n_problems = sum(s.n_problems for s in sessions)
+
+    index_path = root / "index.db"
+    index_info = {"exists": index_path.is_file(), "path": str(index_path),
+                  "built": None, "size": None, "sessions": None, "stale": None}
+    if index_info["exists"]:
+        st = index_path.stat()
+        index_info["size"] = st.st_size
+        index_info["built"] = datetime.datetime.fromtimestamp(
+            st.st_mtime).astimezone().isoformat(timespec="seconds")
+        try:
+            from nebula.index import open_index
+
+            conn = open_index(root)
+            try:
+                index_info["sessions"] = conn.execute(
+                    "SELECT count(*) FROM sessions").fetchone()[0]
+            finally:
+                conn.close()
+        except Exception:       # noqa: BLE001 -- a broken index is a fact to show
+            index_info["sessions"] = None
+        # The index is a cache; if sessions have appeared since it was built,
+        # say so rather than letting a stale count mislead.
+        if index_info["sessions"] is not None:
+            index_info["stale"] = index_info["sessions"] != len(sessions)
+
+    blobs = list(codestore._iter_stored(root, codestore.BLOBS))
+    manifests = list(codestore._iter_stored(root, codestore.MANIFESTS))
+    code_bytes = 0
+    for path in blobs + manifests:
+        try:
+            code_bytes += path.stat().st_size
+        except OSError:
+            pass
+
+    settings = read_settings(root)
+    return {
+        "label": label, "root": str(root),
+        "n_sessions": len(sessions), "n_items": n_items, "n_problems": n_problems,
+        "size": sum(_session_size(s.path) for s in sessions),
+        "index": index_info,
+        "code": {"blobs": len(blobs), "manifests": len(manifests),
+                 "bytes": code_bytes, "human": _human_size(code_bytes),
+                 "dir": str(root / codestore.CODE_DIR)},
+        "settings": {"on_overwrite": settings.on_overwrite,
+                     "capture_code": settings.capture_code,
+                     "config_file": str(root / ARCHIVE_CONFIG_FILE),
+                     "config_exists": (root / ARCHIVE_CONFIG_FILE).is_file()},
+        # Still "open" but not from today: almost always a script that
+        # died before close() rather than work in progress.
+        "stale_open": [
+            {"run_id": s.run_id, "created": s.created, "path": str(s.path)}
+            for s in sessions
+            if s.status == "open"
+            and (s.created or "")[:10] != datetime.date.today().isoformat()
+        ],
+    }
+
+
+def _session_size(session_dir) -> int:
+    total = 0
+    for entry in Path(session_dir).iterdir():
+        if entry.is_file():
+            try:
+                total += entry.stat().st_size
+            except OSError:
+                pass
+    return total
+
+
+def _human_size_public(n: int) -> str:
+    return _human_size(n)
 
 
 def registered_archives() -> List[dict]:
