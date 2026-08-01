@@ -46,17 +46,37 @@ from typing import Any, Dict, List, Optional
 
 import yaml
 
-from nebula.refs import Ref, format_ref, parse_ref
+from nebula.refs import COLLECTIONS_SEGMENT, Ref, format_ref, parse_ref
 
 COLLECTIONS_DIR = "collections"
 VERSION = 1
 
-#: Collection names become filenames and URI segments.
+#: A collection's *name* becomes a filename and a URI segment, so it stays
+#: conservative: no spaces, no ':' (illegal in Windows filenames), nothing
+#: that would need escaping in a ref. Anything you actually want to read --
+#: "Research project 2026: 3" -- goes in `title`, which is free text.
 _NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
 
 
 class CollectionError(ValueError):
     """A collection that cannot be named, stored, or resolved."""
+
+
+def slugify(display: str) -> str:
+    """A storable name derived from a human one.
+
+        "Research project 2026: 3"  ->  "research-project-2026-3"
+
+    Keeps the free-form string for `title` and the safe one for the file,
+    so an archive stays portable (Windows rejects ':' outright) without
+    making the user type in kebab-case.
+    """
+    text = (display or "").strip().lower()
+    text = re.sub(r"[^a-z0-9._-]+", "-", text).strip("-.")
+    text = re.sub(r"-{2,}", "-", text)
+    if not text or not text[0].isalnum():
+        text = f"c-{text}".strip("-") if text else "collection"
+    return text[:64]
 
 
 def clean_name(name: str) -> str:
@@ -288,6 +308,49 @@ def move(archive_root, src: str, dst: str, ref: str, *, note: str = "") -> None:
         remove(archive_root, src, ref)
     except CollectionError:
         pass          # already gone from the source; the add is what matters
+
+
+def rename(archive_root, old: str, new: Optional[str] = None, *,
+           title: Optional[str] = None) -> Collection:
+    """Rename a collection and/or retitle it.
+
+    Renaming the *name* also rewrites every `collections/<old>` ref in the
+    archive, since nesting is by reference -- otherwise renaming a folder
+    would orphan it from its parent. Retitling touches nothing else, which
+    is why the GUI edits the title by default.
+    """
+    coll = _require(archive_root, old)
+    if title is not None:
+        coll.title = title.strip()
+
+    if new and clean_name(new) != coll.name:
+        new = clean_name(new)
+        if path_for(archive_root, new).exists():
+            raise CollectionError(f"collection {new!r} already exists")
+        old_name = coll.name
+        coll.name = new
+        write(archive_root, coll)
+        try:
+            path_for(archive_root, old_name).unlink()
+        except OSError:
+            pass
+        # Fix up every parent that pointed at the old name.
+        for other in list_all(archive_root):
+            changed = False
+            for entry in other.entries:
+                if entry.kind != "collection":
+                    continue
+                ref = entry.parsed
+                if ref.archive or ref.user or ref.collection != old_name:
+                    continue
+                entry.ref = f"{COLLECTIONS_SEGMENT}/{new}"
+                changed = True
+            if changed:
+                write(archive_root, other)
+        return coll
+
+    write(archive_root, coll)
+    return coll
 
 
 def _reaches(archive_root, start: str, target: str, _seen=None) -> bool:

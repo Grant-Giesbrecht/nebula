@@ -404,6 +404,23 @@ def op_collection_remove(args: Dict[str, Any]) -> Dict[str, Any]:
     return {"name": args["name"]}
 
 
+def op_rename_collection(args: Dict[str, Any]) -> Dict[str, Any]:
+    from nebula import collection as collection_mod
+
+    root, _ = model.resolve(args["archive"])
+    coll = collection_mod.rename(root, args["name"], args.get("new") or None,
+                                 title=args.get("title"))
+    return {"name": coll.name, "title": coll.title}
+
+
+def op_slugify(args: Dict[str, Any]) -> Dict[str, Any]:
+    """Turn a typed display name into a storable one, so the GUI and the
+    CLI agree on what a given title becomes on disk."""
+    from nebula import collection as collection_mod
+
+    return {"slug": collection_mod.slugify(args["text"])}
+
+
 def op_collection_move(args: Dict[str, Any]) -> Dict[str, Any]:
     """Move entries between collections (what a drag-and-drop does)."""
     from nebula import collection as collection_mod
@@ -537,6 +554,8 @@ OPS = {
     "collection_add": op_collection_add,
     "collection_remove": op_collection_remove,
     "collection_move": op_collection_move,
+    "rename_collection": op_rename_collection,
+    "slugify": op_slugify,
     "collections_containing": op_collections_containing,
     "list_views": op_list_views,
     "run_view": op_run_view,

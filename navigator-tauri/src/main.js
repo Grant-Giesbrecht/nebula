@@ -403,14 +403,20 @@ function collectionRowsHTML(name, depth, ancestors) {
          data-drop-collection="${escapeHtml(name)}"
          style="padding-left:${6 + depth * 14}px">
       ${twisty}
-      <span class="cname">${escapeHtml(c.name)}
-        ${c.title ? `<span class="ctitle">${escapeHtml(c.title)}</span>` : ""}</span>
+      <span class="cname">${escapeHtml(c.title || c.name)}
+        ${c.title ? `<span class="ctitle">${escapeHtml(c.name)}</span>` : ""}</span>
       <span class="ccount">${c.n_entries}</span>
     </div>`;
   if (open) {
     for (const kid of kids) html += collectionRowsHTML(kid, depth + 1, ancestors.concat([name]));
   }
   return html;
+}
+
+// The readable name: a free-form title when set, else the storable one.
+function collLabel(name) {
+  const c = collTree.byName[name] || collections.find((x) => x.name === name);
+  return (c && c.title) || name;
 }
 
 function parentOf(name) {
@@ -430,8 +436,11 @@ function renderCollections() {
   $("collList").querySelectorAll(".citem[data-name]").forEach((el) => {
     const name = el.getAttribute("data-name");
     el.onclick = (ev) => {
-      const toggle = ev.target.getAttribute && ev.target.getAttribute("data-toggle");
-      if (toggle) {
+      // closest(), not ev.target: the twisty holds an <svg>, so a click
+      // lands on the path and never on the span carrying the attribute.
+      const tw = ev.target.closest && ev.target.closest("[data-toggle]");
+      if (tw) {
+        const toggle = tw.getAttribute("data-toggle");
         collExpanded[toggle] = !collExpanded[toggle];
         LS.set("nebula.collOpen", collExpanded);
         renderCollections();
@@ -480,12 +489,15 @@ function collectionHTML(node, nested) {
         (i ? `<span class="sep">›</span>` : "") +
         `<span class="crumb ${i === collPath.length - 1 ? "here" : ""}" data-crumb="${escapeHtml(n)}"`
         + ` data-drop-collection="${escapeHtml(n)}">`
-        + `${escapeHtml(n)}</span>`).join("") + `</div>`
+        + `${escapeHtml(collLabel(n))}</span>`).join("") + `</div>`
     : "";
+  const anyFolders = (node.entries || []).some((e) => e.kind === "collection" && e.child);
   const head = nested ? "" : `${crumbs}<div class="ctree-head">
-      <span class="t">${escapeHtml(node.name)}</span>
-      ${node.title ? `<span class="d">${escapeHtml(node.title)}</span>` : ""}
-    </div>${node.description ? `<div class="mg-note">${escapeHtml(node.description)}</div>` : ""}`;
+      <span class="t">${escapeHtml(node.title || node.name)}</span>
+      ${node.description ? `<span class="d">${escapeHtml(node.description)}</span>` : ""}
+      ${anyFolders ? `<button class="dbtn ghost tiny" id="collExpandAll">Expand all</button>
+        <button class="dbtn ghost tiny" id="collCollapseAll">Collapse all</button>` : ""}
+    </div>`;
 
   if (node.cycle) return `${head}${noteBox("err", "This collection contains itself — stopping here.")}`;
   if (!(node.entries || []).length && !nested) {
@@ -504,7 +516,7 @@ function collectionHTML(node, nested) {
     // "collections/<name>" ref -- the ref spelling is an implementation
     // detail here, and seeing it beside a parent named something else is
     // just confusing.
-    const shown = e.kind === "collection" ? (e.target || e.ref) : e.ref;
+    const shown = e.kind === "collection" ? collLabel(e.target || e.ref) : e.ref;
     const kindLabel = e.kind === "collection" ? "folder" : e.kind;
     const key = `${node.name}/${e.target || e.ref}`;
     const openable = e.kind === "collection" && e.child;
@@ -533,6 +545,10 @@ function collectionHTML(node, nested) {
 
 function wireCollection() {
   const area = $("itemArea");
+  if ($("collExpandAll")) {
+    $("collExpandAll").onclick = () => setAllFolders(true);
+    $("collCollapseAll").onclick = () => setAllFolders(false);
+  }
   area.querySelectorAll("[data-open]").forEach((el) => {
     el.onclick = (ev) => {
       ev.stopPropagation();
@@ -569,9 +585,10 @@ function wireCollection() {
         if (path) call("open_path", { path });
       } else if (kind === "session") {
         gotoRunId(target);
-      } else if (kind === "collection") {
-        showCollection(target);          // open it on its own, with breadcrumbs
       }
+      // Deliberately no double-click descent for a folder: it drops the
+      // parent context. Open a folder on its own from its right-click menu
+      // or the rail tree.
     };
   });
   area.oncontextmenu = (ev) => {
@@ -597,8 +614,9 @@ function wireCollection() {
     el.oncontextmenu = (ev) => {
       ev.preventDefault();
       showEntryMenu(ev.clientX, ev.clientY, {
-        ref: el.querySelector(".cref").textContent,
+        ref: el.getAttribute("data-dragref") || el.querySelector(".cref").textContent,
         kind: el.querySelector(".ckind").textContent,
+        target: el.getAttribute("data-target") || "",
         path: el.getAttribute("data-path") || "",
         exists: !el.classList.contains("missing") && !el.classList.contains("unresolved"),
       });
@@ -618,6 +636,21 @@ function wireCollection() {
       }
     };
   });
+}
+
+// Expand or collapse every folder in the open collection at once.
+function setAllFolders(open) {
+  document.querySelectorAll("#itemArea [data-open]").forEach((el) => {
+    entryOpen[el.getAttribute("data-open")] = open ? undefined : false;
+  });
+  // Nested keys not currently rendered (because their parent is collapsed)
+  // are handled when they next render: default is expanded.
+  if (open) {
+    for (const key of Object.keys(entryOpen)) {
+      if (entryOpen[key] === false) delete entryOpen[key];
+    }
+  }
+  showCollection(openCollection, { push: false });
 }
 
 // Select a file that lives elsewhere, without leaving this view.
@@ -1474,9 +1507,10 @@ function showItemMenu(x, y) {
 
 function showCollectionMenu(x, y, name) {
   showMenu(x, y, [
-    { head: name },
+    { head: collLabel(name) },
     { label: "New folder inside…", action: () => newNestedCollection(name) },
     { label: "Open", action: () => showCollection(name) },
+    { label: "Rename…", action: () => renameCollection(name) },
     { separator: true },
     { label: "Delete collection…", danger: true, action: () => deleteCollection(name) },
   ]);
@@ -1484,8 +1518,15 @@ function showCollectionMenu(x, y, name) {
 
 function showEntryMenu(x, y, entry) {
   const isFile = entry.kind === "file" && entry.exists;
+  const isFolder = entry.kind === "folder" && entry.exists;
   showMenu(x, y, [
     { head: entry.ref },
+    ...(isFolder ? [
+      { label: "Open this folder", action: () => showCollection(entry.target) },
+      { label: "New folder inside this one…", action: () => newNestedCollection(entry.target) },
+      { label: "Rename…", action: () => renameCollection(entry.target) },
+      { separator: true },
+    ] : []),
     { label: "Add to collection…", disabled: !entry.exists,
       action: () => openCollectionPicker([entry.ref], entry.ref) },
     { label: `Reveal in ${fileManagerName}`, disabled: !isFile,
@@ -1504,14 +1545,41 @@ function showEntryMenu(x, y, entry) {
 // A nested collection is a collection; "folder" is just what it is called
 // when it sits inside another one.
 async function newNestedCollection(parent) {
-  const name = await promptName(`New folder inside ${parent}`, "");
-  if (!name) return;
+  return newCollection(parent);
+}
+
+// One path for both: a free-form title, stored under a slug so the archive
+// stays portable (spaces and ':' are fine to read, not to put in filenames).
+async function newCollection(parent) {
+  const label = parent ? `New folder inside ${collLabel(parent)}` : "New collection";
+  const title = await promptName(label, "");
+  if (!title) return;
   try {
-    await call("create_collection", { archive, name });
-    await call("collection_add", { archive, name: parent, refs: [`collections/${name}`] });
+    const { slug } = await call("slugify", { text: title });
+    await call("create_collection", { archive, name: slug, title });
+    if (parent) {
+      await call("collection_add", { archive, name: parent, refs: [`collections/${slug}`] });
+    }
     await loadCollections();
-    await showCollection(parent);
-    toast(`Created ${name} inside ${parent}`);
+    await showCollection(parent || slug, { push: !parent });
+    toast(parent ? `Created ${title} inside ${collLabel(parent)}` : `Created ${title}`);
+  } catch (e) {
+    toast(`${e}`);
+  }
+}
+
+// Renaming edits the readable title by default. The storable name only
+// changes when the title has no usable slug yet, since renaming it rewrites
+// every parent's ref.
+async function renameCollection(name) {
+  const current = collLabel(name);
+  const next = await promptName("Rename collection", current);
+  if (!next || next === current) return;
+  try {
+    await call("rename_collection", { archive, name, title: next });
+    await loadCollections();
+    if (openCollection === name) await showCollection(name, { push: false });
+    toast(`Renamed to ${next}`);
   } catch (e) {
     toast(`${e}`);
   }
@@ -2595,6 +2663,9 @@ function addSelectionToCollection() {
 const MENU_ACTIONS = {
   metadata: toggleMetadataPanel,
   collect: addSelectionToCollection,
+  "tab-sessions": () => setRailTab("sessions"),
+  "tab-collections": () => setRailTab("collections"),
+  "tab-searches": () => setRailTab("views"),
   session: toggleSessionPanel,
   archive: openArchivePanel,
   reload: refreshAll,
@@ -2628,6 +2699,9 @@ function initShortcuts() {
     else if (k === "i" && shift) name = "import";
     else if (k === "o" && !shift) name = "open";
     else if (k === "c" && shift) name = "collect";
+    else if (k === "1" && !shift) name = "tab-sessions";
+    else if (k === "2" && !shift) name = "tab-collections";
+    else if (k === "3" && !shift) name = "tab-searches";
     if (!name) return;
 
     e.preventDefault();   // Ctrl-R would otherwise reload the webview
@@ -2656,15 +2730,7 @@ $("importBtn").onclick = startImport;
 $("tabSessions").onclick = () => setRailTab("sessions");
 $("tabCollections").onclick = () => setRailTab("collections");
 $("tabViews").onclick = () => setRailTab("views");
-$("newCollBtn").onclick = async () => {
-  const name = await promptName("New collection name", "");
-  if (!name) return;
-  try {
-    await call("create_collection", { archive, name });
-    await loadCollections();
-    showCollection(name);
-  } catch (e) { toast(`${e}`); }
-};
+$("newCollBtn").onclick = () => newCollection(null);
 $("saveViewBtn").onclick = saveCurrentSearch;
 $("addCollBtn").onclick = () => addSelectionToCollection();
 document.addEventListener("click", closeMenu);

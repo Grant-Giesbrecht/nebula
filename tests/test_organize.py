@@ -475,3 +475,61 @@ def test_collection_move_to_itself_is_a_noop(tmp_path):
     C.add(archive, "c", ref)
     C.move(archive, "c", "c", ref)
     assert [e.ref for e in C.read(archive, "c").entries] == [ref]
+
+
+@pytest.mark.parametrize("display,slug", [
+    ("Research project 2026: 3", "research-project-2026-3"),
+    ("Paper figures (final)", "paper-figures-final"),
+    ("  spaced  out  ", "spaced-out"),
+    ("2026", "2026"),
+    ("!!!", "collection"),          # nothing usable left
+])
+def test_slugify(display, slug):
+    assert C.slugify(display) == slug
+
+
+def test_free_form_title_with_a_portable_name(tmp_path):
+    """A ':' is illegal in a Windows filename, so the readable name lives in
+    `title` and the file keeps a portable slug."""
+    archive, _ = _archive(tmp_path)
+    title = "Research project 2026: 3"
+    coll = C.create(archive, C.slugify(title), title=title)
+    assert coll.name == "research-project-2026-3"
+    assert C.path_for(archive, coll.name).is_file()
+    assert C.read(archive, coll.name).title == title
+
+
+def test_rename_retitles_without_touching_refs(tmp_path):
+    archive, _ = _archive(tmp_path)
+    C.create(archive, "child")
+    C.create(archive, "parent")
+    C.add(archive, "parent", "collections/child")
+
+    C.rename(archive, "child", title="A nicer name: 2")
+    assert C.read(archive, "child").title == "A nicer name: 2"
+    assert [e.ref for e in C.read(archive, "parent").entries] == ["collections/child"]
+
+
+def test_rename_updates_every_parent_ref(tmp_path):
+    """Nesting is by reference, so renaming without a rewrite would orphan
+    the folder from its parents."""
+    archive, _ = _archive(tmp_path)
+    for name in ("child", "mum", "dad"):
+        C.create(archive, name)
+    C.add(archive, "mum", "collections/child")
+    C.add(archive, "dad", "collections/child")
+
+    C.rename(archive, "child", "kid")
+    assert not C.path_for(archive, "child").exists()
+    assert C.path_for(archive, "kid").is_file()
+    assert [e.ref for e in C.read(archive, "mum").entries] == ["collections/kid"]
+    assert [e.ref for e in C.read(archive, "dad").entries] == ["collections/kid"]
+
+
+def test_rename_refuses_an_existing_name(tmp_path):
+    archive, _ = _archive(tmp_path)
+    C.create(archive, "a")
+    C.create(archive, "b")
+    with pytest.raises(C.CollectionError):
+        C.rename(archive, "a", "b")
+    assert C.path_for(archive, "a").is_file()

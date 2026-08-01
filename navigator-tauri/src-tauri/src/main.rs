@@ -351,7 +351,21 @@ fn install_menu(app: &tauri::App) -> tauri::Result<()> {
         .accelerator("CmdOrCtrl+Shift+I")
         .build(app)?;
 
+    let tab_sessions = MenuItemBuilder::with_id("menu:tab-sessions", "Sessions")
+        .accelerator("CmdOrCtrl+1")
+        .build(app)?;
+    let tab_collections = MenuItemBuilder::with_id("menu:tab-collections", "Collections")
+        .accelerator("CmdOrCtrl+2")
+        .build(app)?;
+    let tab_searches = MenuItemBuilder::with_id("menu:tab-searches", "Saved Searches")
+        .accelerator("CmdOrCtrl+3")
+        .build(app)?;
+
     let view_menu = SubmenuBuilder::new(app, "View")
+        .item(&tab_sessions)
+        .item(&tab_collections)
+        .item(&tab_searches)
+        .separator()
         .item(&metadata)
         .item(&session)
         .separator()

@@ -100,6 +100,11 @@ Other things worth knowing about the window:
 - The rail, the right-hand dock, and the split between the two docked
   panels are all **draggable**.
 - The rail has three tabs: **Sessions**, **Collections** and **Searches**.
+  Collections show their free-form **title** (with the storable name
+  beneath): type "Research project 2026: 3" and it is stored under the slug
+  `research-project-2026-3`, since ':' is illegal in a Windows filename.
+  Renaming edits the title; renaming the underlying name rewrites every
+  parent's ref so a folder is never orphaned.
   Collections render as a **tree**: only collections nothing else contains
   are roots, and a nested one appears under its parent behind a twisty
   (expansion is remembered). Opening one shows its entries in the main area
@@ -149,6 +154,7 @@ modifier; tooltips are rewritten to ⌘ / ⇧⌘ at boot on macOS):
 | `Mod-Shift-I` | Import files… |
 | `Mod-O`       | Open the selection in the default app |
 | `Mod-Shift-C` | Add the selection to a collection |
+| `Mod-1/2/3`   | Sessions / Collections / Saved searches |
 
 On macOS these are listed in the **View** menu so they can be found without
 memorising them. That has an implementation consequence worth knowing:

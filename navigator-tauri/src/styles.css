@@ -445,14 +445,15 @@ body.resizing *, body.resizing-y * { pointer-events:none; }
 .rail-list .none { padding:14px 10px; color:var(--text-faint); font-size:12.5px; text-align:center; }
 
 /* collection contents in the item area */
-.ctree { padding:10px 14px; display:flex; flex-direction:column; gap:2px; }
-.ctree-head { display:flex; align-items:baseline; gap:9px; padding:2px 0 8px; }
+.ctree { padding:6px 14px 12px; display:flex; flex-direction:column; gap:0; }
+.ctree-head { display:flex; align-items:center; gap:9px; padding:6px 14px 6px; }
 .ctree-head .t { font-size:15px; font-weight:700; }
 .ctree-head .d { font-size:12.5px; color:var(--text-dim); }
-.crow { display:flex; align-items:baseline; gap:8px; padding:4px 8px; border-radius:6px; }
+.crow { display:flex; align-items:center; gap:8px; padding:2px 8px; border-radius:5px;
+        line-height:1.35; }
 .crow.go { cursor:pointer; }
 .crow.go:hover { background:rgba(128,140,160,.10); }
-.crow .ckind { font-size:10.5px; font-weight:700; text-transform:uppercase; letter-spacing:.05em;
+.crow .ckind { font-size:10px; font-weight:700; text-transform:uppercase; letter-spacing:.05em;
                color:var(--text-faint); min-width:74px; }
 .crow .cref { font-family:var(--mono); font-size:12px; }
 .crow.go .cref { color:var(--accent); }
@@ -462,7 +463,8 @@ body.resizing *, body.resizing-y * { pointer-events:none; }
 .crow .cx { margin-left:auto; color:var(--text-faint); cursor:pointer; opacity:0; padding:0 4px; }
 .crow:hover .cx { opacity:1; }
 .crow .cx:hover { color:var(--err); }
-.cnest { margin-left:18px; border-left:1px solid var(--border); padding-left:8px; }
+.cnest { margin-left:16px; border-left:1px solid var(--border); padding-left:8px;
+         display:flex; flex-direction:column; }
 .chip.coll { background:var(--accent-soft); color:var(--accent); }
 
 /* right-click menu */
@@ -514,3 +516,7 @@ body.dragging-entry { cursor:grabbing; user-select:none; }
              justify-content:center; color:var(--text-faint); cursor:pointer; border-radius:4px; }
 .crow .etw:hover { background:rgba(128,140,160,.20); color:var(--text); }
 .crow .etw.empty, .citem .tw.empty { cursor:default; }
+
+.dbtn.tiny { height:22px; padding:0 9px; font-size:11.5px; }
+.ctree-head .t { margin-right:auto; }
+.crow .cref { line-height:1.35; }
