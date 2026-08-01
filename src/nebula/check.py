@@ -25,7 +25,7 @@ from pathlib import Path
 from typing import Iterator, List, Optional, Tuple
 
 from nebula.registry import get_registry, resolve_archive
-from nebula.session import HOLD_FOREVER, _ID_RE, orphan_artifacts_in
+from nebula.session import DATA_DIR, HOLD_FOREVER, _ID_RE, orphan_artifacts_in
 from nebula.sidecar import (
     SESSION_FILE,
     SIDECAR_SUFFIX,
@@ -55,20 +55,17 @@ class CheckIssue:
 
 
 def _iter_all_session_dirs(archive_root: Path) -> Iterator[Path]:
-    """Every S-XXXX folder under the archive, regardless of whether it has
-    a session.yaml (so missing-yaml folders are still visited). Skips the
-    archive-level .trash (its name isn't a numeric year)."""
-    if not archive_root.exists():
-        return
-    for year in sorted(archive_root.iterdir()):
+    """Every session folder under data/, regardless of whether it has a
+    session.yaml (so missing-yaml folders are still visited). Everything
+    else at the archive root -- code/, .trash, index.db -- is skipped by
+    construction, since sessions only live under data/<year>/."""
+    data = Path(archive_root) / DATA_DIR
+    for year in sorted(data.iterdir()) if data.is_dir() else []:
         if not year.is_dir() or not year.name.isdigit():
             continue
-        for month in sorted(year.iterdir()):
-            if not month.is_dir() or not month.name.isdigit():
-                continue
-            for d in sorted(month.iterdir()):
-                if d.is_dir() and _ID_RE.match(d.name):
-                    yield d
+        for d in sorted(year.iterdir()):
+            if d.is_dir() and _ID_RE.match(d.name):
+                yield d
 
 
 def _read_sidecars(session_dir: Path):
@@ -232,6 +229,8 @@ def check(
                     ref, kind="derived_from", run_id=run_id, file=artifact,
                     existing_sessions=existing_sessions, existing_files=existing_files,
                     registry=registry, label=label))
+            issues.extend(_check_code_ref(
+                archive_root, meta.produced_by.code, run_id, artifact, label))
 
         # Session-level related_runs.
         if smeta is not None:
@@ -242,6 +241,37 @@ def check(
                     registry=registry, label=label))
 
     return issues
+
+
+def _check_code_ref(archive_root: Path, code: Optional[str], run_id: str,
+                    artifact: str, label: str) -> List[CheckIssue]:
+    """Verify a captured-source reference: the manifest must exist, and so
+    must every blob it lists. A half-collected code store is worse than
+    none -- it claims the source is recoverable when it isn't."""
+    if not code:
+        return []
+    from nebula import codestore
+
+    manifest = codestore.read_manifest(archive_root, code)
+    if manifest is None:
+        return [CheckIssue(
+            "dangling_code_ref", run_id, artifact,
+            f"produced_by.code points at manifest {code[:12]}..., which is not in "
+            f"the code store",
+            fix="restore it from a backup, or accept the source snapshot is lost")]
+
+    missing = [key for key, blob in (manifest.get("files") or {}).items()
+               if not codestore.blob_path(archive_root, blob).is_file()]
+    if missing:
+        shown = ", ".join(sorted(missing)[:3])
+        more = f" (+{len(missing) - 3} more)" if len(missing) > 3 else ""
+        return [CheckIssue(
+            "missing_code_blob", run_id, artifact,
+            f"code manifest {code[:12]}... lists {len(missing)} file(s) whose bytes "
+            f"are missing: {shown}{more}",
+            fix="restore the .code store from a backup; 'nebula gc' may have been "
+                "run with a sidecar temporarily absent")]
+    return []
 
 
 def _check_session_meta(run_id, smeta, label) -> List[CheckIssue]:

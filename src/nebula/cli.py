@@ -308,6 +308,82 @@ def cmd_check(args):
         sys.exit(1)
 
 
+def _run_id_arg(text: str) -> str:
+    """argparse type for session ids: accepts the canonical S-<yy>-<nnnn>
+    or a bare number for the current year, so `nebula show arc 12` works."""
+    from nebula.session import resolve_run_id
+
+    try:
+        return resolve_run_id(text)
+    except ValueError as e:
+        raise argparse.ArgumentTypeError(str(e))
+
+
+def _bool_arg(text: str) -> bool:
+    val = text.strip().lower()
+    if val in ("true", "yes", "on", "1"):
+        return True
+    if val in ("false", "no", "off", "0"):
+        return False
+    raise argparse.ArgumentTypeError(f"expected true or false, got {text!r}")
+
+
+def cmd_config(args):
+    """Show or edit an archive's settings (<archive>/archive.yaml)."""
+    from nebula import config as config_mod
+
+    root, _ = _resolve_archive_cli(args.archive)
+    path = config_mod.config_path(root)
+    changes = {
+        "capture_code": args.capture_code,
+        "code_max_file_bytes": args.max_file_bytes,
+    }
+    changes = {k: v for k, v in changes.items() if v is not None}
+
+    if changes:
+        if not root.is_dir():
+            print(f"no archive at {root}", file=sys.stderr)
+            sys.exit(1)
+        # Read the file's own values, not the env-overridden ones, so a
+        # temporary NEBULA_CAPTURE_CODE never gets written into the archive.
+        settings = config_mod.read_settings(root, apply_env=False)
+        for key, value in changes.items():
+            setattr(settings, key, value)
+        config_mod.write_settings(root, settings)
+        print(f"wrote {path}")
+
+    on_disk = config_mod.read_settings(root, apply_env=False)
+    effective = config_mod.read_settings(root)
+    print(f"{path}{'' if path.exists() else '  (not present -- using defaults)'}")
+    for key in ("capture_code", "code_max_file_bytes"):
+        print(f"  {key}: {getattr(on_disk, key)}")
+
+    override = config_mod.env_override()
+    if override is not None and override != on_disk.capture_code:
+        print(f"\nnote: {config_mod.CAPTURE_ENV} is set in this environment, so "
+              f"capture_code is currently {effective.capture_code} regardless of the file")
+
+
+def cmd_gc(args):
+    """Sweep captured source nothing references any more."""
+    from nebula import codestore
+
+    root, _ = _resolve_archive_cli(args.archive)
+    res = codestore.gc(root, dry_run=not args.delete,
+                       include_trash=not args.ignore_trash)
+    n = len(res["manifests"]) + len(res["blobs"])
+    kb = res["bytes"] / 1024
+    print(f"reachable: {res['live_manifests']} manifest(s), {res['live_blobs']} blob(s)")
+    if not n:
+        print("nothing to collect")
+        return
+    verb = "would delete" if res["dry_run"] else "deleted"
+    print(f"{verb}: {len(res['manifests'])} manifest(s), {len(res['blobs'])} blob(s) "
+          f"({kb:.1f} KB)")
+    if res["dry_run"]:
+        print("(dry run -- pass --delete to actually remove them)")
+
+
 def cmd_hold(args):
     root, _ = _resolve_archive_cli(args.archive)
     try:
@@ -426,12 +502,12 @@ def main(argv=None):
 
     p = sub.add_parser("show", help="show details for one session")
     p.add_argument("archive", help="registered archive name, or a literal path")
-    p.add_argument("run_id")
+    p.add_argument("run_id", type=_run_id_arg, help="session id -- S-26-0012, or 0012 for the current year")
     p.set_defaults(func=cmd_show)
 
     p = sub.add_parser("import", help="add external file(s) to an existing session")
     p.add_argument("archive", help="registered archive name, or a literal path")
-    p.add_argument("run_id")
+    p.add_argument("run_id", type=_run_id_arg, help="session id -- S-26-0012, or 0012 for the current year")
     p.add_argument("files", nargs="+", help="file(s) to import")
     p.add_argument("--from", dest="origin", help="free-text note on where it came from")
     p.add_argument("--as", dest="dest_name", help="rename the file (single file only)")
@@ -453,12 +529,13 @@ def main(argv=None):
 
     p = sub.add_parser("reconcile", help="write sidecars for files added to a session by hand")
     p.add_argument("archive", help="registered archive name, or a literal path")
-    p.add_argument("run_id", nargs="?", help="limit to one session (default: whole archive)")
+    p.add_argument("run_id", nargs="?", type=_run_id_arg,
+                   help="limit to one session (default: whole archive)")
     p.set_defaults(func=cmd_reconcile)
 
     p = sub.add_parser("rm", help="soft-delete an artifact (moves it to the session's .trash/)")
     p.add_argument("archive", help="registered archive name, or a literal path")
-    p.add_argument("run_id")
+    p.add_argument("run_id", type=_run_id_arg, help="session id -- S-26-0012, or 0012 for the current year")
     p.add_argument("file")
     p.add_argument("--reason", help="why it's being deleted (recorded in history)")
     p.add_argument("--force", action="store_true",
@@ -467,7 +544,7 @@ def main(argv=None):
 
     p = sub.add_parser("replace", help="replace an artifact's bytes, trashing the old version")
     p.add_argument("archive", help="registered archive name, or a literal path")
-    p.add_argument("run_id")
+    p.add_argument("run_id", type=_run_id_arg, help="session id -- S-26-0012, or 0012 for the current year")
     p.add_argument("file")
     p.add_argument("new_file", help="file whose bytes replace the artifact")
     p.add_argument("--reason", help="why it's being replaced (recorded in history)")
@@ -477,7 +554,7 @@ def main(argv=None):
 
     p = sub.add_parser("rm-session", help="soft-delete a whole session (moves it to the archive .trash/)")
     p.add_argument("archive", help="registered archive name, or a literal path")
-    p.add_argument("run_id")
+    p.add_argument("run_id", type=_run_id_arg, help="session id -- S-26-0012, or 0012 for the current year")
     p.add_argument("--reason", help="why it's being deleted (recorded in history)")
     p.add_argument("--force", action="store_true",
                    help="delete even if another session references it")
@@ -485,7 +562,7 @@ def main(argv=None):
 
     p = sub.add_parser("reseal", help="re-record an artifact's checksum after an intended edit")
     p.add_argument("archive", help="registered archive name, or a literal path")
-    p.add_argument("run_id")
+    p.add_argument("run_id", type=_run_id_arg, help="session id -- S-26-0012, or 0012 for the current year")
     p.add_argument("file")
     p.set_defaults(func=cmd_reseal)
 
@@ -495,12 +572,29 @@ def main(argv=None):
                    help="skip re-hashing files (faster on large archives)")
     p.set_defaults(func=cmd_check)
 
+    p = sub.add_parser("config", help="show or edit an archive's settings")
+    p.add_argument("archive", help="registered archive name, or a literal path")
+    p.add_argument("--capture-code", type=_bool_arg, metavar="true|false",
+                   help="snapshot first-party source into <archive>/.code on save")
+    p.add_argument("--max-file-bytes", type=int, dest="max_file_bytes",
+                   help="per-file ceiling for that snapshot")
+    p.set_defaults(func=cmd_config)
+
+    p = sub.add_parser("gc", help="delete captured source code nothing references")
+    p.add_argument("archive", help="registered archive name, or a literal path")
+    p.add_argument("--delete", action="store_true",
+                   help="actually delete (default is a dry run)")
+    p.add_argument("--ignore-trash", action="store_true",
+                   help="also collect code referenced only by trashed sessions "
+                        "(they can no longer be restored intact)")
+    p.set_defaults(func=cmd_gc)
+
     p = sub.add_parser(
         "hold",
         help="keep a session appendable past its start day (e.g. across midnight)",
     )
     p.add_argument("archive", help="registered archive name, or a literal path")
-    p.add_argument("run_id")
+    p.add_argument("run_id", type=_run_id_arg, help="session id -- S-26-0012, or 0012 for the current year")
     p.add_argument(
         "duration",
         nargs="?",
@@ -514,18 +608,18 @@ def main(argv=None):
         help="clear a hold placed with 'hold' (does not change open/closed status)",
     )
     p.add_argument("archive", help="registered archive name, or a literal path")
-    p.add_argument("run_id")
+    p.add_argument("run_id", type=_run_id_arg, help="session id -- S-26-0012, or 0012 for the current year")
     p.set_defaults(func=cmd_release)
 
     p = sub.add_parser("upstream", help="what did this artifact depend on")
     p.add_argument("archive", help="registered archive name, or a literal path")
-    p.add_argument("run_id")
+    p.add_argument("run_id", type=_run_id_arg, help="session id -- S-26-0012, or 0012 for the current year")
     p.add_argument("filename")
     p.set_defaults(func=cmd_upstream)
 
     p = sub.add_parser("downstream", help="what depends on this artifact")
     p.add_argument("archive", help="registered archive name, or a literal path")
-    p.add_argument("run_id")
+    p.add_argument("run_id", type=_run_id_arg, help="session id -- S-26-0012, or 0012 for the current year")
     p.add_argument("filename")
     p.add_argument("--also-search", nargs="*", help="other registered archive names to scan")
     p.set_defaults(func=cmd_downstream)

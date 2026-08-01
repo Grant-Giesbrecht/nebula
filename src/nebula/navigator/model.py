@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import datetime
 import json
+import os
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import List, Optional
@@ -319,6 +320,10 @@ def sidecar_info(sidecar_path) -> dict:
             "entry_point": pb.entry_point,
             "imported_by": pb.imported_by,
             "imported_at": pb.imported_at,
+            "code": pb.code,
+            "repos": dict(pb.repos or {}),
+            # Anything a newer nebula wrote that this one doesn't model.
+            "extra": dict(pb.extra or {}),
         },
         "derived_from": [_ref_dict(r) for r in meta.derived_from_refs()],
         "inputs": meta.inputs,
@@ -593,6 +598,147 @@ def search_items(
 
     return {"items": out, "truncated": truncated,
             "n_sessions": n_sessions, "n_scanned": n_scanned}
+
+
+#: Where to look for a repo by name when resolving an entry point to a
+#: local checkout. Machine-local, so it is env-configurable rather than
+#: stored in the archive (which is shared between machines).
+DEFAULT_REPO_SEARCH_PATHS = (
+    "~/Documents/GitHub", "~/GitHub", "~/git", "~/src", "~/code",
+    "~/Projects", "~/projects", "~/repos", "~/dev",
+)
+REPO_PATHS_ENV = "NEBULA_REPO_PATHS"
+
+
+def repo_search_paths() -> List[Path]:
+    raw = os.environ.get(REPO_PATHS_ENV)
+    parts = raw.split(os.pathsep) if raw else DEFAULT_REPO_SEARCH_PATHS
+    return [Path(os.path.expanduser(p)) for p in parts if p]
+
+
+def _find_repo_checkout(repo: str) -> Optional[Path]:
+    for base in repo_search_paths():
+        candidate = base / repo
+        if (candidate / ".git").exists():
+            return candidate
+    return None
+
+
+def _remote_url(repo_root: Path) -> Optional[str]:
+    """The repo's origin as a browsable https URL, from the checkout
+    itself -- more reliable than assuming a naming convention."""
+    from nebula.session import _git
+
+    raw = _git(["remote", "get-url", "origin"], cwd=repo_root)
+    if not raw:
+        return None
+    url = raw.strip()
+    if url.startswith("git@"):                      # git@github.com:org/repo.git
+        host, _, path = url[4:].partition(":")
+        url = f"https://{host}/{path}"
+    if url.endswith(".git"):
+        url = url[:-4]
+    return url if url.startswith("http") else None
+
+
+def entry_point_link(archive, item: dict) -> dict:
+    """Work out how to open the script that produced an artifact.
+
+    Two independent answers, because neither is always available or always
+    right: the local checkout (what you can edit, but possibly at a
+    different commit) and a hosted URL pinned to the recorded commit (exact
+    for that commit, but wrong when the tree was dirty, and only if the
+    commit was pushed).
+    """
+    entry = item.get("entry_point")
+    repo = item.get("repo")
+    commit = item.get("commit")
+    out: dict = {"entry_point": entry, "repo": repo, "commit": commit,
+                 "dirty": item.get("dirty"), "local": None, "remote": None,
+                 "note": None}
+    if not entry:
+        out["note"] = "no entry point recorded"
+        return out
+
+    # No repo means capture_provenance stored an absolute path.
+    if not repo:
+        path = Path(entry)
+        out["local"] = {"path": str(path), "exists": path.is_file(),
+                        "repo_root": None, "matches_commit": None}
+        if not path.is_file():
+            out["note"] = "the script is not at that path on this machine"
+        return out
+
+    root = _find_repo_checkout(repo)
+    if root is None:
+        out["note"] = (f"no checkout of {repo!r} found; set {REPO_PATHS_ENV} if it "
+                       f"lives outside the usual places")
+    else:
+        from nebula.session import _git
+
+        path = root / entry
+        head = _git(["rev-parse", "HEAD"], cwd=root)
+        out["local"] = {
+            "path": str(path),
+            "exists": path.is_file(),
+            "repo_root": str(root),
+            # False means the file on disk is *not* the recorded version.
+            "matches_commit": (head == commit) if (head and commit) else None,
+        }
+        if not path.is_file():
+            out["note"] = f"{entry} is not in the {repo} checkout at this commit"
+
+        url = _remote_url(root)
+        if url and commit:
+            out["remote"] = {"url": f"{url}/blob/{commit}/{entry}", "from": "origin"}
+
+    if out["remote"] is None and commit:
+        # Fall back to the registry's git_org when there is no checkout to
+        # read a remote from.
+        cfg = get_registry().try_get(archive) if isinstance(archive, str) else None
+        if cfg is not None and cfg.git_org:
+            out["remote"] = {
+                "url": f"https://github.com/{cfg.git_org}/{repo}/blob/{commit}/{entry}",
+                "from": "registry git_org",
+            }
+
+    if out["remote"] and item.get("dirty"):
+        out["remote"]["warning"] = (
+            "the working tree was dirty, so the file at this commit is not "
+            "exactly what ran")
+    return out
+
+
+def code_info(archive, code: str) -> dict:
+    """Stats for one artifact's captured-source snapshot, for the
+    provenance panel."""
+    from nebula import codestore
+
+    root, _ = resolve(archive)
+    stats = codestore.manifest_stats(root, code)
+    if stats is None:
+        return {"ok": False, "id": code, "short": (code or "")[:12],
+                "error": "this snapshot is not in the archive's code store"}
+    stats["ok"] = True
+    stats["error"] = None
+    stats["store_dir"] = str(root / codestore.CODE_DIR)
+    return stats
+
+
+def restore_code(archive, code: str, dest_parent) -> dict:
+    """Restore a captured-source snapshot into a fresh folder under
+    `dest_parent`, named after the snapshot so two restores never collide."""
+    from nebula import codestore
+
+    root, _ = resolve(archive)
+    parent = Path(os.path.expanduser(str(dest_parent)))
+    base = f"nebula-code-{(code or '')[:12]}"
+    dest = parent / base
+    n = 2
+    while dest.exists():          # a second restore of the same snapshot
+        dest = parent / f"{base}-{n}"
+        n += 1
+    return codestore.restore(root, code, dest)
 
 
 def registered_archives() -> List[dict]:

@@ -7,9 +7,9 @@ from nebula.session import parse_duration, _hold_active, _find_session_dir, HOLD
 from nebula.sidecar import read_session_yaml, write_session_yaml, SessionMeta
 
 
-def _make_previous_day(archive, run_id="S-0007", *, status="closed"):
+def _make_previous_day(archive, run_id="S-20-0007", *, status="closed"):
     """Hand-place a session dated well before today."""
-    ym = archive / "2020" / "01"
+    ym = archive / "data" / "2020"
     ym.mkdir(parents=True, exist_ok=True)
     d = ym / run_id
     d.mkdir()

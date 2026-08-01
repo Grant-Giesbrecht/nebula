@@ -492,6 +492,55 @@ function updateDetails() {
     .map((ln, i) => (i === 0 ? `<span class="hl">${escapeHtml(ln)}</span>` : escapeHtml(ln)))
     .join("\n");
   $("detProv").innerHTML = provenanceLine(it);
+  wireEntryPoint($("detProv"), it);
+}
+
+// ---- entry point ---------------------------------------------------------
+// Two ways to reach the script, resolved by the backend: the local checkout
+// (editable, but possibly at a different commit) and a hosted URL pinned to
+// the recorded commit. Prefer local, fall back to the host, and say so when
+// neither is available -- resolved on click so selecting a file stays cheap.
+function wireEntryPoint(el, it) {
+  el.querySelectorAll("[data-entry]").forEach((n) => {
+    n.onclick = (ev) => { ev.stopPropagation(); openEntryPoint(it); };
+  });
+}
+
+async function openEntryPoint(it, prefer) {
+  if (!it || !archive) return;
+  let link;
+  try {
+    link = await call("entry_point_link", { archive, item: it });
+  } catch (e) {
+    toast(`Could not resolve the entry point: ${e}`);
+    return;
+  }
+  const local = link.local, remote = link.remote;
+  const wantRemote = prefer === "remote";
+
+  if (!wantRemote && local && local.exists) {
+    call("open_path", { path: local.path });
+    if (local.matches_commit === false) {
+      toast("Opened your working copy — it is at a different commit than the one recorded.");
+    } else if (link.dirty) {
+      toast("Opened your working copy — the tree was dirty when this ran, so it may differ.");
+    }
+    return;
+  }
+  if (remote && remote.url) {
+    call("open_url", { url: remote.url });
+    // Say *why* the host copy was used, so a silent fallback can't be
+    // mistaken for "this is your file".
+    const why = wantRemote ? "" : (link.note ? `${link.note} — ` : "no local copy — ");
+    toast(`${why}opened the hosted copy at ${String(remote.url).includes("github") ? "GitHub" : "the host"}.`
+          + (remote.warning ? ` ${remote.warning}` : ""));
+    return;
+  }
+  if (wantRemote && local && local.exists) {
+    toast("No hosted link for this commit — open the local copy with the filename instead.");
+    return;
+  }
+  toast(link.note || "No way to open this entry point on this machine.");
 }
 
 // The "produced by" facts worth seeing without opening the panel: what
@@ -508,7 +557,9 @@ function provenanceLine(it) {
   const bits = [];
   if (build) bits.push(`<span class="dp"><span class="dp-k">Built from</span>${build}</span>`);
   if (it.entry_point) {
-    bits.push(`<span class="dp"><span class="dp-k">Entry point</span><span class="mono">${escapeHtml(it.entry_point)}</span></span>`);
+    bits.push(`<span class="dp"><span class="dp-k">Entry point</span>` +
+      `<span class="mono link" data-entry="1" title="Open the script that produced this">` +
+      `${escapeHtml(it.entry_point)}</span></span>`);
   }
   if (!bits.length) {
     // An imported file has no git provenance -- say what it does have.
@@ -581,9 +632,23 @@ async function openSidecarPanel(it) {
   savePanels();
   renderSidecarPanel();
   updateDock();
-  // Lineage needs a whole-archive scan, so fetch it after the panel is
-  // already on screen rather than making the sidecar wait for it.
-  await loadLineage(it);
+  // Lineage and code stats each need a scan, so fetch them after the
+  // panel is already on screen rather than making the sidecar wait.
+  await Promise.all([loadLineage(it), loadCodeInfo(it)]);
+}
+
+async function loadCodeInfo(it) {
+  const code = scInfo && scInfo.produced_by && scInfo.produced_by.code;
+  if (!archive || !code) return;
+  try {
+    const info = await call("code_info", { archive, code });
+    if (scInfo && scInfo.itemName === it.name) {
+      scInfo.codeInfo = info;
+      renderSidecarPanel();
+    }
+  } catch (e) {
+    console.error("code_info failed", e);
+  }
 }
 
 async function loadLineage(it) {
@@ -639,20 +704,75 @@ function renderSidecarPanel() {
     pb.source === "external" ? "Imported" : "Produced by",
     row("Origin", pb.origin, { wrap: true }) +
     row("Built from", build, { html: true, wrap: true }) +
-    row("Entry point", pb.entry_point, { mono: true, wrap: true }) +
+    row("Entry point", pb.entry_point
+        ? `<span class="link" data-entry="1" title="Open the script">${escapeHtml(pb.entry_point)}</span>`
+          + (pb.commit ? ` <span class="ext-link" data-entry-remote="1" title="View at this commit on the host">↗</span>` : "")
+        : null, { mono: true, wrap: true, html: true }) +
     row("Imported by", pb.imported_by) +
     row("Imported at", fmtCreated(pb.imported_at)) +
     (assumed ? noteBox("info", "This sidecar predates the source/origin fields, "
                      + "so how the file arrived was never recorded.") : ""));
 
   const lineage = lineageHTML(info);
+  const code = codeHTML(info);
   const inputs = group("Inputs", dictRows(info.inputs));
   const extra = group("Other fields", dictRows(info.extra));
 
-  const all = overview + provenance + lineage + inputs + extra;
+  const all = overview + provenance + lineage + code + inputs + extra;
   body.innerHTML = head + (all || noteBox("info", "This sidecar records no further detail."));
   wirePaths(body);
   wireLineage(body);
+  wireEntryPoint(body, selected);
+  body.querySelectorAll("[data-entry-remote]").forEach((n) => {
+    n.onclick = (ev) => { ev.stopPropagation(); openEntryPoint(selected, "remote"); };
+  });
+  body.querySelectorAll("[data-restore]").forEach((n) => {
+    n.onclick = (ev) => { ev.stopPropagation(); restoreCode(n.getAttribute("data-restore")); };
+  });
+}
+
+// ---- captured source ----------------------------------------------------
+// What was snapshotted for this artifact: which snapshot, how big, which
+// repos it drew from, and how much of it the store already had.
+function codeHTML(info) {
+  const pb = info.produced_by || {};
+  if (!pb.code) return "";
+  const ci = info.codeInfo;
+  const short = `<span class="mono" title="${escapeHtml(pb.code)}">${escapeHtml(pb.code.slice(0, 12))}</span>`;
+  if (!ci) return group("Captured source", row("Snapshot", short, { html: true }));
+  if (!ci.ok) {
+    return group("Captured source",
+      row("Snapshot", short, { html: true }) + noteBox("err", ci.error));
+  }
+
+  const repoChips = Object.entries(ci.repos || {})
+    .map(([name, n]) => `<span class="chip">${escapeHtml(name)} <b>${n}</b></span>`).join("");
+  const missing = ci.n_blobs - ci.blobs_present;
+  return group("Captured source",
+    row("Snapshot", short, { html: true }) +
+    row("Files", `${ci.n_files} file(s) from ${Object.keys(ci.repos || {}).length} repo(s)`) +
+    (repoChips ? `<div class="chips">${repoChips}</div>` : "") +
+    row("Storage", `${ci.shared} kept (already stored) · ${ci.unique} only in this snapshot`) +
+    (missing > 0 ? noteBox("err", `${missing} file(s) listed by this snapshot are missing from the store`) : "") +
+    `<div class="grp-actions"><button class="dbtn ghost" data-restore="${escapeHtml(pb.code)}">
+       Restore files…</button></div>`);
+}
+
+// Write the snapshot back out as real files, at their original paths, so
+// the code that produced an artifact can be read (or run) as a tree.
+async function restoreCode(code) {
+  const parent = await dialogOpen({ directory: true, title: "Where should the source go?" });
+  if (!parent) return;
+  try {
+    const res = await call("restore_code", { archive, code, dest_parent: parent });
+    call("open_path", { path: res.dest });
+    const bits = [`Restored ${res.n_written} file(s) to ${baseName(res.dest)}`];
+    if (res.missing && res.missing.length) bits.push(`${res.missing.length} missing from the store`);
+    if (res.rejected && res.rejected.length) bits.push(`${res.rejected.length} skipped as unsafe paths`);
+    toast(bits.join(" — "));
+  } catch (e) {
+    toast(`Restore failed: ${e}`);
+  }
 }
 
 // ---- lineage ------------------------------------------------------------

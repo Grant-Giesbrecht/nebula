@@ -1,11 +1,16 @@
 """
-Session lifecycle: creating, appending to, and closing S-XXXX folders.
+Session lifecycle: creating, appending to, and closing session folders.
 
-A session is a directory: <archive_root>/<year>/<month>/S-XXXX/
-The numeric id is a bare, zero-padded, monotonically increasing decimal
-counter, global to the archive (not per-day). The folder's location in the
-year/month hierarchy records its creation date; the id itself carries no
-date information, so it stays short in derived_from/related_runs refs.
+A session is a directory: <archive_root>/data/<year>/S-<yy>-<nnnn>/
+
+The archive root holds only archive.yaml, index.db, code/ and data/, so it
+stays browsable by hand. Under data/ there is one folder per year -- no
+month nesting -- and the session id carries its own two-digit year, so a
+folder name is self-describing wherever it ends up.
+
+Ids are zero-padded and restart at 0001 each year, which is what lets the
+CLI accept a bare number ("0012") and resolve it against the current year
+(see resolve_run_id).
 
 Provenance (git repo/commit/dirty flag/entry point) is captured
 automatically at artifact-write time by walking up from the caller's
@@ -124,6 +129,19 @@ def _caller_source_file(caller_frame_depth: Optional[int]) -> Optional[str]:
     return None
 
 
+def _resolve_caller(caller_frame_depth: Optional[int]) -> Optional[str]:
+    """_caller_source_file with capture_provenance's depth contract, for
+    callers that need the path itself and not just a ProducedBy.
+
+    _caller_source_file's fixed-depth mode assumes exactly one frame sits
+    between it and the caller doing the counting (historically
+    capture_provenance). This function is that frame -- which is why it
+    must stay a thin one-liner and must not be inlined into its callers:
+    removing it would silently shift every depth by one.
+    """
+    return _caller_source_file(caller_frame_depth)
+
+
 def capture_provenance(caller_frame_depth: Optional[int] = 2) -> ProducedBy:
     """Inspect the call stack to find the source file of whichever script
     called into nebula, then capture its repo/commit/dirty state.
@@ -133,7 +151,13 @@ def capture_provenance(caller_frame_depth: Optional[int] = 2) -> ProducedBy:
     methods below for usage. Pass None to auto-detect the caller instead
     of relying on a fixed frame offset.
     """
-    caller_file = _caller_source_file(caller_frame_depth)
+    return provenance_for(_caller_source_file(caller_frame_depth))
+
+
+def provenance_for(caller_file: Optional[str]) -> ProducedBy:
+    """capture_provenance for an already-resolved source file. Split out so
+    a caller that also needs the path (to snapshot the code) resolves the
+    stack once instead of twice."""
     if not caller_file or not os.path.exists(caller_file):
         return ProducedBy()
 
@@ -158,38 +182,84 @@ def capture_provenance(caller_frame_depth: Optional[int] = 2) -> ProducedBy:
 # Session id allocation
 # ---------------------------------------------------------------------
 
-_ID_RE = re.compile(rf"^{re.escape(SESSION_PREFIX)}(\d{{{ID_WIDTH},}})$")
+#: S-<yy>-<nnnn>, e.g. S-26-0012. Both groups are captured so a folder name
+#: alone tells you its year and its number within that year.
+_ID_RE = re.compile(rf"^{re.escape(SESSION_PREFIX)}(\d{{2}})-(\d{{{ID_WIDTH},}})$")
+
+#: Everything a session lives under, so the archive root stays readable.
+DATA_DIR = "data"
 
 
-def _format_id(n: int) -> str:
-    return f"{SESSION_PREFIX}{n:0{ID_WIDTH}d}"
+def data_root(archive_root: Path) -> Path:
+    return Path(archive_root) / DATA_DIR
 
 
-def _existing_ids(archive_root: Path) -> List[int]:
+def year_dir(archive_root: Path, year: int) -> Path:
+    return data_root(archive_root) / f"{year:04d}"
+
+
+def _format_id(year2: int, n: int) -> str:
+    return f"{SESSION_PREFIX}{year2:02d}-{n:0{ID_WIDTH}d}"
+
+
+def id_year(run_id: str) -> Optional[int]:
+    """The four-digit year encoded in a session id, or None if it doesn't
+    parse. Two-digit years are read as 20xx -- this format is not intended
+    to outlive that assumption."""
+    m = _ID_RE.match(run_id)
+    return 2000 + int(m.group(1)) if m else None
+
+
+def resolve_run_id(text: str, *, now: Optional[datetime.datetime] = None) -> str:
+    """Expand a user-typed session id to its canonical form.
+
+        S-26-0012 -> S-26-0012      (already canonical)
+        26-0012   -> S-26-0012      (missing prefix)
+        0012 / 12 -> S-<this year>-0012
+
+    Ids restart each year, so a bare number is only meaningful against a
+    year; the current one is the useful default. Deliberately CLI-facing:
+    the library keeps taking exact ids, the same way resolve_archive is
+    strict for the API and lenient for the terminal.
+    """
+    raw = (text or "").strip().upper()
+    if not raw:
+        raise ValueError("empty session id")
+    if _ID_RE.match(raw):
+        return raw
+    m = re.match(rf"^(?:{re.escape(SESSION_PREFIX)})?(\d{{2}})-(\d+)$", raw)
+    if m:
+        return _format_id(int(m.group(1)), int(m.group(2)))
+    if raw.isdigit():
+        now = now or datetime.datetime.now().astimezone()
+        return _format_id(now.year % 100, int(raw))
+    raise ValueError(
+        f"{text!r} is not a session id; expected S-<yy>-<nnnn> (e.g. S-26-0012) "
+        f"or a bare number for the current year (e.g. 0012)"
+    )
+
+
+def _existing_ids(archive_root: Path, year: int) -> List[int]:
+    """Session numbers already used in one year. Numbering is per-year, so
+    only that year's folder matters."""
     ids = []
-    if not archive_root.exists():
+    ydir = year_dir(archive_root, year)
+    if not ydir.is_dir():
         return ids
-    for year_dir in archive_root.iterdir():
-        if not year_dir.is_dir():
-            continue
-        for month_dir in year_dir.iterdir():
-            if not month_dir.is_dir():
-                continue
-            for session_dir in month_dir.iterdir():
-                m = _ID_RE.match(session_dir.name)
-                if m:
-                    ids.append(int(m.group(1)))
+    for session_dir in ydir.iterdir():
+        m = _ID_RE.match(session_dir.name)
+        if m and int(m.group(1)) == year % 100:
+            ids.append(int(m.group(2)))
     return ids
 
 
-def _allocate_new_id(archive_root: Path) -> str:
-    """Scan the archive for the highest existing id and return the next one.
-    The folder listing is the source of truth -- no separate counter file
-    to keep in sync. Collisions (e.g. two processes racing) are resolved
-    by retrying with the next id if folder creation fails because the
-    target already exists; see Session.new()."""
-    existing = _existing_ids(archive_root)
-    return _format_id((max(existing) + 1) if existing else 1)
+def _allocate_new_id(archive_root: Path, year: int) -> str:
+    """Next free id for the given year. The folder listing is the source of
+    truth -- no separate counter file to keep in sync. Collisions (e.g. two
+    processes racing) are resolved by retrying with the next id if folder
+    creation fails because the target already exists; see new()."""
+    existing = _existing_ids(archive_root, year)
+    return _format_id(year % 100, (max(existing) + 1) if existing else 1)
 
 
 # ---------------------------------------------------------------------
@@ -243,6 +313,44 @@ class Session:
     def id(self) -> str:
         return self.meta.run_id
 
+    @property
+    def archive_root(self) -> Path:
+        """The archive this session lives in. Sessions are always
+        <root>/data/<year>/<id>, the same assumption _find_session_dir and
+        the index walk already make."""
+        return self.path.parents[2]
+
+    def _attach_code(self, meta: SidecarMeta, caller_file: Optional[str]) -> None:
+        """Snapshot the first-party source behind this save into the
+        archive's code store and record its manifest id on the sidecar.
+
+        Capture happens per artifact write rather than at close() so the
+        sidecar is written once and never read-modify-written, and so it
+        stays self-describing if the file is copied elsewhere. Repeated
+        captures in one process are nearly free (see codestore's cache).
+
+        Never fatal: losing a code snapshot must not cost the user their
+        measurement data.
+        """
+        if not caller_file:
+            return
+        try:
+            from nebula import codestore
+            from nebula.config import read_settings
+
+            settings = read_settings(self.archive_root)
+            if not settings.capture_code:
+                return
+            got = codestore.capture(
+                self.archive_root, caller_file,
+                max_file_bytes=settings.code_max_file_bytes,
+            )
+            if got:
+                meta.produced_by.code = got["code"]
+                meta.produced_by.repos = got["repos"]
+        except Exception:  # noqa: BLE001 -- provenance is best-effort
+            pass
+
     def artifact_path(self, filename: str) -> Path:
         return self.path / filename
 
@@ -274,7 +382,8 @@ class Session:
         # Capture provenance now, while the user script is the direct
         # caller (fixed depth 2), rather than at block-exit time where the
         # frame layout is murkier.
-        produced_by = capture_provenance(caller_frame_depth=2)
+        caller_file = _resolve_caller(2)
+        produced_by = provenance_for(caller_file)
         return _ArtifactWriter(
             self,
             self.artifact_path(filename),
@@ -282,6 +391,7 @@ class Session:
             derived_from=derived_from,
             inputs=inputs or {},
             extra=extra,
+            caller_file=caller_file,
         )
 
     def write_meta_for(
@@ -299,15 +409,16 @@ class Session:
         filenames ("scope_trace_raw.csv") are resolved as same-session
         refs automatically by parse_ref.
         """
-        produced_by = capture_provenance(caller_frame_depth=caller_frame_depth)
+        caller_file = _resolve_caller(caller_frame_depth)
         meta = SidecarMeta(
             created=_now_iso(),
-            produced_by=produced_by,
+            produced_by=provenance_for(caller_file),
             inputs=inputs or {},
             extra=extra,
         )
         for ref in derived_from or []:
             meta.add_derived_from(ref)
+        self._attach_code(meta, caller_file)
         return write_sidecar(self.artifact_path(artifact_filename), meta)
 
     def add_related_run(self, ref: "str | Ref") -> None:
@@ -395,10 +506,12 @@ class _ArtifactWriter:
         derived_from: Optional[List["str | Ref"]],
         inputs: Dict,
         extra: Dict,
+        caller_file: Optional[str] = None,
     ):
         self._session = session
         self.path = path
         self._produced_by = produced_by
+        self._caller_file = caller_file
         self._derived_from = derived_from or []
         self._inputs = inputs
         self._extra = extra
@@ -423,6 +536,7 @@ class _ArtifactWriter:
         )
         for ref in self._derived_from:
             meta.add_derived_from(ref)
+        self._session._attach_code(meta, self._caller_file)
         write_sidecar(self.path, meta)
         return None
 
@@ -443,7 +557,7 @@ def new(
 
     `archive` is either a registered archive name (str) -- looked up in
     ~/.nebula/archives.yaml -- or a literal filesystem root (Path), not
-    including the year/month/id path. See registry.resolve_archive() for
+    including the data/year/id path. See registry.resolve_archive() for
     the exact resolution rule.
 
     archive_name overrides the label recorded on the returned Session
@@ -454,13 +568,13 @@ def new(
     name = archive_name or resolved_name or "local"
 
     now = datetime.datetime.now().astimezone()
-    year_month_dir = archive_root / f"{now.year:04d}" / f"{now.month:02d}"
-    year_month_dir.mkdir(parents=True, exist_ok=True)
+    ydir = year_dir(archive_root, now.year)
+    ydir.mkdir(parents=True, exist_ok=True)
 
     with _lock:
         for _ in range(10):  # small retry budget for cross-process races
-            run_id = _allocate_new_id(archive_root)
-            session_dir = year_month_dir / run_id
+            run_id = _allocate_new_id(archive_root, now.year)
+            session_dir = ydir / run_id
             try:
                 session_dir.mkdir(parents=False, exist_ok=False)
                 break
@@ -484,15 +598,24 @@ def new(
 
 
 def _find_session_dir(archive_root: Path, run_id: str) -> Path:
+    """Locate a session folder. The id encodes its year, so this is a
+    direct path join rather than a walk -- the scan below is only a
+    fallback for a folder someone filed under the wrong year by hand."""
     archive_root = Path(archive_root)
-    for year_dir in archive_root.iterdir() if archive_root.exists() else []:
-        if not year_dir.is_dir():
+    year = id_year(run_id)
+    if year is not None:
+        candidate = year_dir(archive_root, year) / run_id
+        if candidate.is_dir() and (candidate / SESSION_FILE).exists():
+            return candidate
+
+    droot = data_root(archive_root)
+    for ydir in sorted(droot.iterdir()) if droot.is_dir() else []:
+        if not ydir.is_dir() or not ydir.name.isdigit():
             continue
-        for month_dir in year_dir.iterdir():
-            candidate = month_dir / run_id
-            if candidate.is_dir() and (candidate / "session.yaml").exists():
-                return candidate
-    raise FileNotFoundError(f"no session {run_id!r} found under {archive_root}")
+        candidate = ydir / run_id
+        if candidate.is_dir() and (candidate / SESSION_FILE).exists():
+            return candidate
+    raise FileNotFoundError(f"no session {run_id!r} found under {droot}")
 
 
 def _created_today(meta: SessionMeta) -> bool:

@@ -101,18 +101,21 @@ def test_importable_sessions_excludes_frozen(tmp_path):
     archive = tmp_path / "archive"
     today = _session_with(archive, {"a.csv": "x"})       # closed today -> appendable
     # hand-place a session closed on a previous day -> frozen
-    ym = archive / "2020" / "01"
+    ym = archive / "data" / "2020"
     ym.mkdir(parents=True)
-    d = ym / "S-9999"
+    d = ym / "S-20-9999"
     d.mkdir()
     write_session_yaml(d, SessionMeta(
-        run_id="S-9999",
+        run_id="S-20-9999",
         created=datetime.datetime(2020, 1, 1).astimezone().isoformat(),
         status="closed", description="last year"))
 
     ids = {s.run_id for s in model.importable_sessions(archive)}
     assert today.id in ids
-    assert "S-9999" not in ids
+    assert "S-20-9999" not in ids
+    # the frozen session must actually be *seen* by the walk, or this
+    # assertion would pass vacuously
+    assert "S-20-9999" in {s.run_id for s in model.list_sessions(archive)}
 
 
 # ---------------------------------------------------------------------

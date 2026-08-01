@@ -351,3 +351,13 @@ body.resizing *, body.resizing-y * { pointer-events:none; }
 .ref.ok { color:var(--ok); }
 .ref.warn { color:var(--warn); }
 .ref.bad { color:var(--err); }
+
+/* clickable entry point */
+.dp .link, .kv .v .link { color:var(--accent); cursor:pointer; }
+.dp .link:hover, .kv .v .link:hover { text-decoration:underline; }
+.ext-link { color:var(--accent); cursor:pointer; font-family:var(--ui); padding:0 3px; }
+.ext-link:hover { text-decoration:underline; }
+.chips .chip b { font-weight:700; margin-left:3px; }
+
+.grp-actions { display:flex; justify-content:flex-start; margin-top:8px; }
+.grp-actions .dbtn { height:26px; padding:0 11px; font-size:12px; }

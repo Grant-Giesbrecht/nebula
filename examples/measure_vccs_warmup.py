@@ -5,7 +5,7 @@ from stardust.algorithm import randrange
 from pathlib import Path
 import nebula
 
-ARCHIVE = "test-archive"
+ARCHIVE = "spielplatz"
 
 log = plf.LogPile()
 

@@ -28,6 +28,22 @@ def file_manager_name() -> str:
     return "File Manager"
 
 
+def open_url(url: str) -> bool:
+    """Open a URL in the default browser. Separate from open_path because
+    that one normalises through Path(), which mangles a URL ("https://x"
+    becomes "https:/x")."""
+    try:
+        if sys.platform == "darwin":
+            subprocess.Popen(["open", url])
+        elif sys.platform.startswith("win"):
+            os.startfile(url)  # type: ignore[attr-defined]  # Windows-only
+        else:
+            subprocess.Popen(["xdg-open", url])
+    except OSError:
+        return False
+    return True
+
+
 def open_path(path) -> bool:
     """Open a path with the OS default: a folder in the file manager, a file
     in its registered default application. Returns whether the launch was

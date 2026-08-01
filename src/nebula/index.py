@@ -15,6 +15,7 @@ from pathlib import Path
 from typing import Iterator, Optional
 
 from nebula.registry import resolve_archive
+from nebula.session import DATA_DIR
 from nebula.sidecar import SESSION_FILE, SIDECAR_SUFFIX, read_session_yaml
 
 SCHEMA = """
@@ -69,15 +70,15 @@ def _iter_session_dirs(archive_root: Path) -> Iterator[Path]:
     archive_root = Path(archive_root)
     if not archive_root.exists():
         return
-    for year_dir in sorted(archive_root.iterdir()):
-        if not year_dir.is_dir():
+    # Sessions live under data/<year>/ only, so everything else at the
+    # archive root (code/, index.db, archive.yaml, .trash) is never walked.
+    data = archive_root / DATA_DIR
+    for year_dir in sorted(data.iterdir()) if data.is_dir() else []:
+        if not year_dir.is_dir() or not year_dir.name.isdigit():
             continue
-        for month_dir in sorted(year_dir.iterdir()):
-            if not month_dir.is_dir():
-                continue
-            for session_dir in sorted(month_dir.iterdir()):
-                if (session_dir / SESSION_FILE).exists():
-                    yield session_dir
+        for session_dir in sorted(year_dir.iterdir()):
+            if (session_dir / SESSION_FILE).exists():
+                yield session_dir
 
 
 def rebuild(archive: "str | Path", index_path: Optional[Path] = None) -> Path:

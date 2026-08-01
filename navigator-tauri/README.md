@@ -93,7 +93,10 @@ Other things worth knowing about the window:
   rendered, not raw. The **{ }** button in its header shows the YAML source.
 - Opening a sidecar shows the same kind of rendered view of the
   `.meta.json` (provenance, checksum, derived-from, inputs), with **{ }**
-  for the raw JSON.
+  for the raw JSON. **Entry point** is a link: the filename opens your
+  local checkout, the **↗** opens the same file on the host pinned to the
+  recorded commit. Under **Captured source**, *Restore files…* writes the
+  whole snapshot back out as a real directory tree.
 - The rail, the right-hand dock, and the split between the two docked
   panels are all **draggable**.
 
@@ -221,6 +224,8 @@ One JSON object per line, request and response:
 
 Ops: `ping`, `resolve`, `list_archives`, `list_sessions`, `list_items`,
 `sidecar_display`, `sidecar_info`, `session_info`, `search_items`,
+`lineage`, `resolve_refs`, `code_info`, `restore_code`, `entry_point_link`,
+`open_url`,
 `importable_sessions`,
 `frozen_sessions`, `import_new`, `import_file`, `open_path`,
 `file_manager_name`. Test any of them without the GUI:

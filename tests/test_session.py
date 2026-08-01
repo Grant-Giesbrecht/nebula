@@ -46,8 +46,8 @@ def test_session_ids_increment(tmp_path):
     s1.close()
     s2 = nebula.new(archive, description="second")
     s2.close()
-    assert s1.id == "S-0001"
-    assert s2.id == "S-0002"
+    assert s1.id.endswith("-0001")
+    assert s2.id.endswith("-0002")
 
 
 def test_session_by_registered_name(tmp_path):
@@ -144,18 +144,18 @@ def test_append_to_previous_day_closed_session_refused(tmp_path):
     from nebula.sidecar import write_session_yaml, SessionMeta
 
     archive = tmp_path / "archive"
-    ym = archive / "2020" / "01"
+    ym = archive / "data" / "2020"
     ym.mkdir(parents=True)
-    d = ym / "S-0001"
+    d = ym / "S-20-0001"
     d.mkdir()
     write_session_yaml(d, SessionMeta(
-        run_id="S-0001",
+        run_id="S-20-0001",
         created=datetime.datetime(2020, 1, 1).astimezone().isoformat(),
         status="closed",
         description="last year",
     ))
     with pytest.raises(RuntimeError):
-        nebula.append_to(archive, "S-0001")  # prior-day closed -- frozen
+        nebula.append_to(archive, "S-20-0001")  # prior-day closed -- frozen
 
 
 def test_append_to_still_open_session(tmp_path):
@@ -257,12 +257,12 @@ def test_flag_stale_open_sessions(tmp_path):
     from nebula.sidecar import write_session_yaml, SessionMeta
 
     archive = tmp_path / "archive"
-    year_month = archive / "2020" / "01"
+    year_month = archive / "data" / "2020"
     year_month.mkdir(parents=True)
-    session_dir = year_month / "S-0001"
+    session_dir = year_month / "S-20-0001"
     session_dir.mkdir()
     old_meta = SessionMeta(
-        run_id="S-0001",
+        run_id="S-20-0001",
         created=datetime.datetime(2020, 1, 1).astimezone().isoformat(),
         status="open",
         tags=[],
@@ -274,7 +274,7 @@ def test_flag_stale_open_sessions(tmp_path):
     conn = index.open_index(archive)
     stale = index.flag_stale_open_sessions(conn, older_than_hours=1)
     assert len(stale) == 1
-    assert stale[0]["run_id"] == "S-0001"
+    assert stale[0]["run_id"] == "S-20-0001"
     conn.close()
 
 

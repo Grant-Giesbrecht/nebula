@@ -17,7 +17,7 @@ import hashlib
 import json
 import os
 import tempfile
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, fields
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -53,6 +53,14 @@ class ProducedBy:
     commit: Optional[str] = None
     dirty: Optional[bool] = None
     entry_point: Optional[str] = None
+    # Content-addressed snapshot of the source that produced the artifact:
+    # a manifest id in the archive's .code store (see nebula.codestore).
+    # The git fields above stay authoritative for "which commit"; this
+    # answers "what actually ran", which they cannot when dirty is True.
+    code: Optional[str] = None
+    # Per-repo git state for every first-party repo that contributed code,
+    # not just the entry point's: {"nebula": {"commit": ..., "dirty": ...}}.
+    repos: Dict[str, Any] = field(default_factory=dict)
     # Where the file came from. "script" (default) means a tracked script
     # run produced it and the git fields above are authoritative. "external"
     # means it was brought in by hand -- a coworker's emailed dataset, a
@@ -64,6 +72,24 @@ class ProducedBy:
     origin: Optional[str] = None
     imported_by: Optional[str] = None   # OS user who ran the import
     imported_at: Optional[str] = None   # ISO 8601
+    # Keys written by a newer nebula than the one reading. Kept verbatim and
+    # written back out, so an older checkout can read (and even re-write) a
+    # sidecar from a newer one instead of raising TypeError on an unknown
+    # field -- schema growth here must not strand other machines.
+    extra: Dict[str, Any] = field(default_factory=dict)
+
+    @classmethod
+    def from_dict(cls, d: Dict[str, Any]) -> "ProducedBy":
+        known = {f.name for f in fields(cls)} - {"extra"}
+        return cls(
+            **{k: v for k, v in d.items() if k in known},
+            extra={k: v for k, v in d.items() if k not in known},
+        )
+
+    def to_dict(self) -> Dict[str, Any]:
+        d = {k: v for k, v in asdict(self).items() if k != "extra"}
+        d.update(self.extra)          # unknown keys merge back up to top level
+        return d
 
 
 @dataclass
@@ -83,13 +109,14 @@ class SidecarMeta:
         # fields don't get buried under a generic "extra" key in the file.
         extra = d.pop("extra")
         d.update(extra)
+        d["produced_by"] = self.produced_by.to_dict()
         return d
 
     @classmethod
     def from_dict(cls, d: Dict[str, Any]) -> "SidecarMeta":
         known = {"created", "produced_by", "derived_from", "inputs", "sha256"}
         extra = {k: v for k, v in d.items() if k not in known}
-        produced_by = ProducedBy(**d.get("produced_by", {}))
+        produced_by = ProducedBy.from_dict(d.get("produced_by", {}) or {})
         return cls(
             created=d["created"],
             produced_by=produced_by,

@@ -14,8 +14,8 @@ def _src(tmp_path, name="incoming.csv", content="1,2,3\n"):
     return p
 
 
-def _make_previous_day(archive, run_id="S-0050", *, status="closed"):
-    ym = archive / "2020" / "01"
+def _make_previous_day(archive, run_id="S-20-0050", *, status="closed"):
+    ym = archive / "data" / "2020"
     ym.mkdir(parents=True, exist_ok=True)
     d = ym / run_id
     d.mkdir()

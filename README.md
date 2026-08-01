@@ -219,6 +219,26 @@ and `nebula ls /some/scratch/dir` both work from the terminal.
 
 ## Layout
 
+An archive is browsable by hand -- four entries at the root, no hidden
+directories, and no month nesting:
+
+```
+<archive>/
+    archive.yaml            # per-archive settings (optional)
+    index.db                # rebuildable cache
+    code/                   # captured source (blobs + manifests)
+    data/
+        2026/
+            S-26-0001/      # session id carries its own two-digit year
+            S-26-0002/
+        2025/
+            S-25-0184/
+```
+
+Session numbering restarts each year, which is what lets the CLI take a
+bare number: `nebula show <archive> 12` resolves to `S-26-0012` against the
+current year. `26-0012` works too; a full `S-26-0012` is always accepted.
+
 ```
 src/nebula/
     refs.py       # Ref dataclass + parse_ref/format_ref (single canonical parser)
@@ -226,10 +246,58 @@ src/nebula/
     sidecar.py    # atomic JSON sidecar I/O + session.yaml I/O
     session.py    # Session, new()/append_to()/reopen()/session() context manager
     index.py      # SQLite index rebuild (fully regeneratable)
+    codestore.py  # content-addressed snapshot of the source that ran (.code/)
+    config.py     # per-archive settings (<archive>/archive.yaml)
     graph.py      # upstream()/downstream() provenance traversal, cross-archive aware
     cli.py        # `nebula` command-line tool
     picker.py     # optional PyQt5 session picker (not imported by default)
 ```
+
+## Captured source code
+
+Git records *which commit* a script ran at; it cannot record what ran when
+the working tree was dirty — and in practice most real runs are dirty. So
+every save also snapshots the first-party source behind it into a
+content-addressed store, **in addition to** the usual
+`repo`/`commit`/`dirty`/`entry_point` fields:
+
+```
+<archive>/.code/blobs/<aa>/<bb>/<sha256>            one copy per file version
+<archive>/.code/manifests/<aa>/<bb>/<sha256>.json   {entry, files: {path: blob}}
+```
+
+The sidecar carries one short id (`produced_by.code`), plus per-repo git
+state for every repo that contributed code (`produced_by.repos`). Because
+a manifest is hashed over its own content, a run whose code is unchanged
+reuses the same id and writes **nothing** — storage tracks how often your
+code changes, not how often you run it.
+
+What gets captured: the entry script, plus every already-imported module
+that lives in a git repo and isn't stdlib/site-packages. Nebula's own
+package is deliberately excluded — it is the instrument, not the
+experiment. Files over `code_max_file_bytes` are skipped.
+
+The file is optional — a missing `<archive>/archive.yaml` means defaults.
+Inspect or change it with `nebula config`:
+
+```
+nebula config <archive>                          # show effective settings
+nebula config <archive> --capture-code false     # write archive.yaml
+nebula config <archive> --max-file-bytes 500000
+```
+
+`NEBULA_CAPTURE_CODE=0` overrides the file for a single run; `nebula
+config` reports when that is in effect and never writes the override into
+the archive.
+
+To get the code back, the Navigator's **Restore files…** button (under
+*Captured source*) writes a snapshot out as a directory tree at the
+original repo-relative paths, plus a `SNAPSHOT.txt` naming the entry point
+and the repos involved. Restores never overwrite: a second restore of the
+same snapshot lands beside the first. `nebula check` reports
+dangling code refs and missing blobs; `nebula gc` sweeps snapshots no
+sidecar references — dry-run by default, and it treats trashed sessions as
+live so a restore stays honest.
 
 ## CLI
 
@@ -242,6 +310,9 @@ nebula downstream <archive> <run_id> <file> [--also-search ARCHIVE ...]
 nebula stale <archive> [--hours N]                 # find abandoned "open" sessions
 nebula archives                                    # list registered archives
 nebula register <name> <root> [--git-org ORG]      # add an archive to the registry
+nebula config <archive> [--capture-code B] [--max-file-bytes N]   # archive settings
+nebula check <archive> [--no-checksums]            # fsck, incl. dangling code refs
+nebula gc <archive> [--delete] [--ignore-trash]    # sweep unreferenced captured code
 ```
 
 `<archive>` is either a registered name (see `nebula archives`) or a

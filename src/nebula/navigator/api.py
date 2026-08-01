@@ -145,6 +145,22 @@ def op_lineage(args: Dict[str, Any]) -> Dict[str, Any]:
     return model.lineage(args["archive"], args["session_path"], args["filename"])
 
 
+def op_code_info(args: Dict[str, Any]) -> Dict[str, Any]:
+    return model.code_info(args["archive"], args["code"])
+
+
+def op_entry_point_link(args: Dict[str, Any]) -> Dict[str, Any]:
+    return model.entry_point_link(args["archive"], args.get("item") or {})
+
+
+def op_open_url(args: Dict[str, Any]) -> Dict[str, Any]:
+    return {"dispatched": osutil.open_url(args["url"])}
+
+
+def op_restore_code(args: Dict[str, Any]) -> Dict[str, Any]:
+    return model.restore_code(args["archive"], args["code"], args["dest_parent"])
+
+
 def op_list_archives(args: Dict[str, Any]) -> List[Dict[str, Any]]:
     return model.registered_archives()
 
@@ -211,6 +227,10 @@ OPS = {
     "search_items": op_search_items,
     "lineage": op_lineage,
     "resolve_refs": op_resolve_refs,
+    "code_info": op_code_info,
+    "restore_code": op_restore_code,
+    "entry_point_link": op_entry_point_link,
+    "open_url": op_open_url,
     "importable_sessions": op_importable_sessions,
     "frozen_sessions": op_frozen_sessions,
     "import_new": op_import_new,

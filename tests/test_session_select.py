@@ -9,10 +9,10 @@ from nebula.session_select import _candidate_sessions, select_session
 from nebula.sidecar import read_session_yaml, write_session_yaml, SessionMeta
 
 
-def _make_old_closed(archive, run_id="S-0009"):
+def _make_old_closed(archive, run_id="S-20-0009"):
     """Hand-place a closed session dated last year, so it is NOT a
     today/open candidate but can still be reopened by id."""
-    ym = archive / "2020" / "01"
+    ym = archive / "data" / "2020"
     ym.mkdir(parents=True)
     d = ym / run_id
     d.mkdir()
@@ -25,10 +25,16 @@ def _make_old_closed(archive, run_id="S-0009"):
     return run_id
 
 
+def _idfor(n, days=0):
+    """A session id whose two-digit year matches where it will be filed."""
+    when = datetime.datetime.now().astimezone() - datetime.timedelta(days=days)
+    return f"S-{when.year % 100:02d}-{n:04d}"
+
+
 def _place_days_ago(archive, run_id, days, *, tags=None, desc="", status="closed"):
     """Hand-place a session dated `days` days before today."""
     when = datetime.datetime.now().astimezone() - datetime.timedelta(days=days)
-    ym = archive / f"{when.year:04d}" / f"{when.month:02d}"
+    ym = archive / "data" / f"{when.year:04d}"
     ym.mkdir(parents=True, exist_ok=True)
     d = ym / run_id
     d.mkdir()
@@ -95,7 +101,7 @@ def test_select_new_via_command(tmp_path, monkeypatch):
     _force_interactive(monkeypatch)
     _feed_input(monkeypatch, ["/new"])
     s = select_session(archive, description="fresh")
-    assert s.id == "S-0001"
+    assert s.id.endswith("-0001")
     assert read_session_yaml(s.path).status == "open"
 
 
@@ -182,7 +188,7 @@ def test_matches_by_id_tag_and_description(tmp_path):
     from nebula.session_select import _matches
     from nebula.sidecar import SessionMeta
 
-    m = SessionMeta(run_id="S-0007", created="2026-07-02T10:00:00",
+    m = SessionMeta(run_id="S-20-0007", created="2026-07-02T10:00:00",
                     tags=["warmup", "RP23D"], description="diode sweep")
     assert _matches(m, "0007")      # by id
     assert _matches(m, "WARM")      # by tag, case-insensitive
@@ -208,22 +214,22 @@ def test_search_command_runs_without_error(tmp_path, monkeypatch, capsys):
 def test_list_default_excludes_previous_day_sessions(tmp_path, monkeypatch):
     archive = tmp_path / "archive"
     nebula.new(archive, description="today").close()   # candidate
-    _place_days_ago(archive, "S-0090", 5, desc="five days ago")
+    _place_days_ago(archive, _idfor(90), 5, desc="five days ago")
 
     out = _run_picker(archive, monkeypatch, ["/list"])
     # Default /list only shows candidates (today/open).
-    assert "S-0090" not in out.split("/list", 1)[-1] if "/list" in out else True
+    assert _idfor(90) not in out.split("/list", 1)[-1] if "/list" in out else True
     # (belt-and-suspenders: the old session is simply not a candidate)
-    assert "S-0090" not in out
+    assert _idfor(90) not in out
 
 
 def test_list_all_shows_previous_day_sessions(tmp_path, monkeypatch):
     archive = tmp_path / "archive"
     nebula.new(archive, description="today").close()
-    _place_days_ago(archive, "S-0090", 5, desc="five days ago")
+    _place_days_ago(archive, _idfor(90), 5, desc="five days ago")
 
     out = _run_picker(archive, monkeypatch, ["/list -a"])
-    assert "S-0090" in out
+    assert _idfor(90) in out
 
 
 def test_list_days_window_filters(tmp_path, monkeypatch):
@@ -282,7 +288,7 @@ def test_non_interactive_creates_new(tmp_path, monkeypatch):
     archive = tmp_path / "archive"
     monkeypatch.setattr(session_select, "is_interactive", lambda: False)
     s = select_session(archive, description="batch")
-    assert s.id == "S-0001"
+    assert s.id.endswith("-0001")
 
 
 def test_session_new_session_flag_skips_picker(tmp_path, monkeypatch):
@@ -297,4 +303,4 @@ def test_session_new_session_flag_skips_picker(tmp_path, monkeypatch):
     with nebula.session(archive, new_session=True, description="clean") as s:
         run_id = s.id
     assert read_session_yaml(s.path).status == "closed"
-    assert run_id == "S-0001"
+    assert run_id.endswith("-0001")
