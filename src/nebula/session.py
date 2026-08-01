@@ -355,6 +355,10 @@ class Session:
         self.on_missing_meta = on_missing_meta
         self._closed_cleanly = False
         self._settings = None
+        # What this session's writes actually landed as: requested name ->
+        # name on disk. Only differs when overwrite protection renamed one.
+        # See _redirect_ref for why a same-session reference has to follow.
+        self._written: Dict[str, str] = {}
 
     @property
     def id(self) -> str:
@@ -446,6 +450,8 @@ class Session:
         produced_by = provenance_for(caller_file)
         path, original_name, duplicate_index = resolve_write_target(
             self.path, filename, self.settings.on_overwrite)
+        if original_name:
+            self._note_write(original_name, path.name)
         return _ArtifactWriter(
             self,
             path,
@@ -481,9 +487,41 @@ class Session:
             extra=extra,
         )
         for ref in derived_from or []:
-            meta.add_derived_from(ref)
+            meta.add_derived_from(self._redirect_ref(ref))
         self._attach_code(meta, caller_file)
         return write_sidecar(self.artifact_path(artifact_filename), meta)
+
+    def _note_write(self, requested: str, actual: str) -> None:
+        self._written[requested] = actual
+
+    def _redirect_ref(self, ref: "str | Ref") -> "str | Ref":
+        """Point a same-session reference at the file this session actually
+        wrote under that name.
+
+        Overwrite protection can rename a write (raw.csv -> raw-001.csv)
+        after the caller has already decided what to call it. A later
+        `derived_from=["raw.csv"]` in the same session then names a file
+        that *does* exist -- the one from an earlier run -- so nothing
+        errors and the lineage quietly points at the wrong data. Within one
+        session the intent is unambiguous: it means the file just written.
+
+        Only same-archive, same-session, bare references are redirected,
+        and only for names this session actually renamed; anything naming
+        another session or archive is left exactly as written.
+        """
+        from nebula.refs import Ref as _Ref, parse_ref
+
+        if not self._written:
+            return ref
+        parsed = parse_ref(ref) if isinstance(ref, str) else ref
+        if not isinstance(parsed, _Ref):
+            return ref
+        if parsed.archive is not None or parsed.session is not None:
+            return ref
+        actual = self._written.get(parsed.file)
+        if not actual or actual == parsed.file:
+            return ref
+        return _Ref(archive=None, session=None, file=actual, user=parsed.user)
 
     def add_related_run(self, ref: "str | Ref") -> None:
         self.meta.add_related_run(ref)
@@ -625,7 +663,7 @@ class _ArtifactWriter:
             extra=self._extra,
         )
         for ref in self._derived_from:
-            meta.add_derived_from(ref)
+            meta.add_derived_from(self._session._redirect_ref(ref))
         self._session._attach_code(meta, self._caller_file)
         write_sidecar(self.path, meta)
         return None

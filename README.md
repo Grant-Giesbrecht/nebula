@@ -304,6 +304,15 @@ survives in the metadata rather than only in the filename. An unrecognised
 policy in `archive.yaml` falls back to `duplicate` rather than being
 trusted.
 
+**A rename takes the run's own references with it.** If a run writes
+`warm.tome` and then `warm.log` with `derived_from=["warm.tome"]`, and both
+were renamed to `-001` because an earlier run had already used those names,
+the recorded ref becomes `warm-001.tome`. Without this the ref would name a
+file that *does* exist -- the earlier run's -- so nothing would complain
+while the lineage quietly pointed at the wrong data. Only bare,
+same-session references to names this run actually renamed are redirected;
+anything naming another session or archive is written exactly as given.
+
 This applies to `s.artifact()` and to manual imports alike -- a coworker's
 second copy of `raw.csv` lands beside the first instead of being refused.
 `artifact_path()` stays a pure path helper and is deliberately *not*
@@ -312,11 +321,14 @@ overwrite-aware.
 Files are listed **newest first** by default. The Navigator's **⇅ Sort**
 button re-orders by date, title or file status in either direction, and
 filters by status (OK / modified / no metadata / data missing); the choice
-is remembered. In the Navigator, duplicates
-render under **the name that was asked for** with a `2 of 3` badge showing
-write order; hovering reveals the real
-filename and why it was renamed. The `.meta.json` rows still show the name
-on disk, so a file can always be found.
+is remembered.
+
+In the Navigator, the file browser shows **the name that is really on
+disk** (`warm-001.log`) with a `2 of 3` badge for write order -- that is
+what you will find in Finder, and what a ref has to name. The sidecar and
+details panels lead with **the name that was asked for**, with "stored as
+…" beneath, since that is the name in the code that produced it. Hovering
+the badge gives whichever half you are not looking at.
 
 ## Refs and nebula URIs
 

@@ -531,6 +531,8 @@ body.dragging-entry { cursor:grabbing; user-select:none; }
 .citem .ctitle { font-size:11px; }
 
 /* activity calendar */
+.p-sub { font-size:11px; color:var(--text-faint); margin:-2px 0 6px; }
+.p-sub .mono { font-family:var(--mono); }
 .calendar { padding:4px 10px 8px; overflow:hidden; }
 /* clip rather than widen the rail: the strip is rebuilt on resize, but must
    not push the rail out in the frame before that happens */

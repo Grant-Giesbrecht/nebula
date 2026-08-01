@@ -1502,7 +1502,9 @@ function applyItemView() {
       if (ta === null || tb === null) return ta === tb ? 0 : (ta === null ? 1 : -1);
       d = ta - tb;
     } else if (itemSort.by === "title") {
-      d = (a.display_name || a.name).localeCompare(b.display_name || b.name);
+      // Sort by what the list actually shows, or an alphabetical sort reads
+      // as out of order wherever a duplicate was renamed.
+      d = a.name.localeCompare(b.name);
     } else {
       d = (STATUS_RANK[a.status] ?? 9) - (STATUS_RANK[b.status] ?? 9);
     }
@@ -1577,7 +1579,7 @@ function listHTML() {
   const rows = shownItems.map((it, idx) => {
     const created = fmtCreated(it.timestamp);
     let r = `<tr data-i="${idx}" data-sc="0" class="${sameSel(idx, false) ? 'sel' : ''} ${isPicked(idx) ? 'multi' : ''}">
-      <td><div class="namecell">${fileGlyph(it, 20)}<span class="fname">${escapeHtml(it.display_name || it.name)}</span>${dupBadge(it)}</div></td>
+      <td><div class="namecell">${fileGlyph(it, 20)}<span class="fname">${escapeHtml(it.name)}</span>${dupBadge(it)}</div></td>
       ${searchMode ? sessionCell(it) : ""}
       <td class="created">${created}</td>
       <td>${pill(it)}</td></tr>`;
@@ -1607,15 +1609,17 @@ function gridHTML() {
   if (!shownItems.length) return emptyItemsHTML();
   return `<div class="grid">${shownItems.map((it, idx) => `
     <div class="cell ${sameSel(idx, false) || isPicked(idx) ? 'sel' : ''}" data-i="${idx}" data-sc="0" title="${escapeHtml(it.detail)}">
-      ${fileGlyph(it, 54)}<span class="cname">${escapeHtml(it.display_name || it.name)}${dupBadge(it)}</span>
+      ${fileGlyph(it, 54)}<span class="cname">${escapeHtml(it.name)}${dupBadge(it)}</span>
       ${searchMode ? `<span class="cell-sess">${escapeHtml(it.run_id)}</span>` : ""}</div>`).join("")}</div>`;
 }
-// Duplicates keep the name that was asked for, with their write order
-// alongside -- the real filename is one hover away.
+// The list shows the name that is actually on disk -- that is what you will
+// find in Finder, and what a ref has to name -- while the panels lead with
+// the name that was asked for. The badge carries the other half either way.
 function dupBadge(it) {
   if (!it.is_duplicate) return "";
-  return `<span class="dup" title="written as ${escapeHtml(it.name)} — ` +
-    `nebula renamed it so it would not overwrite ${escapeHtml(it.display_name)}">` +
+  const asked = it.original_name || it.display_name;
+  return `<span class="dup" title="asked for ${escapeHtml(asked)} — nebula wrote it as ` +
+    `${escapeHtml(it.name)} so it would not overwrite the earlier one">` +
     `${it.position} of ${it.total}</span>`;
 }
 
@@ -1917,15 +1921,21 @@ function renderSidecarPanel() {
   const srcTitle = assumed
     ? "not recorded in this sidecar — assumed from the default"
     : "recorded in the sidecar";
+  // Lead with the name the script asked for -- that is the name in the code
+  // that produced this -- and name the file it actually became beneath it.
+  const asked = (selected && selected.original_name) || null;
+  const onDisk = info.itemName || baseName(info.name);
   const head = `<div class="p-title">
-      <div class="p-name">${escapeHtml(info.itemName || baseName(info.name))}</div>
+      <div class="p-name">${escapeHtml(asked || onDisk)}</div>
       <span class="chip ${srcCls}" title="${escapeHtml(srcTitle)}">${escapeHtml(srcText)}</span>
-    </div>`;
+    </div>`
+    + (asked ? `<div class="p-sub">stored as <span class="mono">${escapeHtml(onDisk)}</span></div>` : "");
 
   const dup = selected && selected.is_duplicate
     ? row("Duplicate", `write ${selected.position} of ${selected.total}`
         + (selected.original_name
-           ? ` — asked for <span class="mono">${escapeHtml(selected.original_name)}</span>`
+           ? ` — asked for <span class="mono">${escapeHtml(selected.original_name)}</span>,`
+             + ` stored as <span class="mono">${escapeHtml(selected.name)}</span>`
            : ""), { html: true })
     : "";
   const overview = group("Overview",

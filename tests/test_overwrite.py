@@ -297,3 +297,126 @@ def test_undated_items_sort_last(tmp_path):
 
     names = [it.name for it in model.list_items(s.path)]
     assert names[-1] == "mystery.csv"
+
+
+# ---------------------------------------------------------------------
+# Lineage across a duplicate
+# ---------------------------------------------------------------------
+
+def _derived(session_dir, filename):
+    from nebula.sidecar import read_sidecar
+
+    return [d.get("file") for d in read_sidecar(Path(session_dir) / filename).derived_from]
+
+
+def test_a_duplicate_write_takes_its_siblings_with_it(tmp_path):
+    """The bug this exists to prevent: a second run appends to a session,
+    both its files are renamed to -001, and its `derived_from=["x.tome"]`
+    silently names the *first* run's tome -- which exists, so nothing
+    complains and the lineage is quietly wrong."""
+    archive = tmp_path / "arc"
+    s = nebula.new(archive, description="first run")
+    with s.artifact("warm.tome") as fn:
+        fn.write_text("a")
+    with s.artifact("warm.log", derived_from=["warm.tome"]) as fn:
+        fn.write_text("a")
+    s.close()
+
+    s2 = nebula.append_to(archive, s.id)          # a separate later run
+    with s2.artifact("warm.tome") as fn:
+        fn.write_text("b")
+    with s2.artifact("warm.log", derived_from=["warm.tome"]) as fn:
+        fn.write_text("b")
+    s2.close()
+
+    assert _derived(s.path, "warm.log") == ["warm.tome"]
+    assert _derived(s.path, "warm-001.log") == ["warm-001.tome"]
+
+
+def test_redirection_only_touches_names_this_session_renamed(tmp_path):
+    archive = tmp_path / "arc"
+    s = nebula.new(archive, description="one")
+    with s.artifact("raw.csv") as fn:
+        fn.write_text("r")
+    with s.artifact("cal.json") as fn:
+        fn.write_text("c")
+    with s.artifact("out.csv", derived_from=["raw.csv", "cal.json"]) as fn:
+        fn.write_text("o")
+    s.close()
+
+    s2 = nebula.append_to(archive, s.id)
+    with s2.artifact("raw.csv") as fn:            # renamed to raw-001.csv
+        fn.write_text("r2")
+    with s2.artifact("out.csv", derived_from=["raw.csv", "cal.json"]) as fn:
+        fn.write_text("o2")
+    s2.close()
+
+    # raw.csv follows the rename; cal.json was not rewritten by this run and
+    # so still means the one already in the session
+    assert _derived(s.path, "out-001.csv") == ["raw-001.csv", "cal.json"]
+
+
+def test_refs_naming_another_session_are_left_alone(tmp_path):
+    archive = tmp_path / "arc"
+    a = nebula.new(archive, description="upstream")
+    with a.artifact("raw.csv") as fn:
+        fn.write_text("r")
+    a.close()
+
+    b = nebula.new(archive, description="downstream")
+    with b.artifact("raw.csv") as fn:
+        fn.write_text("local")
+    b.close()
+
+    b2 = nebula.append_to(archive, b.id)
+    with b2.artifact("raw.csv") as fn:            # -> raw-001.csv
+        fn.write_text("local2")
+    with b2.artifact("out.csv", derived_from=[f"{a.id}/raw.csv", "raw.csv"]) as fn:
+        fn.write_text("o")
+    b2.close()
+
+    refs = read_sidecar(Path(b.path) / "out.csv").derived_from
+    # the explicit cross-session ref keeps its own name; the bare one follows
+    assert [(r.get("session"), r.get("file")) for r in refs] == [
+        (a.id, "raw.csv"), (None, "raw-001.csv")]
+
+
+def test_write_meta_for_redirects_too(tmp_path):
+    """The lower-level escape hatch must not reintroduce the bug."""
+    archive = tmp_path / "arc"
+    s = nebula.new(archive, description="one")
+    with s.artifact("raw.csv") as fn:
+        fn.write_text("r")
+    s.close()
+
+    s2 = nebula.append_to(archive, s.id)
+    with s2.artifact("raw.csv") as fn:
+        fn.write_text("r2")
+    (Path(s2.path) / "hand.csv").write_text("h")
+    s2.write_meta_for("hand.csv", derived_from=["raw.csv"])
+    s2.close()
+
+    assert _derived(s.path, "hand.csv") == ["raw-001.csv"]
+
+
+def test_the_tree_view_follows_the_redirected_ref(tmp_path):
+    """End to end: the relations view should show the duplicate's own
+    parent, not the earlier run's file."""
+    from nebula.navigator import model
+
+    archive = tmp_path / "arc"
+    s = nebula.new(archive, description="first")
+    with s.artifact("warm.tome") as fn:
+        fn.write_text("a")
+    with s.artifact("warm.log", derived_from=["warm.tome"]) as fn:
+        fn.write_text("a")
+    s.close()
+    s2 = nebula.append_to(archive, s.id)
+    with s2.artifact("warm.tome") as fn:
+        fn.write_text("b")
+    with s2.artifact("warm.log", derived_from=["warm.tome"]) as fn:
+        fn.write_text("b")
+    s2.close()
+
+    tree = model.provenance_tree(archive, s.id, "warm-001.log", direction="up")
+    assert [n["filename"] for n in tree["branches"][0]["upstream"]] == ["warm-001.tome"]
