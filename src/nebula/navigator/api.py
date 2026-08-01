@@ -294,6 +294,71 @@ def op_list_collections(args: Dict[str, Any]) -> List[Dict[str, Any]]:
     ]
 
 
+def op_collections_overview(args: Dict[str, Any]) -> Dict[str, Any]:
+    """The shape of the collection hierarchy, for a tree in the rail.
+
+    `roots` are the collections nothing else contains -- a nested folder
+    should not also appear at the top level. A collection reachable only
+    through a cycle would have no root, so any collection left unvisited is
+    added back as a root rather than becoming invisible.
+    """
+    from nebula import collection as collection_mod
+
+    root, _ = model.resolve(args["archive"])
+    colls = collection_mod.list_all(root)
+    children: Dict[str, List[str]] = {}
+    contained: set = set()
+    for coll in colls:
+        kids = []
+        for entry in coll.entries:
+            if entry.kind != "collection":
+                continue
+            ref = entry.parsed
+            if ref.archive or ref.user:      # elsewhere: not part of this tree
+                continue
+            kids.append(ref.collection)
+            contained.add(ref.collection)
+        children[coll.name] = kids
+
+    known = {c.name for c in colls}
+    roots = [c.name for c in colls if c.name not in contained]
+    # Cycles (hand-edited) would otherwise hide their members completely.
+    reachable: set = set()
+
+    def walk(name, seen):
+        if name in seen or name not in known:
+            return
+        reachable.add(name)
+        for kid in children.get(name, []):
+            walk(kid, seen | {name})
+
+    for name in roots:
+        walk(name, set())
+    roots += sorted(known - reachable)
+
+    return {
+        "roots": roots,
+        "collections": [
+            {"name": c.name, "title": c.title, "n_entries": len(c.entries),
+             "children": children.get(c.name, [])}
+            for c in colls
+        ],
+    }
+
+
+def op_get_item(args: Dict[str, Any]) -> Dict[str, Any]:
+    """One artifact, as list_items would describe it. Lets a view that is
+    not the session's file list (a collection, say) select a file and show
+    its properties without navigating away."""
+    session_path = Path(args["session_path"])
+    name = args["filename"]
+    for it in model.list_items(session_path):
+        if it.name == name:
+            return dict(_item_to_dict(it), session_path=str(session_path),
+                        run_id=args.get("run_id") or session_path.name)
+    raise FileNotFoundError(f"no artifact {name!r} in {session_path}")
+
+
 def op_collection_tree(args: Dict[str, Any]) -> Dict[str, Any]:
     from nebula import collection as collection_mod
 
@@ -337,6 +402,16 @@ def op_collection_remove(args: Dict[str, Any]) -> Dict[str, Any]:
     for ref in args["refs"]:
         collection_mod.remove(root, args["name"], ref)
     return {"name": args["name"]}
+
+
+def op_collection_move(args: Dict[str, Any]) -> Dict[str, Any]:
+    """Move entries between collections (what a drag-and-drop does)."""
+    from nebula import collection as collection_mod
+
+    root, _ = model.resolve(args["archive"])
+    for ref in args["refs"]:
+        collection_mod.move(root, args["from"], args["to"], ref)
+    return {"from": args["from"], "to": args["to"], "n": len(args["refs"])}
 
 
 def op_collections_containing(args: Dict[str, Any]) -> List[str]:
@@ -455,10 +530,13 @@ OPS = {
     "restore_code": op_restore_code,
     "list_collections": op_list_collections,
     "collection_tree": op_collection_tree,
+    "collections_overview": op_collections_overview,
+    "get_item": op_get_item,
     "create_collection": op_create_collection,
     "delete_collection": op_delete_collection,
     "collection_add": op_collection_add,
     "collection_remove": op_collection_remove,
+    "collection_move": op_collection_move,
     "collections_containing": op_collections_containing,
     "list_views": op_list_views,
     "run_view": op_run_view,

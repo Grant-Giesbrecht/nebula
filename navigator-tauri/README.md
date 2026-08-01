@@ -99,10 +99,16 @@ Other things worth knowing about the window:
   whole snapshot back out as a real directory tree.
 - The rail, the right-hand dock, and the split between the two docked
   panels are all **draggable**.
-- The rail has three tabs: **Sessions**, **Collections** and **Views**.
-  Opening a collection shows its entries in the main area, with nested
-  collections expanded in place, missing targets struck through, and
-  unreachable archives marked separately; **✕** removes an entry. A file's
+- The rail has three tabs: **Sessions**, **Collections** and **Searches**.
+  Collections render as a **tree**: only collections nothing else contains
+  are roots, and a nested one appears under its parent behind a twisty
+  (expansion is remembered). Opening one shows its entries in the main area
+  with breadcrumbs; a nested collection reads as a **folder** by name, not
+  as its `collections/<name>` ref. Clicking a file selects it **in place** —
+  properties in the detail bar, double-click to open, right-click to reveal
+  — without switching to Sessions. Right-clicking empty space offers *New
+  folder here…*. Missing targets are struck through, unreachable archives
+  marked separately; **✕** removes an entry. A file's
   detail bar gains **Add to collection** (existing or new, with a note) and
   shows which collections it already belongs to — click one to open it.
   **Searches** lists saved searches: click to run, **+ save** stores the

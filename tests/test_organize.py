@@ -426,3 +426,52 @@ def test_cli_whoami(tmp_path, monkeypatch):
     assert res.returncode == 0, res.stderr
     assert "grant@ncsu.edu" in res.stdout
     assert env_path.is_file()
+
+
+def test_collection_move_between_collections(tmp_path):
+    """What a drag-and-drop does: the entry (and its note) changes parent,
+    and nothing it points at is touched."""
+    archive, sessions = _archive(tmp_path)
+    ref = f"{sessions[0].id}/file0.tome"
+    C.create(archive, "inbox")
+    C.create(archive, "papers")
+    C.add(archive, "inbox", ref, note="keep this note")
+
+    C.move(archive, "inbox", "papers", ref)
+    assert [e.ref for e in C.read(archive, "inbox").entries] == []
+    moved = C.read(archive, "papers").entries[0]
+    assert moved.ref == ref and moved.note == "keep this note"
+    assert (sessions[0].path / "file0.tome").is_file()
+
+
+def test_collection_move_a_nested_folder(tmp_path):
+    archive, _ = _archive(tmp_path)
+    for name in ("a", "b", "sub"):
+        C.create(archive, name)
+    C.add(archive, "a", "collections/sub")
+
+    C.move(archive, "a", "b", "collections/sub")
+    assert [e.ref for e in C.read(archive, "a").entries] == []
+    assert [e.ref for e in C.read(archive, "b").entries] == ["collections/sub"]
+
+
+def test_collection_move_refuses_a_cycle_without_losing_the_entry(tmp_path):
+    """The add is attempted first, so a refused move leaves the source
+    intact rather than dropping the entry on the floor."""
+    archive, _ = _archive(tmp_path)
+    C.create(archive, "outer")
+    C.create(archive, "inner")
+    C.add(archive, "outer", "collections/inner")
+
+    with pytest.raises(C.CollectionError):
+        C.move(archive, "outer", "inner", "collections/inner")
+    assert [e.ref for e in C.read(archive, "outer").entries] == ["collections/inner"]
+
+
+def test_collection_move_to_itself_is_a_noop(tmp_path):
+    archive, sessions = _archive(tmp_path)
+    ref = f"{sessions[0].id}/file0.tome"
+    C.create(archive, "c")
+    C.add(archive, "c", ref)
+    C.move(archive, "c", "c", ref)
+    assert [e.ref for e in C.read(archive, "c").entries] == [ref]

@@ -54,6 +54,10 @@ let searchMode = false, searchMeta = null, searchTimer = null;
 // rail: sessions | collections | views
 let railTab = "sessions";
 let collections = [], savedViews = [];
+let collTree = { roots: [], byName: {} };
+let collExpanded = {};          // name -> open?
+let collPath = [];              // breadcrumb of the collection being viewed
+let entryOpen = {};             // "parent/child" -> expanded? (in the item area)
 let openCollection = null;     // name of the collection shown in the item area
 
 // How the file list is ordered and which statuses are shown. The backend
@@ -352,6 +356,7 @@ function setRailTab(tab) {
   // collection listing under the Sessions tab.
   if (tab !== "collections" && openCollection) {
     openCollection = null;
+    collPath = [];
     if (curSession && !searchMode) reloadItems();
     else renderItemArea();
   }
@@ -362,11 +367,55 @@ function setRailTab(tab) {
 async function loadCollections() {
   if (!archive) return;
   try {
-    collections = await call("list_collections", { archive });
+    const ov = await call("collections_overview", { archive });
+    collections = ov.collections;
+    collTree = { roots: ov.roots, byName: {} };
+    for (const c of ov.collections) collTree.byName[c.name] = c;
   } catch (e) {
     collections = [];
+    collTree = { roots: [], byName: {} };
   }
+  collExpanded = Object.assign(collExpanded, LS.get("nebula.collOpen", {}));
   renderCollections();
+}
+
+// A nested collection belongs under its parent, not beside it: the rail is
+// a tree, and only collections nothing else contains are roots.
+function collectionRowsHTML(name, depth, ancestors) {
+  const c = collTree.byName[name];
+  if (!c) return "";
+  if (ancestors.includes(name)) {          // hand-edited cycle
+    return `<div class="citem" style="padding-left:${10 + depth * 14}px">
+        <span class="cname">${escapeHtml(name)}<span class="ctitle">(cycle)</span></span>
+      </div>`;
+  }
+  const kids = c.children || [];
+  const open = !!collExpanded[name];
+  const twisty = kids.length
+    ? `<span class="tw" data-toggle="${escapeHtml(name)}" title="${open ? "Collapse" : "Expand"}">`
+      + `<svg viewBox="0 0 16 16" width="13" height="13" aria-hidden="true">`
+      + `<path d="${open ? "M3.5 6 L8 10.5 L12.5 6" : "M6 3.5 L10.5 8 L6 12.5"}"`
+      + ` fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"`
+      + ` stroke-linejoin="round"/></svg></span>`
+    : `<span class="tw empty"></span>`;
+  let html = `
+    <div class="citem ${name === openCollection ? "sel" : ""}" data-name="${escapeHtml(name)}"
+         data-drop-collection="${escapeHtml(name)}"
+         style="padding-left:${6 + depth * 14}px">
+      ${twisty}
+      <span class="cname">${escapeHtml(c.name)}
+        ${c.title ? `<span class="ctitle">${escapeHtml(c.title)}</span>` : ""}</span>
+      <span class="ccount">${c.n_entries}</span>
+    </div>`;
+  if (open) {
+    for (const kid of kids) html += collectionRowsHTML(kid, depth + 1, ancestors.concat([name]));
+  }
+  return html;
+}
+
+function parentOf(name) {
+  const found = collections.find((c) => (c.children || []).includes(name));
+  return found ? found.name : null;
 }
 
 function renderCollections() {
@@ -375,22 +424,43 @@ function renderCollections() {
       `Use <b>+ new</b>, or add a file from its detail bar.</div>`;
     return;
   }
-  $("collList").innerHTML = collections.map((c, i) => `
-    <div class="citem ${c.name === openCollection ? "sel" : ""}" data-i="${i}">
-      <span class="cname">${escapeHtml(c.name)}
-        ${c.title ? `<span class="ctitle">${escapeHtml(c.title)}</span>` : ""}</span>
-      <span class="ccount">${c.n_entries}</span>
-    </div>`).join("");
-  $("collList").querySelectorAll(".citem").forEach((el) => {
-    const name = collections[+el.dataset.i].name;
-    el.onclick = () => showCollection(name);
+  $("collList").innerHTML = collTree.roots
+    .map((name) => collectionRowsHTML(name, 0, [])).join("");
+
+  $("collList").querySelectorAll(".citem[data-name]").forEach((el) => {
+    const name = el.getAttribute("data-name");
+    el.onclick = (ev) => {
+      const toggle = ev.target.getAttribute && ev.target.getAttribute("data-toggle");
+      if (toggle) {
+        collExpanded[toggle] = !collExpanded[toggle];
+        LS.set("nebula.collOpen", collExpanded);
+        renderCollections();
+        return;
+      }
+      showCollection(name);
+    };
     el.oncontextmenu = (ev) => { ev.preventDefault(); showCollectionMenu(ev.clientX, ev.clientY, name); };
+    el.onpointerdown = (ev) => {
+      if (ev.target.closest(".tw")) return;            // the twisty is a button
+      // Only a nested collection can be moved: a root has no parent to
+      // move it out of.
+      const parent = parentOf(name);
+      if (!parent) return;
+      startEntryDrag(ev, { ref: `collections/${name}`, label: name, from: parent });
+    };
   });
 }
 
-async function showCollection(name) {
+async function showCollection(name, { push = true } = {}) {
+  if (push) {
+    const at = collPath.indexOf(name);
+    collPath = at >= 0 ? collPath.slice(0, at + 1) : collPath.concat([name]);
+  }
   openCollection = name;
   searchMode = false;
+  // Opening a child from the rail should reveal it there too.
+  for (const parent of collPath.slice(0, -1)) collExpanded[parent] = true;
+  LS.set("nebula.collOpen", collExpanded);
   try {
     const tree = await call("collection_tree", { archive, name });
     $("itemArea").innerHTML = collectionHTML(tree);
@@ -405,7 +475,14 @@ async function showCollection(name) {
 
 function collectionHTML(node, nested) {
   if (node.missing) return `<div class="empty">No collection called ${escapeHtml(node.name)}.</div>`;
-  const head = nested ? "" : `<div class="ctree-head">
+  const crumbs = collPath.length > 1
+    ? `<div class="crumbs">` + collPath.map((n, i) =>
+        (i ? `<span class="sep">›</span>` : "") +
+        `<span class="crumb ${i === collPath.length - 1 ? "here" : ""}" data-crumb="${escapeHtml(n)}"`
+        + ` data-drop-collection="${escapeHtml(n)}">`
+        + `${escapeHtml(n)}</span>`).join("") + `</div>`
+    : "";
+  const head = nested ? "" : `${crumbs}<div class="ctree-head">
       <span class="t">${escapeHtml(node.name)}</span>
       ${node.title ? `<span class="d">${escapeHtml(node.title)}</span>` : ""}
     </div>${node.description ? `<div class="mg-note">${escapeHtml(node.description)}</div>` : ""}`;
@@ -420,29 +497,100 @@ function collectionHTML(node, nested) {
     const go = e.exists && (e.kind === "file" || e.kind === "session" || e.kind === "collection");
     const attrs = go
       ? `data-goto="${escapeHtml(e.kind)}" data-ref="${escapeHtml(e.ref)}" ` +
-        `data-target="${escapeHtml(e.target || "")}" data-path="${escapeHtml(e.path || "")}"`
+        `data-target="${escapeHtml(e.target || "")}" data-path="${escapeHtml(e.path || "")}" ` +
+        `data-openkey="${escapeHtml(`${node.name}/${e.target || e.ref}`)}"`
       : "";
-    return `<div class="crow ${cls} ${go ? "go" : ""}" ${attrs}>
-        <span class="ckind">${escapeHtml(e.kind)}</span>
-        <span class="cref">${escapeHtml(e.ref)}</span>
+    // A nested collection reads as a folder name, not as the raw
+    // "collections/<name>" ref -- the ref spelling is an implementation
+    // detail here, and seeing it beside a parent named something else is
+    // just confusing.
+    const shown = e.kind === "collection" ? (e.target || e.ref) : e.ref;
+    const kindLabel = e.kind === "collection" ? "folder" : e.kind;
+    const key = `${node.name}/${e.target || e.ref}`;
+    const openable = e.kind === "collection" && e.child;
+    const isOpen = openable && entryOpen[key] !== false;   // expanded by default
+    const tw = openable
+      ? `<span class="etw" data-open="${escapeHtml(key)}" title="${isOpen ? "Collapse" : "Expand"}">`
+        + `<svg viewBox="0 0 16 16" width="13" height="13" aria-hidden="true">`
+        + `<path d="${isOpen ? "M3.5 6 L8 10.5 L12.5 6" : "M6 3.5 L10.5 8 L6 12.5"}"`
+        + ` fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"`
+        + ` stroke-linejoin="round"/></svg></span>`
+      : `<span class="etw empty"></span>`;
+    const dropAttr = e.kind === "collection" && e.exists
+      ? ` data-drop-collection="${escapeHtml(e.target || "")}"` : "";
+    return `<div class="crow ${cls} ${go ? "go" : ""}" ${attrs}${dropAttr} data-dragref="${escapeHtml(e.ref)}">
+        ${tw}
+        <span class="ckind">${escapeHtml(kindLabel)}</span>
+        <span class="cref">${escapeHtml(shown)}</span>
         ${e.note ? `<span class="cnote">${escapeHtml(e.note)}</span>` : ""}
         ${e.note_error ? `<span class="cbad">${escapeHtml(e.note_error)}</span>` : ""}
         <span class="cx" data-remove="${escapeHtml(e.ref)}" title="Remove from this collection">✕</span>
-      </div>` + (e.child ? `<div class="cnest">${collectionHTML(e.child, true)}</div>` : "");
+      </div>` + (e.child && isOpen
+        ? `<div class="cnest">${collectionHTML(e.child, true)}</div>` : "");
   }).join("");
   return `${head}<div class="ctree">${rows}</div>`;
 }
 
 function wireCollection() {
   const area = $("itemArea");
+  area.querySelectorAll("[data-open]").forEach((el) => {
+    el.onclick = (ev) => {
+      ev.stopPropagation();
+      const key = el.getAttribute("data-open");
+      entryOpen[key] = entryOpen[key] === false;
+      showCollection(openCollection, { push: false });
+    };
+  });
+  area.querySelectorAll(".crumb").forEach((el) => {
+    el.onclick = () => showCollection(el.getAttribute("data-crumb"));
+  });
   area.querySelectorAll("[data-goto]").forEach((el) => {
+    const kind = el.getAttribute("data-goto");
+    const target = el.getAttribute("data-target") || "";
     el.onclick = (ev) => {
       if (ev.target.getAttribute("data-remove") !== null) return;
-      const kind = el.getAttribute("data-goto");
-      if (kind === "collection") { showCollection(el.getAttribute("data-target")); return; }
-      const target = el.getAttribute("data-target") || "";
+      if (kind === "collection") {
+        // Expand in place: descending into a folder loses the parent
+        // context, which is rarely what a click means.
+        const key = el.getAttribute("data-openkey");
+        entryOpen[key] = entryOpen[key] === false;
+        showCollection(openCollection, { push: false });
+        return;
+      }
+      // Stay in the collection: selecting shows the file's properties in
+      // the detail bar and panels, without swapping the whole view.
       const [runId, filename] = target.split("/");
-      gotoRunId(runId, filename);
+      if (kind === "file") selectFromCollection(runId, filename, el);
+      else if (kind === "session") gotoRunId(runId);
+    };
+    el.ondblclick = () => {
+      if (kind === "file") {
+        const path = el.getAttribute("data-path");
+        if (path) call("open_path", { path });
+      } else if (kind === "session") {
+        gotoRunId(target);
+      } else if (kind === "collection") {
+        showCollection(target);          // open it on its own, with breadcrumbs
+      }
+    };
+  });
+  area.oncontextmenu = (ev) => {
+    if (ev.target.closest(".crow")) return;      // the row's own menu wins
+    ev.preventDefault();
+    showMenu(ev.clientX, ev.clientY, [
+      { head: openCollection },
+      { label: "New folder here…", action: () => newNestedCollection(openCollection) },
+      { label: "Add selected file(s)…", disabled: !selectedRefs().length,
+        action: () => openCollectionPicker(selectedRefs(),
+          picked.length > 1 ? `${picked.length} files` : (selected && selected.name)) },
+    ]);
+  };
+  area.querySelectorAll("[data-dragref]").forEach((el) => {
+    el.onpointerdown = (ev) => {
+      if (ev.target.closest(".cx, .etw")) return;      // buttons keep working
+      const ref = el.getAttribute("data-dragref");
+      const label = el.querySelector(".cref").textContent;
+      startEntryDrag(ev, { ref, label, from: openCollection });
     };
   });
   area.querySelectorAll(".crow").forEach((el) => {
@@ -470,6 +618,25 @@ function wireCollection() {
       }
     };
   });
+}
+
+// Select a file that lives elsewhere, without leaving this view.
+async function selectFromCollection(runId, filename, row) {
+  const s = sessions.find((x) => x.run_id === runId);
+  if (!s) { toast(`${runId} is not in this archive view.`); return; }
+  try {
+    const item = await call("get_item", { session_path: s.path, filename, run_id: runId });
+    selected = item;
+    selectedIsSidecar = false;
+    picked = [item];
+    updateDetails();
+    if (showSc && item.has_sidecar) openSidecarPanel(item);
+    refreshSessionInfo();          // the panel follows the file's own session
+    $("itemArea").querySelectorAll(".crow.on").forEach((n) => n.classList.remove("on"));
+    if (row) row.classList.add("on");
+  } catch (e) {
+    toast(`Could not read ${filename}: ${e}`);
+  }
 }
 
 // Follow a collection entry back into the archive proper.
@@ -873,6 +1040,7 @@ function selectItem(it, isSc, ev) {
   if (showSc && selected && selected.has_sidecar && picked.length === 1) {
     openSidecarPanel(selected);
   }
+  if (showSess && selected && selected.session_path) refreshSessionInfo();
 }
 function activate(it, isSc) {
   selectItem(it, isSc);
@@ -1186,6 +1354,66 @@ function renderSidecarPanel() {
       updateDetails();
     });
   }
+}
+
+// ---- dragging entries between collections -------------------------------
+// Pointer events rather than HTML5 drag-and-drop: the webview's file-drop
+// handler (what powers importing) interferes with in-page DnD, and this
+// works the same on every platform.
+let dragState = null;
+
+function startEntryDrag(ev, { ref, label, from }) {
+  if (ev.button !== 0) return;
+  const startX = ev.clientX, startY = ev.clientY;
+  dragState = { ref, label, from, active: false, target: null };
+
+  const move = (e) => {
+    if (!dragState) return;
+    if (!dragState.active) {
+      if (Math.hypot(e.clientX - startX, e.clientY - startY) < 5) return;
+      dragState.active = true;
+      const ghost = document.createElement("div");
+      ghost.className = "drag-ghost";
+      ghost.textContent = dragState.label;
+      document.body.appendChild(ghost);
+      dragState.ghost = ghost;
+      document.body.classList.add("dragging-entry");
+    }
+    dragState.ghost.style.left = `${e.clientX + 12}px`;
+    dragState.ghost.style.top = `${e.clientY + 12}px`;
+
+    document.querySelectorAll(".drop-target").forEach((n) => n.classList.remove("drop-target"));
+    const under = document.elementFromPoint(e.clientX, e.clientY);
+    const target = under && under.closest("[data-drop-collection]");
+    dragState.target = target ? target.getAttribute("data-drop-collection") : null;
+    if (target && dragState.target !== dragState.from) target.classList.add("drop-target");
+  };
+
+  const up = async () => {
+    document.removeEventListener("pointermove", move);
+    document.removeEventListener("pointerup", up);
+    document.querySelectorAll(".drop-target").forEach((n) => n.classList.remove("drop-target"));
+    document.body.classList.remove("dragging-entry");
+    const state = dragState;
+    dragState = null;
+    if (state && state.ghost) state.ghost.remove();
+    if (!state || !state.active || !state.target || state.target === state.from) return;
+
+    try {
+      await call("collection_move", {
+        archive, from: state.from, to: state.target, refs: [state.ref],
+      });
+      toast(`Moved ${state.label} to ${state.target}`);
+      await loadCollections();
+      if (openCollection) await showCollection(openCollection, { push: false });
+    } catch (e) {
+      // A cycle or duplicate: nothing was removed, so the entry is intact.
+      toast(`${e}`);
+    }
+  };
+
+  document.addEventListener("pointermove", move);
+  document.addEventListener("pointerup", up);
 }
 
 // ---- context menus ------------------------------------------------------
@@ -1866,10 +2094,20 @@ async function gotoArtifact(sessionPath, filename) {
 }
 
 // ---- session info panel -------------------------------------------------
+// Which session the info panel describes: the selected artefact's own,
+// when it has one (collection and search results span sessions), else the
+// session being browsed.
+function panelSessionPath() {
+  if (selected && selected.session_path) return selected.session_path;
+  return curSession ? curSession.path : null;
+}
+
 async function refreshSessionInfo() {
   if (!showSess) return;
-  if (!curSession) { sessInfo = null; renderSessionPanel(); return; }
-  sessInfo = await call("session_info", { session_path: curSession.path });
+  const path = panelSessionPath();
+  if (!path) { sessInfo = null; renderSessionPanel(); return; }
+  sessInfo = await call("session_info", { session_path: path });
+  sessNotes = null;                 // the draft belonged to the previous session
   renderSessionPanel();
 }
 

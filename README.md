@@ -495,7 +495,7 @@ nebula stale <archive> [--hours N]                 # find abandoned "open" sessi
 nebula archives                                    # list registered archives
 nebula register <name> <root> [--git-org ORG] [--user WHO]
 nebula whoami [--set NAME]                         # your name in nebula:// URIs
-nebula collection <archive> list|show|new|rm|add|remove
+nebula collection <archive> list|show|new|rm|add|remove   # move() in the API
 nebula view <archive> list|save|run|rm             # saved searches
                                                    # (alias: nebula saved-search)
 nebula config <archive> [--capture-code B] [--max-file-bytes N] [--on-overwrite P]

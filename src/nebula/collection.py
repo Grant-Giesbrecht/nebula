@@ -269,6 +269,27 @@ def remove(archive_root, name: str, ref: str) -> Collection:
     return coll
 
 
+def move(archive_root, src: str, dst: str, ref: str, *, note: str = "") -> None:
+    """Move one entry from one collection to another.
+
+    Adds first, then removes: if the add is refused (a cycle, a duplicate)
+    nothing has been lost, and if the remove somehow fails the entry is in
+    both places -- visible and fixable -- rather than gone. Collections are
+    pointer lists, so neither step touches the thing being moved.
+    """
+    src, dst = clean_name(src), clean_name(dst)
+    if src == dst:
+        return
+    note = note or next((e.note for e in _require(archive_root, src).entries
+                         if e.kind != "invalid" and format_ref(e.parsed) == format_ref(parse_ref(ref))),
+                        "")
+    add(archive_root, dst, ref, note=note)
+    try:
+        remove(archive_root, src, ref)
+    except CollectionError:
+        pass          # already gone from the source; the add is what matters
+
+
 def _reaches(archive_root, start: str, target: str, _seen=None) -> bool:
     """True if collection `start` contains `target`, at any depth."""
     _seen = _seen or set()

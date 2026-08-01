@@ -37,6 +37,9 @@
 }
 
 * { box-sizing: border-box; }
+/* Utility. Several element-specific ".x.hidden" rules predate this; without
+   a generic one, toggling "hidden" on anything else silently did nothing. */
+.hidden { display: none !important; }
 html, body { height: 100%; margin: 0; }
 body {
   font-family: var(--ui); color: var(--text); background: var(--bg); font-size: 13px;
@@ -149,6 +152,10 @@ body {
                font-weight:500; font-family:var(--ui); font-size:12.5px; white-space:nowrap; flex:0 0 auto; }
 .tbtn { white-space:nowrap; }
 .toolbar { overflow-x:auto; }
+/* Nothing in the toolbar may shrink: squeezed buttons overlap their own
+   highlight. The row scrolls instead. */
+.toolbar > * { flex: 0 0 auto; }
+.toolbar .spacer { flex: 1 1 auto; min-width: 8px; }
 .btn-primary:hover { border-color:var(--accent); color:var(--accent); }
 
 .item-area { flex:1; overflow:auto; min-height:0; }
@@ -475,3 +482,35 @@ body.resizing *, body.resizing-y * { pointer-events:none; }
                  color:var(--text-faint); padding:4px 10px 2px; }
 tbody tr.multi { background:var(--sel-bg); }
 .det-count { font-size:12px; color:var(--accent); font-weight:600; }
+
+/* collection tree in the rail */
+.citem .tw { flex:0 0 12px; color:var(--text-faint); font-size:10px; cursor:pointer;
+             text-align:center; user-select:none; }
+.citem .tw:hover { color:var(--text); }
+.citem .tw.empty { cursor:default; }
+
+/* collection view: breadcrumbs + selected row */
+.crumbs { display:flex; align-items:center; gap:6px; padding:10px 14px 0; flex-wrap:wrap; }
+.crumb { font-size:12px; color:var(--accent); cursor:pointer; }
+.crumb:hover { text-decoration:underline; }
+.crumb.here { color:var(--text); font-weight:600; cursor:default; }
+.crumb.here:hover { text-decoration:none; }
+.crumbs .sep { color:var(--text-faint); font-size:12px; }
+.crow.on { background:var(--sel-bg); box-shadow:inset 3px 0 0 var(--sel); }
+
+/* dragging entries between collections */
+.drag-ghost { position:fixed; z-index:90; pointer-events:none; background:var(--panel);
+              border:1px solid var(--accent); border-radius:6px; padding:3px 9px;
+              font-family:var(--mono); font-size:11.5px; color:var(--accent);
+              box-shadow:var(--shadow); }
+body.dragging-entry { cursor:grabbing; user-select:none; }
+.drop-target { outline:2px solid var(--accent); outline-offset:-2px; border-radius:7px;
+               background:var(--accent-soft) !important; }
+.citem .tw { flex:0 0 18px; height:18px; display:inline-flex; align-items:center;
+             justify-content:center; color:var(--text-faint); cursor:pointer;
+             border-radius:4px; }
+.citem .tw:hover { background:rgba(128,140,160,.20); color:var(--text); }
+.crow .etw { flex:0 0 18px; height:18px; display:inline-flex; align-items:center;
+             justify-content:center; color:var(--text-faint); cursor:pointer; border-radius:4px; }
+.crow .etw:hover { background:rgba(128,140,160,.20); color:var(--text); }
+.crow .etw.empty, .citem .tw.empty { cursor:default; }
