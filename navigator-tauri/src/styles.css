@@ -431,11 +431,11 @@ body.resizing *, body.resizing-y * { pointer-events:none; }
 .rtab.on { background:var(--accent-soft); color:var(--accent); }
 .rail-pane { display:flex; flex-direction:column; min-height:0; flex:1; }
 .rail-pane.hidden { display:none; }
-.rail-list { overflow-y:auto; padding:2px 8px 10px; display:flex; flex-direction:column; gap:2px; }
+.rail-list { overflow-y:auto; padding:2px 8px 10px; display:flex; flex-direction:column; gap:0; }
 .rail-head .open-link { cursor:pointer; color:var(--accent); letter-spacing:0;
                         text-transform:none; font-weight:600; }
-.citem { display:flex; align-items:baseline; gap:8px; padding:7px 9px; border-radius:7px;
-         cursor:pointer; }
+.citem { display:flex; align-items:center; gap:7px; padding:3px 9px; border-radius:6px;
+         cursor:pointer; user-select:none; }
 .citem:hover { background:rgba(128,140,160,.10); }
 .citem.sel { background:var(--sel-bg); }
 .citem .cname { flex:1; min-width:0; font-size:12.5px; font-weight:600;
@@ -450,7 +450,7 @@ body.resizing *, body.resizing-y * { pointer-events:none; }
 .ctree-head .t { font-size:15px; font-weight:700; }
 .ctree-head .d { font-size:12.5px; color:var(--text-dim); }
 .crow { display:flex; align-items:center; gap:8px; padding:2px 8px; border-radius:5px;
-        line-height:1.35; }
+        line-height:1.35; user-select:none; }
 .crow.go { cursor:pointer; }
 .crow.go:hover { background:rgba(128,140,160,.10); }
 .crow .ckind { font-size:10px; font-weight:700; text-transform:uppercase; letter-spacing:.05em;
@@ -465,6 +465,10 @@ body.resizing *, body.resizing-y * { pointer-events:none; }
 .crow .cx:hover { color:var(--err); }
 .cnest { margin-left:16px; border-left:1px solid var(--border); padding-left:8px;
          display:flex; flex-direction:column; }
+/* A nested level renders another .ctree; without this its padding is
+   added again at every depth, which is the gap that grows as you nest. */
+.cnest .ctree { padding:0; }
+.cnest .ctree-head { display:none; }
 .chip.coll { background:var(--accent-soft); color:var(--accent); }
 
 /* right-click menu */
@@ -520,3 +524,8 @@ body.dragging-entry { cursor:grabbing; user-select:none; }
 .dbtn.tiny { height:22px; padding:0 9px; font-size:11.5px; }
 .ctree-head .t { margin-right:auto; }
 .crow .cref { line-height:1.35; }
+
+.head-tools { display:flex; gap:8px; margin-left:auto; margin-right:8px; }
+.head-tools .open-link { font-size:10.5px; }
+.rail-head { align-items:center; }
+.citem .ctitle { font-size:11px; }

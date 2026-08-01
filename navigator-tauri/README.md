@@ -100,11 +100,12 @@ Other things worth knowing about the window:
 - The rail, the right-hand dock, and the split between the two docked
   panels are all **draggable**.
 - The rail has three tabs: **Sessions**, **Collections** and **Searches**.
-  Collections show their free-form **title** (with the storable name
-  beneath): type "Research project 2026: 3" and it is stored under the slug
-  `research-project-2026-3`, since ':' is illegal in a Windows filename.
-  Renaming edits the title; renaming the underlying name rewrites every
-  parent's ref so a folder is never orphaned.
+  Collection names are permissive — spaces, parentheses, `#`, `&` are all
+  fine, and the name *is* the filename and the ref segment. Banned:
+  `/ \ | : * ? " < >` (path/ref separators and characters Windows rejects),
+  trailing dots, and reserved device names. **Renaming** renames for real:
+  the file moves and every `collections/<old>` ref is rewritten, so a folder
+  is never orphaned and no old name lingers.
   Collections render as a **tree**: only collections nothing else contains
   are roots, and a nested one appears under its parent behind a twisty
   (expansion is remembered). Opening one shows its entries in the main area

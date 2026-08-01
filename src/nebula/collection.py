@@ -51,11 +51,21 @@ from nebula.refs import COLLECTIONS_SEGMENT, Ref, format_ref, parse_ref
 COLLECTIONS_DIR = "collections"
 VERSION = 1
 
-#: A collection's *name* becomes a filename and a URI segment, so it stays
-#: conservative: no spaces, no ':' (illegal in Windows filenames), nothing
-#: that would need escaping in a ref. Anything you actually want to read --
-#: "Research project 2026: 3" -- goes in `title`, which is free text.
-_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
+#: A collection's name is both its filename and a ref segment
+#: ("collections/<name>", which is how nesting is stored), so it is the one
+#: string that has to survive a filesystem and a ref parser. Spaces and most
+#: punctuation are fine; these are not:
+#:
+#:   /  \  |   ref and path separators
+#:   :        illegal in Windows filenames (and the classic Mac separator)
+#:   * ? " < >  illegal in Windows filenames
+#:
+#: Windows also strips trailing dots and spaces, and reserves a handful of
+#: device names, so those are rejected rather than silently mangled.
+_ILLEGAL = set('/\\|:*?"<>')
+_RESERVED = {"CON", "PRN", "AUX", "NUL",
+             *(f"COM{i}" for i in range(1, 10)),
+             *(f"LPT{i}" for i in range(1, 10))}
 
 
 class CollectionError(ValueError):
@@ -63,28 +73,39 @@ class CollectionError(ValueError):
 
 
 def slugify(display: str) -> str:
-    """A storable name derived from a human one.
+    """Coerce a string into a usable collection name.
 
-        "Research project 2026: 3"  ->  "research-project-2026-3"
-
-    Keeps the free-form string for `title` and the safe one for the file,
-    so an archive stays portable (Windows rejects ':' outright) without
-    making the user type in kebab-case.
+    Names are permissive now, so this only has to remove what clean_name
+    rejects -- it is a fallback for text arriving from elsewhere, not
+    something the user should have to think about.
     """
-    text = (display or "").strip().lower()
-    text = re.sub(r"[^a-z0-9._-]+", "-", text).strip("-.")
-    text = re.sub(r"-{2,}", "-", text)
-    if not text or not text[0].isalnum():
-        text = f"c-{text}".strip("-") if text else "collection"
-    return text[:64]
+    text = (display or "").strip()
+    for ch in _ILLEGAL:
+        text = text.replace(ch, "-")
+    text = "".join(c for c in text if ord(c) >= 32).strip().rstrip(".")
+    text = re.sub(r"\s{2,}", " ", text)
+    if not text or text.split(".")[0].upper() in _RESERVED:
+        text = f"{text}-collection".strip("-") if text else "collection"
+    return text[:120]
 
 
 def clean_name(name: str) -> str:
+    """Validate a collection name, or explain exactly what is wrong with it."""
     value = (name or "").strip()
-    if not _NAME_RE.match(value):
+    if not value:
+        raise CollectionError("a collection needs a name")
+    bad = sorted(_ILLEGAL & set(value))
+    if bad:
         raise CollectionError(
-            f"invalid collection name {name!r}: use letters, digits, '.', '-' "
-            f"and '_', starting with a letter or digit")
+            f"collection names cannot contain {' '.join(repr(c) for c in bad)}: {name!r}")
+    if any(ord(c) < 32 for c in value):
+        raise CollectionError(f"collection names cannot contain control characters: {name!r}")
+    if value.endswith("."):
+        raise CollectionError(f"collection names cannot end with '.': {name!r}")
+    if value.split(".")[0].upper() in _RESERVED:
+        raise CollectionError(f"{value!r} is a reserved filename on Windows")
+    if len(value) > 120:
+        raise CollectionError("collection name is too long (120 characters max)")
     return value
 
 
@@ -322,6 +343,12 @@ def rename(archive_root, old: str, new: Optional[str] = None, *,
     coll = _require(archive_root, old)
     if title is not None:
         coll.title = title.strip()
+
+    if new and clean_name(new) != coll.name and title is None:
+        # A real rename supersedes any leftover alias. Collections are a
+        # scratch organisational tool -- carrying an old name around only
+        # produces the "why does this have two names?" confusion.
+        coll.title = ""
 
     if new and clean_name(new) != coll.name:
         new = clean_name(new)

@@ -403,8 +403,7 @@ function collectionRowsHTML(name, depth, ancestors) {
          data-drop-collection="${escapeHtml(name)}"
          style="padding-left:${6 + depth * 14}px">
       ${twisty}
-      <span class="cname">${escapeHtml(c.title || c.name)}
-        ${c.title ? `<span class="ctitle">${escapeHtml(c.name)}</span>` : ""}</span>
+      <span class="cname">${escapeHtml(c.name)}</span>
       <span class="ccount">${c.n_entries}</span>
     </div>`;
   if (open) {
@@ -414,9 +413,18 @@ function collectionRowsHTML(name, depth, ancestors) {
 }
 
 // The readable name: a free-form title when set, else the storable one.
+// Files and names are kept in sync, so a collection is shown by its name;
+// `title` survives as an optional one-line description.
 function collLabel(name) {
-  const c = collTree.byName[name] || collections.find((x) => x.name === name);
-  return (c && c.title) || name;
+  return name;
+}
+
+function setAllRail(open) {
+  for (const c of collections) {
+    if ((c.children || []).length) collExpanded[c.name] = open;
+  }
+  LS.set("nebula.collOpen", collExpanded);
+  renderCollections();
 }
 
 function parentOf(name) {
@@ -432,6 +440,14 @@ function renderCollections() {
   }
   $("collList").innerHTML = collTree.roots
     .map((name) => collectionRowsHTML(name, 0, [])).join("");
+  const hasKids = collections.some((c) => (c.children || []).length);
+  $("collTreeTools").innerHTML = hasKids
+    ? `<span class="open-link" id="railExpandAll">expand all</span>
+       <span class="open-link" id="railCollapseAll">collapse all</span>` : "";
+  if (hasKids) {
+    $("railExpandAll").onclick = () => setAllRail(true);
+    $("railCollapseAll").onclick = () => setAllRail(false);
+  }
 
   $("collList").querySelectorAll(".citem[data-name]").forEach((el) => {
     const name = el.getAttribute("data-name");
@@ -492,9 +508,10 @@ function collectionHTML(node, nested) {
         + `${escapeHtml(collLabel(n))}</span>`).join("") + `</div>`
     : "";
   const anyFolders = (node.entries || []).some((e) => e.kind === "collection" && e.child);
-  const head = nested ? "" : `${crumbs}<div class="ctree-head">
-      <span class="t">${escapeHtml(node.title || node.name)}</span>
-      ${node.description ? `<span class="d">${escapeHtml(node.description)}</span>` : ""}
+  const head = nested ? "" : `${crumbs}<div class="ctree-head" data-drop-collection="${escapeHtml(node.name)}">
+      <span class="t">${escapeHtml(node.name)}</span>
+      ${node.title || node.description
+        ? `<span class="d">${escapeHtml(node.title || node.description)}</span>` : ""}
       ${anyFolders ? `<button class="dbtn ghost tiny" id="collExpandAll">Expand all</button>
         <button class="dbtn ghost tiny" id="collCollapseAll">Collapse all</button>` : ""}
     </div>`;
@@ -530,7 +547,8 @@ function collectionHTML(node, nested) {
       : `<span class="etw empty"></span>`;
     const dropAttr = e.kind === "collection" && e.exists
       ? ` data-drop-collection="${escapeHtml(e.target || "")}"` : "";
-    return `<div class="crow ${cls} ${go ? "go" : ""}" ${attrs}${dropAttr} data-dragref="${escapeHtml(e.ref)}">
+    return `<div class="crow ${cls} ${go ? "go" : ""}" ${attrs}${dropAttr}
+        data-dragref="${escapeHtml(e.ref)}" data-owner="${escapeHtml(node.name)}">
         ${tw}
         <span class="ckind">${escapeHtml(kindLabel)}</span>
         <span class="cref">${escapeHtml(shown)}</span>
@@ -540,7 +558,7 @@ function collectionHTML(node, nested) {
       </div>` + (e.child && isOpen
         ? `<div class="cnest">${collectionHTML(e.child, true)}</div>` : "");
   }).join("");
-  return `${head}<div class="ctree">${rows}</div>`;
+  return `${head}<div class="ctree"${nested ? "" : ` data-drop-collection="${escapeHtml(node.name)}"`}>${rows}</div>`;
 }
 
 function wireCollection() {
@@ -605,9 +623,12 @@ function wireCollection() {
   area.querySelectorAll("[data-dragref]").forEach((el) => {
     el.onpointerdown = (ev) => {
       if (ev.target.closest(".cx, .etw")) return;      // buttons keep working
+      // `from` is the collection the row lives in, which for a nested row
+      // is the child -- not whatever is open at the top.
+      ev.preventDefault();                       // no text selection while dragging
       const ref = el.getAttribute("data-dragref");
       const label = el.querySelector(".cref").textContent;
-      startEntryDrag(ev, { ref, label, from: openCollection });
+      startEntryDrag(ev, { ref, label, from: el.getAttribute("data-owner") || openCollection });
     };
   });
   area.querySelectorAll(".crow").forEach((el) => {
@@ -1552,36 +1573,41 @@ async function newNestedCollection(parent) {
 // stays portable (spaces and ':' are fine to read, not to put in filenames).
 async function newCollection(parent) {
   const label = parent ? `New folder inside ${collLabel(parent)}` : "New collection";
-  const title = await promptName(label, "");
-  if (!title) return;
+  const name = await promptName(label, "");
+  if (!name) return;
   try {
-    const { slug } = await call("slugify", { text: title });
-    await call("create_collection", { archive, name: slug, title });
+    await call("create_collection", { archive, name });
     if (parent) {
-      await call("collection_add", { archive, name: parent, refs: [`collections/${slug}`] });
+      await call("collection_add", { archive, name: parent, refs: [`collections/${name}`] });
     }
     await loadCollections();
-    await showCollection(parent || slug, { push: !parent });
-    toast(parent ? `Created ${title} inside ${collLabel(parent)}` : `Created ${title}`);
+    await showCollection(parent || name, { push: !parent });
+    toast(parent ? `Created ${name} inside ${parent}` : `Created ${name}`);
   } catch (e) {
     toast(`${e}`);
   }
 }
 
-// Renaming edits the readable title by default. The storable name only
-// changes when the title has no usable slug yet, since renaming it rewrites
-// every parent's ref.
+// Renaming changes the real name -- the filename and every
+// "collections/<old>" ref that pointed at it. A collection is a scratch
+// organisational tool; keeping an old name around would only confuse.
 async function renameCollection(name) {
-  const current = collLabel(name);
-  const next = await promptName("Rename collection", current);
-  if (!next || next === current) return;
+  const next = await promptName("Rename collection", name);
+  if (!next || next === name) return;
   try {
-    await call("rename_collection", { archive, name, title: next });
+    await call("rename_collection", { archive, name, new: next });
+    if (openCollection === name) openCollection = next;
+    collPath = collPath.map((n) => (n === name ? next : n));
+    if (collExpanded[name] !== undefined) {
+      collExpanded[next] = collExpanded[name];
+      delete collExpanded[name];
+      LS.set("nebula.collOpen", collExpanded);
+    }
     await loadCollections();
-    if (openCollection === name) await showCollection(name, { push: false });
+    if (openCollection) await showCollection(openCollection, { push: false });
     toast(`Renamed to ${next}`);
   } catch (e) {
-    toast(`${e}`);
+    toast(`${e}`);       // e.g. a ':' in the name, or the name is taken
   }
 }
 

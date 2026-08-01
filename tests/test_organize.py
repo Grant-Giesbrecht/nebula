@@ -306,7 +306,7 @@ def test_containing_is_the_reverse_lookup(tmp_path):
     assert C.containing(archive, f"{sessions[1].id}/file1.tome") == []
 
 
-@pytest.mark.parametrize("bad", ["", "  ", "has space", "has/slash", "-leading"])
+@pytest.mark.parametrize("bad", ["", "  ", "has/slash"])
 def test_collection_names_are_validated(bad):
     with pytest.raises(C.CollectionError):
         C.clean_name(bad)
@@ -477,37 +477,57 @@ def test_collection_move_to_itself_is_a_noop(tmp_path):
     assert [e.ref for e in C.read(archive, "c").entries] == [ref]
 
 
-@pytest.mark.parametrize("display,slug", [
-    ("Research project 2026: 3", "research-project-2026-3"),
-    ("Paper figures (final)", "paper-figures-final"),
-    ("  spaced  out  ", "spaced-out"),
-    ("2026", "2026"),
-    ("!!!", "collection"),          # nothing usable left
+@pytest.mark.parametrize("name", [
+    "Research project 2026 (3)", "my folder", "2026 #4 & more", "a.b-c_d", "Ünïcode",
 ])
-def test_slugify(display, slug):
-    assert C.slugify(display) == slug
-
-
-def test_free_form_title_with_a_portable_name(tmp_path):
-    """A ':' is illegal in a Windows filename, so the readable name lives in
-    `title` and the file keeps a portable slug."""
+def test_collection_names_are_permissive(name, tmp_path):
+    """Spaces and most punctuation are fine: the name is the filename and
+    the ref segment, and neither minds them."""
     archive, _ = _archive(tmp_path)
-    title = "Research project 2026: 3"
-    coll = C.create(archive, C.slugify(title), title=title)
-    assert coll.name == "research-project-2026-3"
-    assert C.path_for(archive, coll.name).is_file()
-    assert C.read(archive, coll.name).title == title
+    coll = C.create(archive, name)
+    assert coll.name == name
+    assert C.path_for(archive, name).is_file()
+    assert C.read(archive, name) is not None
 
 
-def test_rename_retitles_without_touching_refs(tmp_path):
+@pytest.mark.parametrize("bad,why", [
+    ("has:colon", "':'"),          # illegal in a Windows filename
+    ("has/slash", "'/'"),          # path and ref separator
+    ("has|pipe", "'|'"),           # archive separator in a ref
+    ('quote"mark', '\'"\''),
+    ("q*", "'*'"),
+    ("ends.", "'.'"),
+    ("CON", "reserved"),
+])
+def test_collection_names_reject_the_unportable(bad, why, tmp_path):
     archive, _ = _archive(tmp_path)
-    C.create(archive, "child")
+    with pytest.raises(C.CollectionError) as e:
+        C.create(archive, bad)
+    assert why in str(e.value)
+
+
+def test_a_name_with_spaces_round_trips_through_a_ref(tmp_path):
+    """Nesting stores 'collections/<name>', so a permissive name has to
+    survive the ref parser too."""
+    archive, _ = _archive(tmp_path)
+    C.create(archive, "my folder")
     C.create(archive, "parent")
-    C.add(archive, "parent", "collections/child")
+    C.add(archive, "parent", "collections/my folder")
 
-    C.rename(archive, "child", title="A nicer name: 2")
-    assert C.read(archive, "child").title == "A nicer name: 2"
-    assert [e.ref for e in C.read(archive, "parent").entries] == ["collections/child"]
+    entry = C.read(archive, "parent").entries[0]
+    assert entry.kind == "collection"
+    assert entry.parsed.collection == "my folder"
+    assert C.tree(archive, "parent")["entries"][0]["exists"] is True
+
+
+def test_rename_moves_the_file_and_leaves_no_old_name(tmp_path):
+    """Renaming is a real rename: no title alias, no leftover file."""
+    archive, _ = _archive(tmp_path)
+    C.create(archive, "old name")
+    C.rename(archive, "old name", "new name")
+    assert not C.path_for(archive, "old name").exists()
+    assert C.path_for(archive, "new name").is_file()
+    assert C.list_names(archive) == ["new name"]
 
 
 def test_rename_updates_every_parent_ref(tmp_path):
@@ -533,3 +553,23 @@ def test_rename_refuses_an_existing_name(tmp_path):
     with pytest.raises(C.CollectionError):
         C.rename(archive, "a", "b")
     assert C.path_for(archive, "a").is_file()
+
+
+def test_rename_clears_a_stale_alias(tmp_path):
+    """Collections carry no history: renaming supersedes any old title, so
+    one collection never shows two names."""
+    archive, _ = _archive(tmp_path)
+    C.create(archive, "idk", title="root-collection")
+    C.rename(archive, "idk", "root-collection")
+
+    coll = C.read(archive, "root-collection")
+    assert coll.name == "root-collection" and coll.title == ""
+    assert C.list_names(archive) == ["root-collection"]
+
+
+def test_retitling_on_its_own_still_works(tmp_path):
+    archive, _ = _archive(tmp_path)
+    C.create(archive, "c", title="first")
+    C.rename(archive, "c", title="second")
+    assert C.read(archive, "c").title == "second"
+    assert C.read(archive, "c").name == "c"

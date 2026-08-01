@@ -352,7 +352,7 @@ entries:
   - ref: S-26-0031/raw.tome
     note: the good warm-up run
   - ref: S-26-0034
-  - ref: collections/rp23d-campaign
+  - ref: collections/rp23d-campaign      # names may contain spaces
   - ref: nebula://kai@lab/shared/S-26-0002/cal.json
 ```
 
