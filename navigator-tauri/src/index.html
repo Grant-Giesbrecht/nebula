@@ -49,7 +49,7 @@
 
       <section class="main">
         <div class="toolbar">
-          <button class="tbtn" id="refresh" title="Refresh">
+          <button class="tbtn" id="refresh" title="Reload archive &amp; session info  (Ctrl-R)">
             <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12a9 9 0 1 1-2.64-6.36"/><path d="M21 4v5h-5"/></svg>
           </button>
           <div class="seg">
@@ -64,12 +64,12 @@
           <label class="check"><input type="checkbox" id="verify" /> Verify checksums</label>
           <label class="check"><input type="checkbox" id="meta" checked /> Show metadata</label>
           <div class="vdiv"></div>
-          <button class="tbtn" id="sessInfoBtn" title="Session info (session.yaml)">
+          <button class="tbtn" id="sessInfoBtn" title="Session info — session.yaml  (Ctrl-Shift-S)">
             <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><line x1="12" y1="11" x2="12" y2="16"/><line x1="12" y1="8" x2="12.01" y2="8"/></svg>
             Session info
           </button>
           <div class="spacer"></div>
-          <button class="btn-primary" id="importBtn">
+          <button class="btn-primary" id="importBtn" title="Import files…  (Ctrl-Shift-I)">
             <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>
             Import files…
           </button>
@@ -85,13 +85,14 @@
           <div class="pop right hidden" id="itemCfg">
           <div class="pop-h">Search in</div>
           <label class="check"><input type="checkbox" id="ifName" checked /> Filenames</label>
-          <label class="check"><input type="checkbox" id="ifTag" checked /> Tags <span class="hint">(of the session)</span></label>
+          <label class="check"><input type="checkbox" id="ifTag" checked /> Session Tags </label>
           <label class="check"><input type="checkbox" id="ifOrigin" checked /> Origin / source</label>
           <label class="check"><input type="checkbox" id="ifSession" checked /> Session ID &amp; title</label>
           <div class="pop-h">Created between</div>
-          <div class="pop-dates">
-            <div class="field"><label>From</label><input type="date" id="ifFrom" /></div>
-            <div class="field"><label>To</label><input type="date" id="ifTo" /></div>
+          <label class="check"><input type="checkbox" id="ifDates" /> Filter by date</label>
+          <div class="pop-dates" id="ifDateFields">
+            <div class="field"><label>From</label><input id="ifFrom" placeholder="YYYY/MM/DD" spellcheck="false" /></div>
+            <div class="field"><label>To</label><input id="ifTo" placeholder="YYYY/MM/DD" spellcheck="false" /></div>
           </div>
           <div class="pop-actions"><button class="dbtn ghost" id="ifReset">Reset dates</button></div>
           </div>
@@ -101,11 +102,11 @@
 
         <div class="details">
           <div class="det-actions">
-            <button class="lbtn" id="openArt" disabled>
+            <button class="lbtn" id="openArt" title="Open in the default app  (Ctrl-O)" disabled>
               <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/><polyline points="15 3 21 3 21 9"/><line x1="10" y1="14" x2="21" y2="3"/></svg>
               Open artefact
             </button>
-            <button class="lbtn" id="openSc" disabled>
+            <button class="lbtn" id="openSc" title="Show the sidecar panel  (Ctrl-Shift-M)" disabled>
               <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><line x1="12" y1="16" x2="12" y2="12"/><line x1="12" y1="8" x2="12.01" y2="8"/></svg>
               Open sidecar
             </button>

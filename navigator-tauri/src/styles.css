@@ -107,7 +107,12 @@ body {
 .pop-dates { display:flex; gap:8px; }
 .pop-dates .field { flex:1; }
 .pop-dates input { height:28px; font-size:12.5px; border:1px solid var(--border-strong); border-radius:6px;
-                   background:var(--panel); color:var(--text); padding:0 6px; font-family:var(--ui); }
+                   background:var(--panel); color:var(--text); padding:0 6px; font-family:var(--mono);
+                   width:100%; min-width:0; }
+.pop-dates input:focus { outline:2px solid var(--accent); outline-offset:-1px; border-color:var(--accent); }
+.pop-dates input.bad { border-color:var(--err); background:var(--err-bg); }
+.pop-dates.off { opacity:.45; }
+.pop-dates.off input { cursor:not-allowed; }
 .pop-actions { display:flex; justify-content:flex-end; margin-top:9px; }
 .pop-actions .dbtn { height:26px; padding:0 10px; font-size:12px; }
 .session { display:flex; gap:9px; align-items:flex-start; padding:8px 9px; border-radius:7px; cursor:pointer; }
@@ -234,6 +239,20 @@ tr.sidecar .fname { font-family:var(--mono); font-size:12px; }
 .kv .v .link { color:var(--accent); cursor:pointer; }
 .kv .v .link:hover { text-decoration:underline; }
 .warn-text { color:var(--warn); font-weight:600; }
+.ok-text { color:var(--ok); font-weight:600; }
+
+/* lineage rows: ← derived from / → used by */
+.ln-h { font-size:11px; color:var(--text-faint); font-weight:600; margin:6px 0 3px; }
+.ln { display:flex; align-items:baseline; gap:7px; padding:3px 6px; border-radius:6px;
+      font-size:12.5px; }
+.ln.go { cursor:pointer; }
+.ln.go:hover { background:var(--accent-soft); }
+.ln.go .ln-name { color:var(--accent); }
+.ln-arrow { flex:0 0 auto; color:var(--text-faint); font-size:13px; }
+.ln-name { font-family:var(--mono); font-size:11.5px; overflow-wrap:anywhere; }
+.ln.missing .ln-name, .ln.unresolved .ln-name { color:var(--text-faint); text-decoration:line-through; }
+.ln-note { font-size:11px; color:var(--err); white-space:nowrap; }
+.ln.unresolved .ln-note { color:var(--warn); }
 .chips { display:flex; flex-wrap:wrap; gap:5px; padding:2px 0 4px; }
 .chip { display:inline-flex; align-items:center; padding:1px 8px; border-radius:999px; font-size:11px;
         font-weight:600; background:var(--miss-bg); color:var(--miss); white-space:nowrap; }

@@ -287,6 +287,56 @@ fn bridge(op: String, args: Option<Value>, state: State<BridgeState>) -> Result<
     }
 }
 
+/// macOS only: replace the default menu bar with the three submenus that
+/// actually matter here -- the stock menu is mostly irrelevant to this app.
+///
+/// Edit is not optional: on macOS, WKWebView's copy/paste and select-all
+/// come from these menu items. Drop them and Cmd-C stops working in the
+/// search boxes and the selectable panel text.
+///
+/// Window brings back Cmd-M / Cmd-W. Mind the interaction with the
+/// front-end's shortcuts: AppKit consumes menu accelerators *before* the
+/// webview sees a key event, so anything bound here is unavailable to
+/// main.js. That is why "show metadata" is Cmd-Shift-M rather than Cmd-M.
+#[cfg(target_os = "macos")]
+fn install_menu(app: &tauri::App) -> tauri::Result<()> {
+    use tauri::menu::{AboutMetadata, MenuBuilder, SubmenuBuilder};
+
+    let app_menu = SubmenuBuilder::new(app, "Nebula Navigator")
+        .about(Some(AboutMetadata::default()))
+        .separator()
+        .hide()
+        .hide_others()
+        .show_all()
+        .separator()
+        .quit()
+        .build()?;
+
+    let edit_menu = SubmenuBuilder::new(app, "Edit")
+        .undo()
+        .redo()
+        .separator()
+        .cut()
+        .copy()
+        .paste()
+        .select_all()
+        .build()?;
+
+    let window_menu = SubmenuBuilder::new(app, "Window")
+        .minimize()
+        .maximize()
+        .fullscreen()
+        .separator()
+        .close_window()
+        .build()?;
+
+    let menu = MenuBuilder::new(app)
+        .items(&[&app_menu, &edit_menu, &window_menu])
+        .build()?;
+    app.set_menu(menu)?;
+    Ok(())
+}
+
 fn main() {
     // Not named `bridge`: that would shadow the #[tauri::command] fn of the
     // same name, which `generate_handler!` needs to resolve in this scope.
@@ -302,6 +352,11 @@ fn main() {
         .plugin(tauri_plugin_dialog::init())
         .manage(BridgeState(Mutex::new(slot)))
         .invoke_handler(tauri::generate_handler![bridge])
+        .setup(|_app| {
+            #[cfg(target_os = "macos")]
+            install_menu(_app)?;
+            Ok(())
+        })
         .run(tauri::generate_context!())
         .expect("error while running Nebula Navigator");
 }

@@ -283,10 +283,16 @@ def sidecar_info(sidecar_path) -> dict:
         return out
 
     pb = meta.produced_by
+    # ProducedBy.source defaults to "script", so a sidecar written before
+    # that field existed *looks* like it claims "script" when it actually
+    # says nothing. Tell the view which it is, so a GUI can stop presenting
+    # an assumption as a recorded fact.
+    raw_pb = data.get("produced_by") or {}
     out.update({
         "ok": True,
         "created": meta.created,
         "sha256": meta.sha256,
+        "source_recorded": "source" in raw_pb,
         "produced_by": {
             "source": pb.source,
             "origin": pb.origin,
@@ -344,6 +350,111 @@ def session_info(session_dir) -> dict:
     })
     out["size_human"] = _human_size(out["size"])
     return out
+
+
+def _find_session_dir(archive_root: Path, run_id: str) -> Optional[Path]:
+    """The folder for a run id inside an archive, or None if it isn't
+    there (a ref into a session that was moved, deleted, or never
+    existed)."""
+    for session_dir in _iter_session_dirs(Path(archive_root)):
+        if session_dir.name == run_id:
+            return session_dir
+    return None
+
+
+def _resolve_ref(ref: Ref, *, archive_root: Path, archive_label: str,
+                 run_id: str) -> dict:
+    """Turn one derived_from ref into something a view can render and
+    click: where it points, whether that file is actually there, and -- if
+    not -- why (missing file vs. an archive we can't reach)."""
+    out = _ref_dict(ref)
+    target_run = ref.session or run_id
+    out.update({"run_id": target_run, "filename": ref.file,
+                "whole_session": ref.file is None,
+                "path": None, "session_path": None,
+                "exists": False, "resolved": True, "note": None})
+
+    root = archive_root
+    if ref.archive is not None and ref.archive != archive_label:
+        cfg = get_registry().try_get(ref.archive)
+        if cfg is None:
+            out.update({"resolved": False,
+                        "note": f"archive {ref.archive!r} is not registered here"})
+            return out
+        root = cfg.root
+        if not root.is_dir():
+            out.update({"resolved": False,
+                        "note": f"archive {ref.archive!r} is not mounted"})
+            return out
+
+    session_dir = _find_session_dir(root, target_run)
+    if session_dir is None:
+        out["note"] = f"session {target_run} not found"
+        return out
+    out["session_path"] = str(session_dir)
+    if ref.file is None:                       # whole-session reference
+        out["exists"] = True
+        return out
+    target = session_dir / ref.file
+    out["path"] = str(target)
+    out["exists"] = target.is_file()
+    if not out["exists"]:
+        out["note"] = "file is missing"
+    return out
+
+
+def lineage(archive, session_path, filename: str) -> dict:
+    """Both directions of one artefact's provenance graph:
+
+        upstream   -- what it declares it was derived from (its sidecar)
+        downstream -- artefacts elsewhere that declare they came from it
+
+    Downstream comes from :func:`nebula.check.dependents_of`, which scans
+    sidecars on disk rather than the SQLite index -- so this answers
+    correctly even when the index is stale, and without requiring the user
+    to have run ``nebula rebuild``. Cross-archive dependents can't be seen
+    from here (nothing records back-links), which ``complete`` reports.
+    """
+    from nebula.check import dependents_of  # local: avoids an import cycle
+
+    archive_root, label = resolve(archive)
+    session_dir = Path(session_path)
+    try:
+        run_id = read_session_yaml(session_dir).run_id
+    except Exception:
+        run_id = session_dir.name
+
+    upstream: List[dict] = []
+    art_path = session_dir / filename
+    if sidecar_path_for(art_path).is_file():
+        try:
+            meta = read_sidecar(art_path)
+            upstream = [
+                _resolve_ref(r, archive_root=archive_root, archive_label=label,
+                             run_id=run_id)
+                for r in meta.derived_from_refs()
+            ]
+        except Exception:
+            upstream = []   # unparseable sidecar; sidecar_info reports why
+
+    downstream: List[dict] = []
+    for hit in dependents_of(archive_root, run_id, filename):
+        dep_run, _, dep_file = hit.partition("/")
+        dep_dir = _find_session_dir(archive_root, dep_run)
+        dep_path = (dep_dir / dep_file) if dep_dir else None
+        downstream.append({
+            "ref": hit, "run_id": dep_run, "filename": dep_file,
+            "session_path": str(dep_dir) if dep_dir else None,
+            "path": str(dep_path) if dep_path else None,
+            "exists": bool(dep_path and dep_path.is_file()),
+            "same_session": dep_run == run_id,
+        })
+
+    return {
+        "run_id": run_id, "filename": filename,
+        "upstream": upstream, "downstream": downstream,
+        "complete": True,   # downstream is same-archive only, by construction
+    }
 
 
 ITEM_SEARCH_FIELDS = ("filename", "tags", "origin", "session")

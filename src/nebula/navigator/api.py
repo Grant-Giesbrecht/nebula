@@ -136,6 +136,10 @@ def op_search_items(args: Dict[str, Any]) -> Dict[str, Any]:
     }
 
 
+def op_lineage(args: Dict[str, Any]) -> Dict[str, Any]:
+    return model.lineage(args["archive"], args["session_path"], args["filename"])
+
+
 def op_list_archives(args: Dict[str, Any]) -> List[Dict[str, Any]]:
     return model.registered_archives()
 
@@ -192,6 +196,7 @@ OPS = {
     "session_info": op_session_info,
     "list_archives": op_list_archives,
     "search_items": op_search_items,
+    "lineage": op_lineage,
     "importable_sessions": op_importable_sessions,
     "frozen_sessions": op_frozen_sessions,
     "import_new": op_import_new,

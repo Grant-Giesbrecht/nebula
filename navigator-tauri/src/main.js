@@ -41,7 +41,10 @@ let shownSessions = [];
 let sessQuery = "";
 let sessCfg = { titles: true, ids: true, tags: true,
                 open: true, closed: true, crashed: true, clean: true, dirty: true };
-let itemCfg = { name: true, tags: true, origin: true, session: true, from: "", to: "" };
+// from/to are stored as ISO (YYYY-MM-DD) for the backend but shown as
+// YYYY/MM/DD; `dates` is the master switch for the whole date filter.
+let itemCfg = { name: true, tags: true, origin: true, session: true,
+                dates: false, from: "", to: "" };
 let searchMode = false, searchMeta = null, searchTimer = null;
 
 // panels
@@ -116,7 +119,23 @@ function escapeHtml(s) {
   return String(s == null ? "" : s).replace(/[&<>"']/g, (c) =>
     ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
 }
-function fmtCreated(ts) { return (ts || "").slice(0, 19).replace("T", " "); }
+// Dates read YYYY/MM/DD throughout the UI; ISO stays on the wire.
+function fmtCreated(ts) {
+  return (ts || "").slice(0, 19).replace("T", " ").replace(/^(\d{4})-(\d{2})-(\d{2})/, "$1/$2/$3");
+}
+function fmtDay(iso) { return (iso || "").replace(/-/g, "/"); }
+
+// Accepts YYYY/MM/DD (and tolerates YYYY-MM-DD, since that is what a
+// pasted ISO timestamp looks like). Returns ISO, or null if unusable.
+function parseDay(text) {
+  const t = (text || "").trim();
+  if (!t) return "";
+  const m = t.match(/^(\d{4})[/-](\d{1,2})[/-](\d{1,2})$/);
+  if (!m) return null;
+  const [y, mo, d] = [m[1], +m[2], +m[3]];
+  if (mo < 1 || mo > 12 || d < 1 || d > 31) return null;
+  return `${y}-${String(mo).padStart(2, "0")}-${String(d).padStart(2, "0")}`;
+}
 function baseName(p) { return String(p).split(/[\\/]/).filter(Boolean).pop() || String(p); }
 
 // ---- archives -----------------------------------------------------------
@@ -292,8 +311,10 @@ async function selectSession(s) {
 }
 
 // ---- artefact search (backend: walks every session in the archive) ------
+function datesOn() { return !!(itemCfg.dates && (itemCfg.from || itemCfg.to)); }
+
 function itemSearchActive() {
-  return !!($("itemSearch").value.trim() || itemCfg.from || itemCfg.to);
+  return !!($("itemSearch").value.trim() || datesOn());
 }
 
 function scheduleItemSearch() {
@@ -303,7 +324,7 @@ function scheduleItemSearch() {
 
 async function runItemSearch() {
   $("itemSearchClear").classList.toggle("hidden", !itemSearchActive());
-  $("itemCfgBtn").classList.toggle("on", !!(itemCfg.from || itemCfg.to));
+  $("itemCfgBtn").classList.toggle("on", datesOn());
   if (!archive) return;
   if (!itemSearchActive()) { await exitSearch(); return; }
 
@@ -313,7 +334,8 @@ async function runItemSearch() {
   try {
     const res = await call("search_items", {
       archive, query: $("itemSearch").value, fields,
-      date_from: itemCfg.from || null, date_to: itemCfg.to || null,
+      date_from: (itemCfg.dates && itemCfg.from) || null,
+      date_to: (itemCfg.dates && itemCfg.to) || null,
     });
     searchMode = true;
     searchMeta = res;
@@ -339,10 +361,23 @@ async function exitSearch() {
 
 function clearItemSearch() {
   $("itemSearch").value = "";
+  resetDates();
+  runItemSearch();
+}
+
+function resetDates() {
   itemCfg.from = ""; itemCfg.to = "";
   $("ifFrom").value = ""; $("ifTo").value = "";
+  $("ifFrom").classList.remove("bad"); $("ifTo").classList.remove("bad");
   saveItemCfg();
-  runItemSearch();
+}
+
+// Turning the master switch off must not lose what was typed, so the
+// values stay in itemCfg -- they just stop being sent.
+function syncDateFields() {
+  $("ifDates").checked = !!itemCfg.dates;
+  $("ifDateFields").classList.toggle("off", !itemCfg.dates);
+  $("ifFrom").disabled = $("ifTo").disabled = !itemCfg.dates;
 }
 
 // Jump from a search hit to the session that holds it.
@@ -350,9 +385,7 @@ async function jumpToSession(runId) {
   const s = sessions.find((x) => x.run_id === runId);
   if (!s) { toast(`${runId} is not in the session list.`); return; }
   $("itemSearch").value = "";
-  itemCfg.from = ""; itemCfg.to = "";
-  $("ifFrom").value = ""; $("ifTo").value = "";
-  saveItemCfg();
+  resetDates();
   $("itemSearchClear").classList.add("hidden");
   searchMode = false; searchMeta = null;
   await selectSession(s);
@@ -513,6 +546,23 @@ async function openSidecarPanel(it) {
   savePanels();
   renderSidecarPanel();
   updateDock();
+  // Lineage needs a whole-archive scan, so fetch it after the panel is
+  // already on screen rather than making the sidecar wait for it.
+  await loadLineage(it);
+}
+
+async function loadLineage(it) {
+  const sessionPath = it.session_path || (curSession && curSession.path);
+  if (!archive || !sessionPath) return;
+  try {
+    const lin = await call("lineage", { archive, session_path: sessionPath, filename: it.name });
+    if (scInfo && scInfo.itemName === it.name) {
+      scInfo.lineage = lin;
+      renderSidecarPanel();
+    }
+  } catch (e) {
+    console.error("lineage failed", e);   // the panel is still useful without it
+  }
 }
 
 function renderSidecarPanel() {
@@ -529,10 +579,17 @@ function renderSidecarPanel() {
   }
 
   const pb = info.produced_by || {};
-  const srcCls = pb.source === "external" ? "warn" : pb.source === "script" ? "ok" : "miss";
+  // A sidecar written before `source` existed defaults to "script" -- say
+  // so, instead of dressing an assumption up as a recorded fact.
+  const assumed = info.source_recorded === false;
+  const srcCls = assumed ? "miss" : pb.source === "external" ? "warn" : pb.source === "script" ? "ok" : "miss";
+  const srcText = assumed ? `${pb.source || "script"}?` : (pb.source || "unknown source");
+  const srcTitle = assumed
+    ? "not recorded in this sidecar — assumed from the default"
+    : "recorded in the sidecar";
   const head = `<div class="p-title">
       <div class="p-name">${escapeHtml(info.itemName || baseName(info.name))}</div>
-      <span class="chip ${srcCls}">${escapeHtml(pb.source || "unknown source")}</span>
+      <span class="chip ${srcCls}" title="${escapeHtml(srcTitle)}">${escapeHtml(srcText)}</span>
     </div>`;
 
   const overview = group("Overview",
@@ -540,29 +597,99 @@ function renderSidecarPanel() {
     row("SHA-256", info.sha256, { mono: true, wrap: true }) +
     pathRow("Sidecar", info.path));
 
+  // The git fields say more together than apart: "nebula @ 48c4a28c (dirty)".
+  const build = pb.repo || pb.commit
+    ? `${escapeHtml(pb.repo || "?")} @ <span class="mono">${escapeHtml((pb.commit || "?").slice(0, 8))}</span>` +
+      (pb.dirty === true ? ' <span class="warn-text">(uncommitted changes)</span>'
+       : pb.dirty === false ? ' <span class="ok-text">(clean)</span>' : "")
+    : null;
+
   const provenance = group(
     pb.source === "external" ? "Imported" : "Produced by",
     row("Origin", pb.origin, { wrap: true }) +
-    row("Repository", pb.repo, { mono: true, wrap: true }) +
-    row("Commit", pb.commit, { mono: true, wrap: true }) +
-    row("Working tree", pb.dirty === null || pb.dirty === undefined ? null
-        : (pb.dirty ? "dirty at run time" : "clean")) +
+    row("Built from", build, { html: true, wrap: true }) +
     row("Entry point", pb.entry_point, { mono: true, wrap: true }) +
     row("Imported by", pb.imported_by) +
-    row("Imported at", fmtCreated(pb.imported_at)));
+    row("Imported at", fmtCreated(pb.imported_at)) +
+    (assumed ? noteBox("info", "This sidecar predates the source/origin fields, "
+                     + "so how the file arrived was never recorded.") : ""));
 
-  const derived = group("Derived from",
-    (info.derived_from || []).length
-      ? `<div class="chips">${info.derived_from
-          .map((r) => `<span class="chip mono">${escapeHtml(r.ref)}</span>`).join("")}</div>`
-      : "");
-
+  const lineage = lineageHTML(info);
   const inputs = group("Inputs", dictRows(info.inputs));
   const extra = group("Other fields", dictRows(info.extra));
 
-  const all = overview + provenance + derived + inputs + extra;
+  const all = overview + provenance + lineage + inputs + extra;
   body.innerHTML = head + (all || noteBox("info", "This sidecar records no further detail."));
   wirePaths(body);
+  wireLineage(body);
+}
+
+// ---- lineage ------------------------------------------------------------
+// Both directions of the provenance graph, as clickable rows: what this
+// file came from, and what came from it. Downstream is the half the CLI's
+// `show` never displays -- looking at a source file, nothing tells you
+// anything derives from it.
+function lineageRow(r, dir) {
+  const arrow = dir === "up" ? "←" : "→";
+  const label = r.whole_session ? `${r.run_id} (whole session)`
+    : `${r.run_id}/${r.filename}`;
+  const cls = r.resolved === false ? "unresolved" : r.exists ? "" : "missing";
+  const note = r.note ? `<span class="ln-note">${escapeHtml(r.note)}</span>` : "";
+  const clickable = r.exists && !r.whole_session;
+  return `<div class="ln ${cls}${clickable ? " go" : ""}"
+      ${clickable ? `data-goto-session="${escapeHtml(r.session_path)}" data-goto-file="${escapeHtml(r.filename)}"` : ""}
+      title="${clickable ? "Go to this artefact" : escapeHtml(r.note || "")}">
+      <span class="ln-arrow">${arrow}</span>
+      <span class="ln-name">${escapeHtml(label)}</span>${note}</div>`;
+}
+
+function lineageHTML(info) {
+  const lin = info.lineage;
+  if (!lin) {
+    // Fall back to the raw refs until the archive scan comes back.
+    const refs = info.derived_from || [];
+    return group("Lineage", refs.length
+      ? `<div class="ln-h">Derived from</div>` +
+        refs.map((r) => `<div class="ln"><span class="ln-arrow">←</span>
+          <span class="ln-name">${escapeHtml(r.ref)}</span></div>`).join("")
+      : "");
+  }
+  const up = lin.upstream || [], down = lin.downstream || [];
+  if (!up.length && !down.length) {
+    return group("Lineage", noteBox("info",
+      "No recorded relationships: nothing lists this file as a source, and "
+      + "it declares no sources of its own."));
+  }
+  const upHTML = up.length
+    ? `<div class="ln-h">Derived from</div>` + up.map((r) => lineageRow(r, "up")).join("")
+    : "";
+  const downHTML = down.length
+    ? `<div class="ln-h">Used by</div>` + down.map((r) => lineageRow(r, "down")).join("")
+    : "";
+  return group("Lineage", upHTML + downHTML);
+}
+
+function wireLineage(el) {
+  el.querySelectorAll("[data-goto-session]").forEach((n) => {
+    n.onclick = () => gotoArtifact(n.getAttribute("data-goto-session"),
+                                   n.getAttribute("data-goto-file"));
+  });
+}
+
+// Follow a lineage link: select the target's session, then the file in it.
+async function gotoArtifact(sessionPath, filename) {
+  const s = sessions.find((x) => x.path === sessionPath);
+  if (!s) { toast("That session is not in the current archive view."); return; }
+  if (!curSession || curSession.path !== sessionPath || searchMode) {
+    searchMode = false; searchMeta = null;
+    $("itemSearch").value = "";
+    $("itemSearchClear").classList.add("hidden");
+    await selectSession(s);
+  }
+  const target = items.find((i) => i.name === filename);
+  if (!target) { toast(`${filename} is not in ${s.run_id}.`); return; }
+  selectItem(target, false);
+  openSidecarPanel(target);
 }
 
 // ---- session info panel -------------------------------------------------
@@ -838,8 +965,9 @@ const ITEM_BOXES = { ifName: "name", ifTag: "tags", ifOrigin: "origin", ifSessio
 function syncCfgUI() {
   for (const [id, key] of Object.entries(SESS_BOXES)) $(id).checked = !!sessCfg[key];
   for (const [id, key] of Object.entries(ITEM_BOXES)) $(id).checked = !!itemCfg[key];
-  $("ifFrom").value = itemCfg.from || "";
-  $("ifTo").value = itemCfg.to || "";
+  $("ifFrom").value = fmtDay(itemCfg.from);
+  $("ifTo").value = fmtDay(itemCfg.to);
+  syncDateFields();
 }
 
 function closePops(except) {
@@ -861,13 +989,31 @@ function wireSearchOptions() {
   for (const [id, key] of Object.entries(ITEM_BOXES)) {
     $(id).onchange = (e) => { itemCfg[key] = e.target.checked; saveItemCfg(); runItemSearch(); };
   }
-  $("ifFrom").onchange = (e) => { itemCfg.from = e.target.value; saveItemCfg(); runItemSearch(); };
-  $("ifTo").onchange = (e) => { itemCfg.to = e.target.value; saveItemCfg(); runItemSearch(); };
-  $("ifReset").onclick = () => {
-    itemCfg.from = ""; itemCfg.to = "";
-    $("ifFrom").value = ""; $("ifTo").value = "";
-    saveItemCfg(); runItemSearch();
+  // A half-typed date shouldn't fire a search on every keystroke, so the
+  // field marks itself invalid and simply isn't sent until it parses.
+  const wireDate = (id, key) => {
+    const apply = (e) => {
+      const iso = parseDay(e.target.value);
+      $(id).classList.toggle("bad", iso === null);
+      if (iso === null) return;
+      itemCfg[key] = iso;
+      saveItemCfg();
+      scheduleItemSearch();
+    };
+    $(id).oninput = apply;
+    $(id).onblur = (e) => {
+      const iso = parseDay(e.target.value);
+      if (iso !== null) e.target.value = fmtDay(iso);   // normalise 2026/7/4
+    };
   };
+  wireDate("ifFrom", "from");
+  wireDate("ifTo", "to");
+
+  $("ifDates").onchange = (e) => {
+    itemCfg.dates = e.target.checked;
+    saveItemCfg(); syncDateFields(); runItemSearch();
+  };
+  $("ifReset").onclick = () => { resetDates(); runItemSearch(); };
 
   $("sessCfgBtn").onclick = (e) => { e.stopPropagation(); togglePop("sessCfg"); };
   $("itemCfgBtn").onclick = (e) => { e.stopPropagation(); togglePop("itemCfg"); };
@@ -879,8 +1025,73 @@ function wireSearchOptions() {
   $("sessSearchClear").onclick = () => { $("sessSearch").value = ""; sessQuery = ""; applySessionFilter(); };
   $("itemSearch").oninput = scheduleItemSearch;
   $("itemSearchClear").onclick = clearItemSearch;
+}
+
+// ---- keyboard shortcuts -------------------------------------------------
+// One set of bindings, spelled with each platform's own command modifier:
+// Cmd on macOS, Ctrl on Windows/Linux. They work while a search box has
+// focus too -- none of them type a character.
+//
+// Note the Shift on the metadata binding: plain Cmd-M is Minimize in the
+// macOS Window menu, and AppKit consumes menu accelerators before the
+// webview sees a key event, so that spelling would never reach us.
+const IS_MAC = /mac/i.test(
+  (navigator.userAgentData && navigator.userAgentData.platform) || navigator.platform || "");
+
+// The platform's command modifier -- and the *other* one must not be held,
+// so Ctrl-O on a Mac doesn't fire the Cmd-O action.
+function hasMod(e) { return IS_MAC ? (e.metaKey && !e.ctrlKey) : (e.ctrlKey && !e.metaKey); }
+
+// Tooltips are authored with Ctrl- spellings; rewrite them for macOS.
+function localizeShortcutHints() {
+  if (!IS_MAC) return;
+  document.querySelectorAll("[title]").forEach((el) => {
+    el.title = el.title.replace(/Ctrl-Shift-/g, "⇧⌘").replace(/Ctrl-/g, "⌘");
+  });
+}
+
+function toggleMetadataPanel() {
+  if (showSc) { showSc = false; savePanels(); updateDock(); return; }
+  if (!selected) { toast("Select a file first."); return; }
+  if (!selected.has_sidecar) { toast(`${selected.name} has no metadata sidecar.`); return; }
+  openSidecarPanel(selected);
+}
+
+function openSelectedExternally() {
+  const it = selected;
+  if (!it) { toast("Select a file first."); return; }
+  // Whichever row is selected is what opens: the sidecar row opens the
+  // .meta.json, the artefact row the artefact itself.
+  const path = selectedIsSidecar ? it.sidecar_path : (it.artifact_path || it.sidecar_path);
+  if (!path) { toast(`${it.name} has no file on disk to open.`); return; }
+  call("open_path", { path });
+}
+
+async function refreshAll() {
+  if (!archive) { toast("No archive open."); return; }
+  await reload();
+  if (searchMode) await runItemSearch();   // keep results in step with disk
+  await refreshSessionInfo();
+  toast(`Reloaded ${activeLabel()}`);
+}
+
+function initShortcuts() {
   document.addEventListener("keydown", (e) => {
-    if (e.key === "Escape") closePops(null);
+    if (e.key === "Escape") { closePops(null); return; }
+    if (!hasMod(e) || e.altKey) return;
+    const k = (e.key || "").toLowerCase();
+    const shift = e.shiftKey;
+
+    let action = null;
+    if (k === "m" && shift) action = toggleMetadataPanel;
+    else if (k === "s" && shift) action = toggleSessionPanel;
+    else if (k === "r" && !shift) action = refreshAll;
+    else if (k === "i" && shift) action = startImport;
+    else if (k === "o" && !shift) action = openSelectedExternally;
+    if (!action) return;
+
+    e.preventDefault();   // Ctrl-R would otherwise reload the webview
+    Promise.resolve(action()).catch((err) => toast(`${err}`));
   });
 }
 
@@ -923,8 +1134,10 @@ async function boot() {
   itemCfg = Object.assign(itemCfg, LS.get("nebula.itemCfg", {}));
   syncCfgUI();
   wireSearchOptions();
+  initShortcuts();
+  localizeShortcutHints();
   $("sessCfgBtn").classList.toggle("on", isSessCfgNarrowed());
-  $("itemCfgBtn").classList.toggle("on", !!(itemCfg.from || itemCfg.to));
+  $("itemCfgBtn").classList.toggle("on", datesOn());
 
   const panels = LS.get("nebula.panels", { sess: false, sc: false });
   showSess = !!panels.sess;

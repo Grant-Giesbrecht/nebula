@@ -1,4 +1,5 @@
 import datetime
+import json
 
 import nebula
 from nebula.navigator import model
@@ -282,3 +283,119 @@ def test_search_items_limit_truncates(tmp_path):
     _session_with(archive, {f"f{i}.csv": "x" for i in range(5)})
     res = _search(archive, "csv", limit=3)
     assert len(res["items"]) == 3 and res["truncated"] is True
+
+
+# ---------------------------------------------------------------------
+# lineage (both directions of the provenance graph)
+# ---------------------------------------------------------------------
+
+def _derived_session(archive):
+    """A session where log.txt declares it came from raw.csv."""
+    s = nebula.new(archive, description="derived")
+    with s.artifact("raw.csv") as fn:
+        fn.write_text("x")
+    with s.artifact("log.txt", derived_from=["raw.csv"]) as fn:
+        fn.write_text("y")
+    s.close()
+    return s
+
+
+def test_lineage_upstream(tmp_path):
+    archive = tmp_path / "archive"
+    s = _derived_session(archive)
+    lin = model.lineage(archive, s.path, "log.txt")
+    assert lin["run_id"] == s.id
+    assert [u["ref"] for u in lin["upstream"]] == ["raw.csv"]
+    up = lin["upstream"][0]
+    assert up["run_id"] == s.id and up["filename"] == "raw.csv"
+    assert up["exists"] is True and up["resolved"] is True
+    assert up["path"] == str(s.path / "raw.csv")
+    assert lin["downstream"] == []
+
+
+def test_lineage_downstream(tmp_path):
+    """The direction `nebula show` never displays: looking at the source
+    file, what came from it."""
+    archive = tmp_path / "archive"
+    s = _derived_session(archive)
+    lin = model.lineage(archive, s.path, "raw.csv")
+    assert lin["upstream"] == []
+    assert [d["ref"] for d in lin["downstream"]] == [f"{s.id}/log.txt"]
+    assert lin["downstream"][0]["exists"] is True
+    assert lin["downstream"][0]["same_session"] is True
+
+
+def test_lineage_downstream_across_sessions(tmp_path):
+    archive = tmp_path / "archive"
+    src = _session_with(archive, {"raw.csv": "x"})
+    other = nebula.new(archive, description="analysis")
+    with other.artifact("fit.json", derived_from=[f"{src.id}/raw.csv"]) as fn:
+        fn.write_text("{}")
+    other.close()
+
+    lin = model.lineage(archive, src.path, "raw.csv")
+    assert [d["ref"] for d in lin["downstream"]] == [f"{other.id}/fit.json"]
+    assert lin["downstream"][0]["same_session"] is False
+
+
+def test_lineage_flags_missing_target(tmp_path):
+    archive = tmp_path / "archive"
+    s = _derived_session(archive)
+    (s.path / "raw.csv").unlink()             # the source is gone
+    up = model.lineage(archive, s.path, "log.txt")["upstream"][0]
+    assert up["exists"] is False and up["resolved"] is True
+    assert up["note"] == "file is missing"
+
+
+def test_lineage_flags_unknown_session(tmp_path):
+    archive = tmp_path / "archive"
+    s = nebula.new(archive, description="d")
+    with s.artifact("a.csv", derived_from=["S-9999/gone.csv"]) as fn:
+        fn.write_text("x")
+    s.close()
+    up = model.lineage(archive, s.path, "a.csv")["upstream"][0]
+    assert up["exists"] is False
+    assert "S-9999 not found" in up["note"]
+
+
+def test_lineage_flags_unregistered_archive(tmp_path, monkeypatch):
+    import nebula.registry as reg
+    monkeypatch.setenv("NEBULA_REGISTRY", str(tmp_path / "none.yaml"))
+    monkeypatch.setattr(reg, "_default_registry", None)
+
+    archive = tmp_path / "archive"
+    s = nebula.new(archive, description="d")
+    with s.artifact("a.csv", derived_from=["elsewhere|S-0001/x.csv"]) as fn:
+        fn.write_text("x")
+    s.close()
+    up = model.lineage(archive, s.path, "a.csv")["upstream"][0]
+    assert up["resolved"] is False
+    assert "not registered" in up["note"]
+
+
+def test_lineage_ignores_stale_index(tmp_path):
+    """Downstream is a filesystem scan, so a never-built index is fine."""
+    archive = tmp_path / "archive"
+    s = _derived_session(archive)
+    assert not (archive / "index.db").exists()
+    assert model.lineage(archive, s.path, "raw.csv")["downstream"]
+
+
+def test_sidecar_info_marks_assumed_source(tmp_path):
+    """A sidecar written before produced_by.source existed must not claim
+    'script' as though it were recorded."""
+    archive = tmp_path / "archive"
+    s = _session_with(archive, {"raw.csv": "x"})
+    sc = s.path / "raw.csv.meta.json"
+    data = json.loads(sc.read_text())
+    del data["produced_by"]["source"]          # emulate an old sidecar
+    sc.write_text(json.dumps(data))
+
+    info = model.sidecar_info(sc)
+    assert info["ok"] and info["source_recorded"] is False
+    assert info["produced_by"]["source"] == "script"   # still the default
+
+    # A sidecar written by the current code does record it.
+    fresh = _session_with(tmp_path / "archive2", {"new.csv": "x"})
+    got = model.sidecar_info(fresh.path / "new.csv.meta.json")
+    assert got["source_recorded"] is True and got["produced_by"]["source"] == "script"

@@ -97,6 +97,27 @@ Other things worth knowing about the window:
 - The rail, the right-hand dock, and the split between the two docked
   panels are all **draggable**.
 
+### Keyboard shortcuts
+
+Cmd on macOS, Ctrl on Windows/Linux (`hasMod()` in `main.js` picks the
+modifier; tooltips are rewritten to ⌘ / ⇧⌘ at boot on macOS):
+
+| Shortcut | Action |
+| --- | --- |
+| `Mod-Shift-M` | Show the selected file's metadata; closes the panel if open |
+| `Mod-Shift-S` | Toggle the session info panel |
+| `Mod-R`       | Reload archive + session info (re-runs an active search) |
+| `Mod-Shift-I` | Import files… |
+| `Mod-O`       | Open the selection in the default app |
+
+⚠️ On macOS these live *around* the menu bar, not in it: AppKit dispatches
+menu accelerators before the webview gets a `keydown`, so any key the menu
+claims is unreachable from `main.js`. That is why metadata is
+`Cmd-Shift-M` — plain `Cmd-M` belongs to Window ▸ Minimize. `main.rs`
+installs a deliberately small menu (app / Edit / Window); **keep Edit**,
+since WKWebView's copy, paste and select-all are driven by those items.
+If you add a menu item, check its accelerator against the table above.
+
 ### ⚠️ Gotcha: once you have built a sidecar, `npm run dev` stops using your live Python
 
 `tauri dev` copies `src-tauri/binaries/nebula-bridge-<triple>` into
