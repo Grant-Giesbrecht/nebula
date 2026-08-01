@@ -527,9 +527,139 @@ def cmd_archives(args):
         print(f"{name:15} {cfg.root}  {exists}")
 
 
+def cmd_collection(args):
+    """Collections: nestable, curated sets of refs."""
+    from nebula import collection as collection_mod
+
+    root, label = _resolve_archive_cli(args.archive)
+    act = args.collection_action
+    try:
+        if act == "list":
+            colls = collection_mod.list_all(root)
+            if not colls:
+                print("(no collections in this archive)")
+                return
+            for c in colls:
+                title = f"  {c.title}" if c.title else ""
+                print(f"{c.name:24} {len(c.entries):3} entrie(s){title}")
+            return
+
+        if act == "new":
+            c = collection_mod.create(root, args.name, title=args.title or "")
+            print(f"created {collection_mod.path_for(root, c.name)}")
+            return
+
+        if act == "rm":
+            print("removed" if collection_mod.delete(root, args.name)
+                  else f"no collection {args.name!r}")
+            return
+
+        if act == "add":
+            for ref in args.refs:
+                collection_mod.add(root, args.name, ref, note=args.note or "")
+                print(f"added {ref} to {args.name}")
+            return
+
+        if act == "remove":
+            for ref in args.refs:
+                collection_mod.remove(root, args.name, ref)
+                print(f"removed {ref} from {args.name}")
+            return
+
+        if act == "show":
+            _print_collection(collection_mod.tree(root, args.name))
+            return
+    except (collection_mod.CollectionError, ValueError) as e:
+        print(str(e), file=sys.stderr)
+        sys.exit(1)
+
+
+def _print_collection(node, indent=0):
+    pad = " " * indent
+    if node.get("missing"):
+        print(f"{pad}[{node['name']}]  (no such collection)")
+        return
+    title = f"  -- {node['title']}" if node.get("title") else ""
+    print(f"{pad}[{node['name']}]{title}"
+          + ("   (cycle)" if node.get("cycle") else "")
+          + ("   (depth limit)" if node.get("truncated") else ""))
+    for e in node.get("entries", []):
+        mark = "ok" if e["exists"] else ("??" if not e["resolved"] else "!!")
+        note = f"   -- {e['note']}" if e.get("note") else ""
+        why = f"   ({e['note_error']})" if e.get("note_error") else ""
+        print(f"{pad}  {mark} {e['kind']:10} {e['ref']}{note}{why}")
+        if e.get("child"):
+            _print_collection(e["child"], indent + 4)
+
+
+def cmd_view(args):
+    """Saved searches."""
+    from nebula import views as views_mod
+
+    root, _ = _resolve_archive_cli(args.archive)
+    act = args.view_action
+    try:
+        if act == "list":
+            found = views_mod.list_all(root)
+            if not found:
+                print("(no saved views in this archive)")
+                return
+            for v in found:
+                bits = [f"query={v.query!r}" if v.query else "no query"]
+                if v.fields:
+                    bits.append("fields=" + ",".join(v.fields))
+                if v.date_from or v.date_to:
+                    bits.append(f"dates={v.date_from or '*'}..{v.date_to or '*'}")
+                print(f"{v.name:24} {'; '.join(bits)}")
+            return
+
+        if act == "save":
+            v = views_mod.save(root, args.name, query=args.query or "",
+                               title=args.title or "",
+                               fields=(args.fields.split(",") if args.fields else None),
+                               date_from=args.date_from, date_to=args.date_to)
+            print(f"saved {views_mod.path_for(root, v.name)}")
+            return
+
+        if act == "rm":
+            print("removed" if views_mod.delete(root, args.name)
+                  else f"no view {args.name!r}")
+            return
+
+        if act == "run":
+            res = views_mod.run(root, args.name)
+            hits = res["items"]
+            print(f"{len(hits)} match(es) in {res['n_sessions']} session(s)")
+            for hit in hits:
+                print(f"  {hit['run_id']}/{hit['item'].name}")
+            return
+    except (views_mod.ViewError, ValueError) as e:
+        print(str(e), file=sys.stderr)
+        sys.exit(1)
+
+
+def cmd_whoami(args):
+    from nebula import identity
+
+    if args.set_user:
+        try:
+            path = identity.set_user(args.set_user)
+        except identity.IdentityError as e:
+            print(str(e), file=sys.stderr)
+            sys.exit(1)
+        print(f"wrote {path}")
+
+    user = identity.get_user()
+    if user:
+        print(user)
+    else:
+        print("(no user name set -- 'nebula whoami --set <name>' to pick one)")
+        print(f"would be stored in {identity.identity_path()}", file=sys.stderr)
+
+
 def cmd_register(args):
     reg = get_registry()
-    reg.register(args.name, Path(args.root), git_org=args.git_org)
+    reg.register(args.name, Path(args.root), git_org=args.git_org, user=args.user)
     print(f"registered archive {args.name!r} -> {args.root}")
 
 
@@ -631,6 +761,44 @@ def main(argv=None):
                         "duplicate (default), overwrite, or cancel")
     p.set_defaults(func=cmd_config)
 
+    p = sub.add_parser("collection", help="curated, nestable sets of refs")
+    p.add_argument("archive", help="registered archive name, or a literal path")
+    csub = p.add_subparsers(dest="collection_action", required=True)
+    csub.add_parser("list", help="list collections")
+    q = csub.add_parser("show", help="show a collection and everything under it")
+    q.add_argument("name")
+    q = csub.add_parser("new", help="create an empty collection")
+    q.add_argument("name")
+    q.add_argument("--title")
+    q = csub.add_parser("rm", help="delete a collection (members are untouched)")
+    q.add_argument("name")
+    q = csub.add_parser("add", help="add refs -- files, sessions, or collections/<name>")
+    q.add_argument("name")
+    q.add_argument("refs", nargs="+")
+    q.add_argument("--note")
+    q = csub.add_parser("remove", help="remove refs from a collection")
+    q.add_argument("name")
+    q.add_argument("refs", nargs="+")
+    p.set_defaults(func=cmd_collection)
+
+    p = sub.add_parser("view", aliases=["saved-search"], help="saved searches")
+    p.add_argument("archive", help="registered archive name, or a literal path")
+    vsub = p.add_subparsers(dest="view_action", required=True)
+    vsub.add_parser("list", help="list saved views")
+    q = vsub.add_parser("save", help="create or overwrite a view")
+    q.add_argument("name")
+    q.add_argument("--query", help="search terms (ANDed)")
+    q.add_argument("--title")
+    q.add_argument("--fields", help="comma-separated: filename,tags,origin,session,"
+                                    "user_tags,comments")
+    q.add_argument("--date-from", dest="date_from", metavar="YYYY-MM-DD")
+    q.add_argument("--date-to", dest="date_to", metavar="YYYY-MM-DD")
+    q = vsub.add_parser("rm", help="delete a view")
+    q.add_argument("name")
+    q = vsub.add_parser("run", help="run a view and list what it matches")
+    q.add_argument("name")
+    p.set_defaults(func=cmd_view)
+
     p = sub.add_parser(
         "annotate",
         help="show or edit user tags/comment on a session or file (mutable; "
@@ -702,8 +870,15 @@ def main(argv=None):
     p = sub.add_parser("register", help="register an archive in ~/.nebula/archives.yaml")
     p.add_argument("name")
     p.add_argument("root")
-    p.add_argument("--git-org")
+    p.add_argument("--git-org", help="GitHub org/user hosting this archive's repos")
+    p.add_argument("--user", help="who owns this archive, for nebula:// URIs "
+                                  "(omit for your own archives)")
     p.set_defaults(func=cmd_register)
+
+    p = sub.add_parser("whoami", help="show or set your nebula user name (used in URIs)")
+    p.add_argument("--set", dest="set_user", metavar="NAME",
+                   help="set the local user name (an email or handle)")
+    p.set_defaults(func=cmd_whoami)
 
     args = parser.parse_args(argv)
     args.func(args)

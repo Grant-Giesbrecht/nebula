@@ -124,16 +124,10 @@ def op_session_info(args: Dict[str, Any]) -> Dict[str, Any]:
     return model.session_info(args["session_path"])
 
 
-def op_search_items(args: Dict[str, Any]) -> Dict[str, Any]:
-    res = model.search_items(
-        args["archive"], args.get("query") or "",
-        fields=args.get("fields") or None,
-        date_from=args.get("date_from") or None,
-        date_to=args.get("date_to") or None,
-        limit=int(args.get("limit") or 1000),
-    )
-    # Flatten each hit into an item dict plus the session context the
-    # results table shows alongside it.
+def _search_result_to_dict(res: Dict[str, Any]) -> Dict[str, Any]:
+    """Flatten each hit into an item dict plus the session context the
+    results table shows alongside it. Shared by search and saved views, so
+    both render through exactly the same path."""
     return {
         "items": [
             dict(_item_to_dict(hit["item"]),
@@ -143,10 +137,21 @@ def op_search_items(args: Dict[str, Any]) -> Dict[str, Any]:
                  tags=hit["tags"])
             for hit in res["items"]
         ],
-        "truncated": res["truncated"],
-        "n_sessions": res["n_sessions"],
-        "n_scanned": res["n_scanned"],
+        "truncated": res.get("truncated", False),
+        "n_sessions": res.get("n_sessions", 0),
+        "n_scanned": res.get("n_scanned", 0),
     }
+
+
+def op_search_items(args: Dict[str, Any]) -> Dict[str, Any]:
+    res = model.search_items(
+        args["archive"], args.get("query") or "",
+        fields=args.get("fields") or None,
+        date_from=args.get("date_from") or None,
+        date_to=args.get("date_to") or None,
+        limit=int(args.get("limit") or 1000),
+    )
+    return _search_result_to_dict(res)
 
 
 def op_lineage(args: Dict[str, Any]) -> Dict[str, Any]:
@@ -276,6 +281,106 @@ def op_release(args: Dict[str, Any]) -> Dict[str, Any]:
     return {"had_hold": release_session(root, args["run_id"])}
 
 
+# -- collections and saved views ------------------------------------------
+
+def op_list_collections(args: Dict[str, Any]) -> List[Dict[str, Any]]:
+    from nebula import collection as collection_mod
+
+    root, _ = model.resolve(args["archive"])
+    return [
+        {"name": c.name, "title": c.title, "description": c.description,
+         "n_entries": len(c.entries)}
+        for c in collection_mod.list_all(root)
+    ]
+
+
+def op_collection_tree(args: Dict[str, Any]) -> Dict[str, Any]:
+    from nebula import collection as collection_mod
+
+    root, _ = model.resolve(args["archive"])
+    return collection_mod.tree(root, args["name"])
+
+
+def op_create_collection(args: Dict[str, Any]) -> Dict[str, Any]:
+    from nebula import collection as collection_mod
+
+    root, _ = model.resolve(args["archive"])
+    coll = collection_mod.create(root, args["name"], title=args.get("title") or "")
+    return {"name": coll.name}
+
+
+def op_delete_collection(args: Dict[str, Any]) -> Dict[str, Any]:
+    from nebula import collection as collection_mod
+
+    root, _ = model.resolve(args["archive"])
+    return {"deleted": collection_mod.delete(root, args["name"])}
+
+
+def op_collection_add(args: Dict[str, Any]) -> Dict[str, Any]:
+    """Add refs to a collection, creating it if asked. Errors (a cycle, a
+    duplicate, an unparseable ref) come back as normal op errors."""
+    from nebula import collection as collection_mod
+
+    root, _ = model.resolve(args["archive"])
+    name = args["name"]
+    if args.get("create") and collection_mod.read(root, name) is None:
+        collection_mod.create(root, name, title=args.get("title") or "")
+    for ref in args["refs"]:
+        collection_mod.add(root, name, ref, note=args.get("note") or "")
+    return {"name": name, "n_entries": len(collection_mod.read(root, name).entries)}
+
+
+def op_collection_remove(args: Dict[str, Any]) -> Dict[str, Any]:
+    from nebula import collection as collection_mod
+
+    root, _ = model.resolve(args["archive"])
+    for ref in args["refs"]:
+        collection_mod.remove(root, args["name"], ref)
+    return {"name": args["name"]}
+
+
+def op_collections_containing(args: Dict[str, Any]) -> List[str]:
+    from nebula import collection as collection_mod
+
+    root, _ = model.resolve(args["archive"])
+    return collection_mod.containing(root, args["ref"])
+
+
+def op_list_views(args: Dict[str, Any]) -> List[Dict[str, Any]]:
+    from nebula import views as views_mod
+
+    root, _ = model.resolve(args["archive"])
+    return [v.to_dict() for v in views_mod.list_all(root)]
+
+
+def op_run_view(args: Dict[str, Any]) -> Dict[str, Any]:
+    from nebula import views as views_mod
+
+    root, _ = model.resolve(args["archive"])
+    res = views_mod.run(root, args["name"], limit=int(args.get("limit") or 1000))
+    out = _search_result_to_dict(res)
+    out["view"] = res["view"]
+    return out
+
+
+def op_save_view(args: Dict[str, Any]) -> Dict[str, Any]:
+    from nebula import views as views_mod
+
+    root, _ = model.resolve(args["archive"])
+    view = views_mod.save(
+        root, args["name"], query=args.get("query") or "",
+        title=args.get("title") or "", fields=args.get("fields") or None,
+        date_from=args.get("date_from") or None, date_to=args.get("date_to") or None)
+    return view.to_dict()
+
+
+def op_delete_view(args: Dict[str, Any]) -> Dict[str, Any]:
+    from nebula import views as views_mod
+
+    root, _ = model.resolve(args["archive"])
+    return {"deleted": views_mod.delete(root, args["name"])}
+
+
 def op_list_archives(args: Dict[str, Any]) -> List[Dict[str, Any]]:
     return model.registered_archives()
 
@@ -322,6 +427,10 @@ def op_resolve_refs(args: Dict[str, Any]) -> List[Dict[str, Any]]:
     return model.resolve_refs(args["archive"], args["run_id"], args.get("refs") or [])
 
 
+def op_reveal_path(args: Dict[str, Any]) -> Dict[str, Any]:
+    return {"dispatched": osutil.reveal_path(args["path"])}
+
+
 def op_open_path(args: Dict[str, Any]) -> Dict[str, Any]:
     return {"dispatched": osutil.open_path(args["path"])}
 
@@ -344,6 +453,17 @@ OPS = {
     "resolve_refs": op_resolve_refs,
     "code_info": op_code_info,
     "restore_code": op_restore_code,
+    "list_collections": op_list_collections,
+    "collection_tree": op_collection_tree,
+    "create_collection": op_create_collection,
+    "delete_collection": op_delete_collection,
+    "collection_add": op_collection_add,
+    "collection_remove": op_collection_remove,
+    "collections_containing": op_collections_containing,
+    "list_views": op_list_views,
+    "run_view": op_run_view,
+    "save_view": op_save_view,
+    "delete_view": op_delete_view,
     "archive_stats": op_archive_stats,
     "rebuild_index": op_rebuild_index,
     "check": op_check,
@@ -363,6 +483,7 @@ OPS = {
     "import_new": op_import_new,
     "import_file": op_import_file,
     "open_path": op_open_path,
+    "reveal_path": op_reveal_path,
     "file_manager_name": op_file_manager_name,
 }
 

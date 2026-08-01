@@ -29,6 +29,23 @@ SIDECAR_SUFFIX = ".meta.json"
 SESSION_FILE = "session.yaml"
 
 
+def _ref_to_dict(ref: Ref) -> Dict[str, Any]:
+    """Store a ref's parts. `user` is written only when the ref actually
+    names one, so same-archive refs (the overwhelming majority) keep the
+    shape they have always had -- and a cross-user URI does not silently
+    lose its owner on the way to disk."""
+    out: Dict[str, Any] = {"archive": ref.archive, "session": ref.session,
+                           "file": ref.file}
+    if ref.user:
+        out["user"] = ref.user
+    return out
+
+
+def _ref_from_dict(d: Dict[str, Any]) -> Ref:
+    return Ref(file=d.get("file"), session=d.get("session"),
+               archive=d.get("archive"), user=d.get("user"))
+
+
 def _now_iso() -> str:
     return datetime.datetime.now().astimezone().isoformat(timespec="seconds")
 
@@ -136,19 +153,14 @@ class SidecarMeta:
 
     def derived_from_refs(self) -> List[Ref]:
         """Decode the stored ref dicts back into Ref objects."""
-        return [
-            Ref(file=r.get("file"), session=r.get("session"), archive=r.get("archive"))
-            for r in self.derived_from
-        ]
+        return [_ref_from_dict(r) for r in self.derived_from]
 
     def add_derived_from(self, ref: "str | Ref") -> None:
         """Accepts either a compact ref string ('diode.graf',
         'S-0152/diode.graf', 'postdoc|S-0152/diode.graf') or a Ref."""
         if isinstance(ref, str):
             ref = parse_ref(ref)
-        self.derived_from.append(
-            {"archive": ref.archive, "session": ref.session, "file": ref.file}
-        )
+        self.derived_from.append(_ref_to_dict(ref))
 
 
 def _atomic_write_json(path: Path, data: Dict[str, Any]) -> None:
@@ -238,15 +250,12 @@ class SessionMeta:
         )
 
     def related_run_refs(self) -> List[Ref]:
-        return [
-            Ref(file=r.get("file"), session=r.get("session"), archive=r.get("archive"))
-            for r in self.related_runs
-        ]
+        return [_ref_from_dict(r) for r in self.related_runs]
 
     def add_related_run(self, ref: "str | Ref") -> None:
         if isinstance(ref, str):
             ref = parse_ref(ref)
-        entry = {"archive": ref.archive, "session": ref.session, "file": ref.file}
+        entry = _ref_to_dict(ref)
         if entry not in self.related_runs:
             self.related_runs.append(entry)
 

@@ -227,6 +227,8 @@ directories, and no month nesting:
     archive.yaml            # per-archive settings (optional)
     index.db                # rebuildable cache
     code/                   # captured source (blobs + manifests)
+    collections/            # one YAML per collection (optional)
+    saved-searches/         # one YAML per saved search (optional)
     data/
         2026/
             S-26-0001/      # session id carries its own two-digit year
@@ -247,6 +249,9 @@ src/nebula/
     session.py    # Session, new()/append_to()/reopen()/session() context manager
     index.py      # SQLite index rebuild (fully regeneratable)
     codestore.py  # content-addressed snapshot of the source that ran (code/)
+    collection.py # nestable collections (<archive>/collections/*.yaml)
+    views.py      # saved searches (<archive>/saved-searches/*.yaml)
+    identity.py   # who you are, for nebula:// URIs
     annotations.py # mutable user tags/comments (<session>/annotations.yaml)
     config.py     # per-archive settings (<archive>/archive.yaml)
     graph.py      # upstream()/downstream() provenance traversal, cross-archive aware
@@ -288,6 +293,95 @@ render under **the name that was asked for** with a `2 of 3` badge showing
 write order; hovering reveals the real
 filename and why it was renamed. The `.meta.json` rows still show the name
 on disk, so a file can always be found.
+
+## Refs and nebula URIs
+
+A ref points at an artifact, a session, an archive or a collection. Two
+spellings, one meaning — and anything that accepts a ref accepts both,
+because `refs.py` is the only parser:
+
+```
+raw.csv                                   same-session file
+S-26-0152                                 whole session, same archive
+S-26-0152/raw.csv                         session + file
+postdoc|S-26-0152/raw.csv                 another archive of your own
+collections/paper-2026                    a collection
+nebula://kai@lab/shared/S-26-0152/cal.json    someone else's archive
+```
+
+The **user** segment exists because archive names are not globally unique:
+two colleagues can each keep a `measurements` archive, and without an owner
+a ref between them is ambiguous. Set yours once:
+
+```
+nebula whoami --set grant@ncsu.edu        # stored in ~/.nebula/identity.yaml
+nebula register shared /Volumes/kai/arc --user kai@lab
+```
+
+`/` separates segments rather than `.` because filenames are full of dots
+(`run.2026-07-31.tar.gz`) — a dot could not tell the last two components
+apart. Segments therefore may not contain `/`, which is enforced at parse
+time.
+
+Full URIs work in **every** relational context: `derived_from`,
+`related_runs`, and collection entries. A cross-user ref keeps its owner on
+disk (`user:` in the stored ref) instead of being flattened to an archive
+name.
+
+## Collections and saved searches
+
+Sessions are time buckets and a ref is a (session, filename) pair, so
+*moving* files into topic folders would break provenance. Collections are
+the alternative: they point at things instead of holding them, so a file can
+be in five collections at once and nothing on disk moves.
+
+```
+<archive>/collections/paper-2026.yaml
+<archive>/saved-searches/needs-attention.yaml
+```
+
+One file per collection, so they can be added, removed, versioned and mailed
+to a colleague individually. Entries are ordinary refs — files, whole
+sessions, other collections (nesting), or `nebula://` URIs into someone
+else's archive:
+
+```yaml
+name: paper-2026
+title: Figures for the 2026 paper
+entries:
+  - ref: S-26-0031/raw.tome
+    note: the good warm-up run
+  - ref: S-26-0034
+  - ref: collections/rp23d-campaign
+  - ref: nebula://kai@lab/shared/S-26-0002/cal.json
+```
+
+Nesting is by *reference*, so one collection can sit in several parents —
+which means cycles are possible. `add` refuses to create one, and `show`
+detects any made by hand rather than looping. Deleting a collection never
+deletes what it points at, and membership is stored only in the collection,
+never on the member.
+
+```
+nebula collection <archive> new paper-2026 --title "Figures"
+nebula collection <archive> add paper-2026 S-26-0031/raw.tome --note "the good run"
+nebula collection <archive> add paper-2026 collections/rp23d-campaign
+nebula collection <archive> show paper-2026        # resolved tree
+nebula collection <archive> list | rm | remove
+```
+
+**Saved searches** are the computed counterpart — a stored query that
+answers itself, holding exactly the arguments `search_items` takes:
+
+```
+nebula view <archive> save needs-attention --query "drift" --fields filename,user_tags
+nebula view <archive> run needs-attention
+nebula view <archive> list | rm
+```
+
+`nebula check` reports collection entries pointing at something missing as
+**info**, and separates "gone from this archive" from "that archive isn't
+mounted here".
 
 ## User tags and comments
 
@@ -399,7 +493,11 @@ nebula upstream <archive> <run_id> <file>          # trace an artifact back to i
 nebula downstream <archive> <run_id> <file> [--also-search ARCHIVE ...]
 nebula stale <archive> [--hours N]                 # find abandoned "open" sessions
 nebula archives                                    # list registered archives
-nebula register <name> <root> [--git-org ORG]      # add an archive to the registry
+nebula register <name> <root> [--git-org ORG] [--user WHO]
+nebula whoami [--set NAME]                         # your name in nebula:// URIs
+nebula collection <archive> list|show|new|rm|add|remove
+nebula view <archive> list|save|run|rm             # saved searches
+                                                   # (alias: nebula saved-search)
 nebula config <archive> [--capture-code B] [--max-file-bytes N] [--on-overwrite P]
 nebula hold <archive> <run_id> / nebula release <archive> <run_id>
 nebula rm <archive> <run_id> <file> / nebula rm-session <archive> <run_id>
@@ -414,6 +512,12 @@ literal path.
 `downstream` only searches archives you tell it to (via `--also-search`),
 since a derived artifact could in principle live in any registered archive
 and scanning all of them by default would be expensive and surprising.
+
+## Design notes
+
+- [docs/relational-data-roadmap.md](docs/relational-data-roadmap.md) —
+  parked design work on surfacing relationships (`derived_from`,
+  `related_runs`, transitive lineage) and a calendar/timeline view.
 
 ## Status
 

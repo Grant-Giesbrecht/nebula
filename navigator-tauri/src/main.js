@@ -34,6 +34,9 @@ let curSession = null;
 let items = [];
 let listView = true, showMeta = true, verify = false;
 let selected = null, selectedIsSidecar = false;
+// Multi-select: `selected` stays the primary (what the panels describe),
+// `picked` is everything highlighted. Cmd/Ctrl toggles, Shift extends.
+let picked = [], pickAnchor = null;
 
 // search: the rail filters the already-loaded session list locally, while
 // artefact search asks the backend to walk the whole archive.
@@ -47,6 +50,11 @@ let itemCfg = { name: true, tags: true, origin: true, session: true,
                 userTags: true, comments: true,
                 dates: false, from: "", to: "" };
 let searchMode = false, searchMeta = null, searchTimer = null;
+
+// rail: sessions | collections | views
+let railTab = "sessions";
+let collections = [], savedViews = [];
+let openCollection = null;     // name of the collection shown in the item area
 
 // How the file list is ordered and which statuses are shown. The backend
 // hands items over newest-first; this re-sorts client-side so changing it
@@ -205,6 +213,8 @@ async function loadArchive(arc) {
     renderArchiveSelect();
     $("wtitle").textContent = `Nebula Navigator — ${label}`;
     await reload();
+    if (railTab === "collections") await loadCollections();
+    if (railTab === "views") await loadViews();
   } catch (e) {
     renderArchiveSelect();   // undo an optimistic <select> change
     toast(`Could not open archive: ${e}`);
@@ -315,11 +325,272 @@ function renderSessions() {
 
 async function selectSession(s) {
   curSession = s;
-  selected = null; selectedIsSidecar = false;
+  selected = null; selectedIsSidecar = false; picked = []; pickAnchor = null;
   renderSessions();
   await reloadItems();
   updateDetails();
   await refreshSessionInfo();
+}
+
+// ---- collections and saved searches -------------------------------------
+// A collection points at things instead of holding them, so opening one
+// never leaves the archive's real layout -- it is a view, like search.
+function setRailTab(tab) {
+  railTab = tab;
+  for (const [id, name] of [["tabSessions", "sessions"], ["tabCollections", "collections"],
+                            ["tabViews", "views"]]) {
+    $(id).classList.toggle("on", name === tab);
+  }
+  $("sessHead").classList.toggle("hidden", tab !== "sessions");
+  $("sessionList").classList.toggle("hidden", tab !== "sessions");
+  document.querySelector(".rail .search-row").classList.toggle("hidden", tab !== "sessions");
+  $("collPane").classList.toggle("hidden", tab !== "collections");
+  $("viewPane").classList.toggle("hidden", tab !== "views");
+  LS.set("nebula.railTab", tab);
+  // Leaving the collections tab means leaving its contents: the item area
+  // is shared, so hand it back to the open session rather than stranding a
+  // collection listing under the Sessions tab.
+  if (tab !== "collections" && openCollection) {
+    openCollection = null;
+    if (curSession && !searchMode) reloadItems();
+    else renderItemArea();
+  }
+  if (tab === "collections") loadCollections();
+  if (tab === "views") loadViews();
+}
+
+async function loadCollections() {
+  if (!archive) return;
+  try {
+    collections = await call("list_collections", { archive });
+  } catch (e) {
+    collections = [];
+  }
+  renderCollections();
+}
+
+function renderCollections() {
+  if (!collections.length) {
+    $("collList").innerHTML = `<div class="none">No collections yet.<br>` +
+      `Use <b>+ new</b>, or add a file from its detail bar.</div>`;
+    return;
+  }
+  $("collList").innerHTML = collections.map((c, i) => `
+    <div class="citem ${c.name === openCollection ? "sel" : ""}" data-i="${i}">
+      <span class="cname">${escapeHtml(c.name)}
+        ${c.title ? `<span class="ctitle">${escapeHtml(c.title)}</span>` : ""}</span>
+      <span class="ccount">${c.n_entries}</span>
+    </div>`).join("");
+  $("collList").querySelectorAll(".citem").forEach((el) => {
+    const name = collections[+el.dataset.i].name;
+    el.onclick = () => showCollection(name);
+    el.oncontextmenu = (ev) => { ev.preventDefault(); showCollectionMenu(ev.clientX, ev.clientY, name); };
+  });
+}
+
+async function showCollection(name) {
+  openCollection = name;
+  searchMode = false;
+  try {
+    const tree = await call("collection_tree", { archive, name });
+    $("itemArea").innerHTML = collectionHTML(tree);
+    wireCollection();
+    const n = (tree.entries || []).length;
+    $("statusbar").textContent = `${activeLabel()} — collection ${name}: ${n} entrie(s)`;
+  } catch (e) {
+    toast(`Could not open ${name}: ${e}`);
+  }
+  renderCollections();
+}
+
+function collectionHTML(node, nested) {
+  if (node.missing) return `<div class="empty">No collection called ${escapeHtml(node.name)}.</div>`;
+  const head = nested ? "" : `<div class="ctree-head">
+      <span class="t">${escapeHtml(node.name)}</span>
+      ${node.title ? `<span class="d">${escapeHtml(node.title)}</span>` : ""}
+    </div>${node.description ? `<div class="mg-note">${escapeHtml(node.description)}</div>` : ""}`;
+
+  if (node.cycle) return `${head}${noteBox("err", "This collection contains itself — stopping here.")}`;
+  if (!(node.entries || []).length && !nested) {
+    return `${head}<div class="empty">Nothing in this collection yet.</div>`;
+  }
+
+  const rows = (node.entries || []).map((e) => {
+    const cls = e.resolved === false ? "unresolved" : (e.exists ? "" : "missing");
+    const go = e.exists && (e.kind === "file" || e.kind === "session" || e.kind === "collection");
+    const attrs = go
+      ? `data-goto="${escapeHtml(e.kind)}" data-ref="${escapeHtml(e.ref)}" ` +
+        `data-target="${escapeHtml(e.target || "")}" data-path="${escapeHtml(e.path || "")}"`
+      : "";
+    return `<div class="crow ${cls} ${go ? "go" : ""}" ${attrs}>
+        <span class="ckind">${escapeHtml(e.kind)}</span>
+        <span class="cref">${escapeHtml(e.ref)}</span>
+        ${e.note ? `<span class="cnote">${escapeHtml(e.note)}</span>` : ""}
+        ${e.note_error ? `<span class="cbad">${escapeHtml(e.note_error)}</span>` : ""}
+        <span class="cx" data-remove="${escapeHtml(e.ref)}" title="Remove from this collection">✕</span>
+      </div>` + (e.child ? `<div class="cnest">${collectionHTML(e.child, true)}</div>` : "");
+  }).join("");
+  return `${head}<div class="ctree">${rows}</div>`;
+}
+
+function wireCollection() {
+  const area = $("itemArea");
+  area.querySelectorAll("[data-goto]").forEach((el) => {
+    el.onclick = (ev) => {
+      if (ev.target.getAttribute("data-remove") !== null) return;
+      const kind = el.getAttribute("data-goto");
+      if (kind === "collection") { showCollection(el.getAttribute("data-target")); return; }
+      const target = el.getAttribute("data-target") || "";
+      const [runId, filename] = target.split("/");
+      gotoRunId(runId, filename);
+    };
+  });
+  area.querySelectorAll(".crow").forEach((el) => {
+    el.oncontextmenu = (ev) => {
+      ev.preventDefault();
+      showEntryMenu(ev.clientX, ev.clientY, {
+        ref: el.querySelector(".cref").textContent,
+        kind: el.querySelector(".ckind").textContent,
+        path: el.getAttribute("data-path") || "",
+        exists: !el.classList.contains("missing") && !el.classList.contains("unresolved"),
+      });
+    };
+  });
+  area.querySelectorAll("[data-remove]").forEach((el) => {
+    el.onclick = async (ev) => {
+      ev.stopPropagation();
+      const ref = el.getAttribute("data-remove");
+      try {
+        await call("collection_remove", { archive, name: openCollection, refs: [ref] });
+        toast(`Removed ${ref} from ${openCollection}`);
+        await loadCollections();
+        await showCollection(openCollection);
+      } catch (e) {
+        toast(`Could not remove: ${e}`);
+      }
+    };
+  });
+}
+
+// Follow a collection entry back into the archive proper.
+async function gotoRunId(runId, filename) {
+  const s = sessions.find((x) => x.run_id === runId);
+  if (!s) { toast(`${runId} is not in this archive view.`); return; }
+  setRailTab("sessions");
+  openCollection = null;
+  await selectSession(s);
+  if (!filename) return;
+  const target = items.find((i) => i.name === filename);
+  if (target) selectItem(target, false);
+  else toast(`${filename} is not in ${runId}.`);
+}
+
+// ---- saved searches -----------------------------------------------------
+async function loadViews() {
+  if (!archive) return;
+  try {
+    savedViews = await call("list_views", { archive });
+  } catch (e) {
+    savedViews = [];
+  }
+  renderViews();
+}
+
+function renderViews() {
+  if (!savedViews.length) {
+    $("viewList").innerHTML = `<div class="none">No saved searches.<br>` +
+      `Search for something, then use <b>+ save</b>.</div>`;
+    return;
+  }
+  $("viewList").innerHTML = savedViews.map((v, i) => `
+    <div class="citem" data-i="${i}">
+      <span class="cname">${escapeHtml(v.name)}
+        <span class="ctitle">${escapeHtml(v.title || v.query || "(empty query)")}</span></span>
+      <span class="cx" data-del="${escapeHtml(v.name)}" title="Delete this view">✕</span>
+    </div>`).join("");
+  $("viewList").querySelectorAll(".citem").forEach((el) => {
+    el.onclick = (ev) => {
+      const del = ev.target.getAttribute("data-del");
+      if (del !== null) { deleteView(del); return; }
+      runView(savedViews[+el.dataset.i].name);
+    };
+  });
+}
+
+async function runView(name) {
+  try {
+    const res = await call("run_view", { archive, name });
+    openCollection = null;
+    searchMode = true;
+    searchMeta = res;
+    items = res.items;
+    selected = null; selectedIsSidecar = false;
+    // Show what is being run, so the results aren't unexplained.
+    $("itemSearch").value = (res.view && res.view.query) || "";
+    $("itemSearchClear").classList.remove("hidden");
+    applyItemView();
+    updateDetails();
+    $("statusbar").textContent =
+      `${activeLabel()} — view ${name}: ${res.items.length} match(es)`;
+  } catch (e) {
+    toast(`Could not run ${name}: ${e}`);
+  }
+}
+
+async function deleteView(name) {
+  const ok = await confirmAction({
+    body: `Delete the saved search <b>${escapeHtml(name)}</b>?<br><br>`
+      + `It is only a stored query — nothing it matched is affected.`,
+    confirmLabel: "Delete",
+  });
+  if (!ok) return;
+  try {
+    await call("delete_view", { archive, name });
+    await loadViews();
+    toast(`Deleted view ${name}`);
+  } catch (e) {
+    toast(`Could not delete: ${e}`);
+  }
+}
+
+async function saveCurrentSearch() {
+  const query = $("itemSearch").value.trim();
+  if (!query && !datesOn()) {
+    toast("Search for something first, then save it.");
+    return;
+  }
+  const name = await promptName("Save this search as", suggestName(query));
+  if (!name) return;
+  const fields = ["name", "tags", "origin", "session", "userTags", "comments"]
+    .filter((f) => itemCfg[f])
+    .map((f) => (f === "name" ? "filename" : f === "userTags" ? "user_tags" : f));
+  try {
+    await call("save_view", {
+      archive, name, query, fields,
+      date_from: (itemCfg.dates && itemCfg.from) || null,
+      date_to: (itemCfg.dates && itemCfg.to) || null,
+    });
+    toast(`Saved view ${name}`);
+    setRailTab("views");
+  } catch (e) {
+    toast(`Could not save: ${e}`);
+  }
+}
+
+function suggestName(text) {
+  return (text || "view").toLowerCase().replace(/[^a-z0-9._-]+/g, "-")
+    .replace(/^-+|-+$/g, "").slice(0, 40) || "view";
+}
+
+// A tiny prompt built on the confirm dialog, so names are typed in-app
+// rather than through a browser prompt() the webview may not offer.
+function promptName(label, initial) {
+  const body = `${escapeHtml(label)}:<br><br>`
+    + `<input id="cfmInput" class="notes-tags" value="${escapeHtml(initial || "")}" spellcheck="false" />`;
+  const done = confirmAction({ body, confirmLabel: "Save", danger: false });
+  const input = $("cfmInput");
+  if (input) { input.focus(); input.select(); }
+  return done.then((ok) => (ok && input ? input.value.trim() : null));
 }
 
 // ---- artefact search (backend: walks every session in the archive) ------
@@ -352,7 +623,7 @@ async function runItemSearch() {
     searchMode = true;
     searchMeta = res;
     items = res.items;
-    selected = null; selectedIsSidecar = false;
+    selected = null; selectedIsSidecar = false; picked = [];
     applyItemView();
     updateDetails();
     const bits = [`${res.items.length}${res.truncated ? "+" : ""} match(es)`,
@@ -513,7 +784,7 @@ function listHTML() {
   if (!shownItems.length) return emptyItemsHTML();
   const rows = shownItems.map((it, idx) => {
     const created = fmtCreated(it.timestamp);
-    let r = `<tr data-i="${idx}" data-sc="0" class="${sameSel(idx, false) ? 'sel' : ''}">
+    let r = `<tr data-i="${idx}" data-sc="0" class="${sameSel(idx, false) ? 'sel' : ''} ${isPicked(idx) ? 'multi' : ''}">
       <td><div class="namecell">${fileGlyph(it, 20)}<span class="fname">${escapeHtml(it.display_name || it.name)}</span>${dupBadge(it)}</div></td>
       ${searchMode ? sessionCell(it) : ""}
       <td class="created">${created}</td>
@@ -543,7 +814,7 @@ function emptyItemsHTML() {
 function gridHTML() {
   if (!shownItems.length) return emptyItemsHTML();
   return `<div class="grid">${shownItems.map((it, idx) => `
-    <div class="cell ${sameSel(idx, false) ? 'sel' : ''}" data-i="${idx}" data-sc="0" title="${escapeHtml(it.detail)}">
+    <div class="cell ${sameSel(idx, false) || isPicked(idx) ? 'sel' : ''}" data-i="${idx}" data-sc="0" title="${escapeHtml(it.detail)}">
       ${fileGlyph(it, 54)}<span class="cname">${escapeHtml(it.display_name || it.name)}${dupBadge(it)}</span>
       ${searchMode ? `<span class="cell-sess">${escapeHtml(it.run_id)}</span>` : ""}</div>`).join("")}</div>`;
 }
@@ -557,6 +828,7 @@ function dupBadge(it) {
 }
 
 function sameSel(idx, isSc) { return selected === shownItems[idx] && selectedIsSidecar === isSc; }
+function isPicked(idx) { return picked.length > 1 && picked.includes(shownItems[idx]); }
 
 function wireItems() {
   $("itemArea").querySelectorAll("[data-i]").forEach((el) => {
@@ -565,17 +837,42 @@ function wireItems() {
     el.onclick = (ev) => {
       const jump = ev.target.getAttribute && ev.target.getAttribute("data-jump");
       if (jump) { ev.stopPropagation(); jumpToSession(jump); return; }
-      selectItem(it, isSc);
+      selectItem(it, isSc, ev);
     };
     el.ondblclick = () => activate(it, isSc);
+    el.oncontextmenu = (ev) => {
+      ev.preventDefault();
+      // Right-clicking outside the current multi-selection selects that row
+      // first, so the menu always acts on what is highlighted.
+      if (!picked.includes(it)) selectItem(it, isSc);
+      showItemMenu(ev.clientX, ev.clientY);
+    };
   });
 }
 
-function selectItem(it, isSc) {
-  selected = it; selectedIsSidecar = isSc;
+function selectItem(it, isSc, ev) {
+  const toggle = ev && (ev.metaKey || ev.ctrlKey);
+  const extend = ev && ev.shiftKey;
+
+  if (extend && pickAnchor && shownItems.includes(pickAnchor)) {
+    const a = shownItems.indexOf(pickAnchor), b = shownItems.indexOf(it);
+    picked = shownItems.slice(Math.min(a, b), Math.max(a, b) + 1);
+  } else if (toggle) {
+    picked = picked.includes(it) ? picked.filter((x) => x !== it) : picked.concat([it]);
+    pickAnchor = it;
+  } else {
+    picked = [it];
+    pickAnchor = it;
+  }
+
+  // The primary is the row just clicked, unless a toggle removed it.
+  selected = picked.includes(it) ? it : (picked[picked.length - 1] || null);
+  selectedIsSidecar = selected === it ? isSc : false;
   renderItemArea();
   updateDetails();
-  if (showSc && it.has_sidecar) openSidecarPanel(it);
+  if (showSc && selected && selected.has_sidecar && picked.length === 1) {
+    openSidecarPanel(selected);
+  }
 }
 function activate(it, isSc) {
   selectItem(it, isSc);
@@ -599,6 +896,18 @@ function updateDetails() {
   if (!it) {
     $("detText").textContent = "Select an item to see its provenance.";
     $("detProv").innerHTML = "";
+    $("addCollBtn").disabled = true;
+    if ($("detColl")) $("detColl").innerHTML = "";
+    return;
+  }
+  if (picked.length > 1) {
+    const n = picked.length;
+    $("detText").innerHTML = `<span class="det-count">${n} files selected</span>\n`
+      + escapeHtml(picked.map((p) => p.display_name || p.name).slice(0, 6).join(", "))
+      + (n > 6 ? `, and ${n - 6} more` : "");
+    $("detProv").innerHTML = "";
+    if ($("detColl")) $("detColl").innerHTML = "";
+    $("addCollBtn").disabled = false;
     return;
   }
   const lines = it.detail.split("\n");
@@ -607,6 +916,8 @@ function updateDetails() {
     .join("\n");
   $("detProv").innerHTML = provenanceLine(it);
   wireEntryPoint($("detProv"), it);
+  $("addCollBtn").disabled = !selectedRef();
+  refreshMembership();
 }
 
 // ---- entry point ---------------------------------------------------------
@@ -875,6 +1186,220 @@ function renderSidecarPanel() {
       updateDetails();
     });
   }
+}
+
+// ---- context menus ------------------------------------------------------
+// The webview's own menu is useless here, so right-click gets a real one.
+let fileManagerName = "Finder";
+
+function showMenu(x, y, entries) {
+  const el = $("ctxMenu");
+  el.innerHTML = entries.map((e) => {
+    if (e.separator) return `<div class="sep"></div>`;
+    if (e.head) return `<div class="head">${escapeHtml(e.head)}</div>`;
+    return `<button ${e.disabled ? "disabled" : ""} class="${e.danger ? "danger" : ""}">`
+      + `${escapeHtml(e.label)}</button>`;
+  }).join("");
+  el.classList.remove("hidden");
+
+  // Place it at the cursor, flipped where it would fall off screen.
+  const r = el.getBoundingClientRect();
+  el.style.left = `${Math.max(4, Math.min(x, window.innerWidth - r.width - 6))}px`;
+  el.style.top = `${Math.max(4, Math.min(y, window.innerHeight - r.height - 6))}px`;
+
+  const buttons = [...el.querySelectorAll("button")];
+  const actionable = entries.filter((e) => !e.separator && !e.head);
+  buttons.forEach((btn, i) => {
+    btn.onclick = () => {
+      closeMenu();
+      const entry = actionable[i];
+      if (entry && entry.action) Promise.resolve(entry.action()).catch((err) => toast(`${err}`));
+    };
+  });
+}
+
+function closeMenu() { $("ctxMenu").classList.add("hidden"); }
+
+function showItemMenu(x, y) {
+  const many = picked.length > 1;
+  const it = selected;
+  const label = many ? `${picked.length} files` : (it ? it.display_name || it.name : "");
+  const entries = [
+    { head: label },
+    { label: many ? "Add all to collection…" : "Add to collection…",
+      action: () => openCollectionPicker(selectedRefs(), label) },
+    { separator: true },
+    { label: "Open", disabled: many || !(it && it.has_artifact),
+      action: () => call("open_path", { path: it.artifact_path }) },
+    { label: `Reveal in ${fileManagerName}`, disabled: !(it && (it.artifact_path || it.sidecar_path)),
+      action: () => call("reveal_path", { path: it.artifact_path || it.sidecar_path }) },
+    { label: "Show metadata", disabled: many || !(it && it.has_sidecar),
+      action: () => openSidecarPanel(it) },
+    { separator: true },
+    { label: "Reseal checksum", disabled: many || !(it && it.has_artifact && it.has_sidecar),
+      action: resealSelected },
+    { label: many ? "Delete…" : "Delete…", danger: true, disabled: !it,
+      action: deleteSelected },
+  ];
+  showMenu(x, y, entries);
+}
+
+function showCollectionMenu(x, y, name) {
+  showMenu(x, y, [
+    { head: name },
+    { label: "New folder inside…", action: () => newNestedCollection(name) },
+    { label: "Open", action: () => showCollection(name) },
+    { separator: true },
+    { label: "Delete collection…", danger: true, action: () => deleteCollection(name) },
+  ]);
+}
+
+function showEntryMenu(x, y, entry) {
+  const isFile = entry.kind === "file" && entry.exists;
+  showMenu(x, y, [
+    { head: entry.ref },
+    { label: "Add to collection…", disabled: !entry.exists,
+      action: () => openCollectionPicker([entry.ref], entry.ref) },
+    { label: `Reveal in ${fileManagerName}`, disabled: !isFile,
+      action: () => call("reveal_path", { path: entry.path }) },
+    { separator: true },
+    { label: "Remove from this collection", danger: true,
+      action: async () => {
+        await call("collection_remove", { archive, name: openCollection, refs: [entry.ref] });
+        toast(`Removed ${entry.ref} from ${openCollection}`);
+        await loadCollections();
+        await showCollection(openCollection);
+      } },
+  ]);
+}
+
+// A nested collection is a collection; "folder" is just what it is called
+// when it sits inside another one.
+async function newNestedCollection(parent) {
+  const name = await promptName(`New folder inside ${parent}`, "");
+  if (!name) return;
+  try {
+    await call("create_collection", { archive, name });
+    await call("collection_add", { archive, name: parent, refs: [`collections/${name}`] });
+    await loadCollections();
+    await showCollection(parent);
+    toast(`Created ${name} inside ${parent}`);
+  } catch (e) {
+    toast(`${e}`);
+  }
+}
+
+async function deleteCollection(name) {
+  const ok = await confirmAction({
+    body: `Delete the collection <b>${escapeHtml(name)}</b>?<br><br>`
+      + `It is only a list of references — every file and session it points at `
+      + `stays exactly where it is.`,
+    confirmLabel: "Delete",
+  });
+  if (!ok) return;
+  try {
+    await call("delete_collection", { archive, name });
+    if (openCollection === name) { openCollection = null; renderItemArea(); }
+    await loadCollections();
+    toast(`Deleted collection ${name}`);
+  } catch (e) {
+    toast(`${e}`);
+  }
+}
+
+// ---- add to collection --------------------------------------------------
+// The ref for the current selection, in the compact spelling: collections
+// hold refs, not paths.
+function selectedRef() {
+  const ctx = selectedSession();
+  if (!selected || !ctx) return null;
+  return `${ctx.runId}/${selected.name}`;
+}
+
+// Every highlighted artefact as a ref. Each carries its own session, so a
+// multi-selection from search results spanning sessions still works.
+function selectedRefs() {
+  const fallback = curSession && curSession.run_id;
+  return picked
+    .map((it) => {
+      const runId = it.run_id || fallback;
+      return runId ? `${runId}/${it.name}` : null;
+    })
+    .filter(Boolean);
+}
+
+async function openCollectionPicker(refs, label) {
+  const list = Array.isArray(refs) ? refs.filter(Boolean) : (refs ? [refs] : []);
+  if (!archive || !list.length) return;
+  pendingCollRef = { refs: list, label: label || (list.length === 1 ? list[0] : `${list.length} items`) };
+  $("collTarget").textContent = pendingCollRef.label;
+  try {
+    collections = await call("list_collections", { archive });
+  } catch (e) {
+    collections = [];
+  }
+  $("collPick").innerHTML = collections
+    .map((c) => `<option value="${escapeHtml(c.name)}">${escapeHtml(c.name)}` +
+                `${c.title ? "   " + escapeHtml(c.title) : ""}</option>`).join("");
+  const none = collections.length === 0;
+  $("collNew").checked = none;             // nothing to add to yet
+  $("collPick").disabled = none;
+  $("collNewFields").style.display = none ? "flex" : "none";
+  $("collNewName").value = "";
+  $("collNote").value = "";
+  $("collScrim").classList.add("show");
+}
+
+let pendingCollRef = null;
+
+function syncCollMode() {
+  const makeNew = $("collNew").checked;
+  $("collPick").disabled = makeNew;
+  $("collNewFields").style.display = makeNew ? "flex" : "none";
+}
+
+async function doAddToCollection() {
+  if (!pendingCollRef) return;
+  const makeNew = $("collNew").checked;
+  const name = makeNew ? $("collNewName").value.trim() : $("collPick").value;
+  if (!name) { toast("Name the collection first."); return; }
+  try {
+    await call("collection_add", {
+      archive, name, refs: pendingCollRef.refs, create: makeNew,
+      note: $("collNote").value.trim(),
+    });
+    $("collScrim").classList.remove("show");
+    toast(`Added ${pendingCollRef.label} to ${name}`);
+    await loadCollections();
+    await refreshMembership();
+  } catch (e) {
+    // A cycle, a duplicate, or an unparseable ref -- all worth showing.
+    toast(`${e}`);
+  }
+}
+
+// Which collections the selected file belongs to, shown beside it.
+let membership = [];
+async function refreshMembership() {
+  const ref = selectedRef();
+  membership = [];
+  if (archive && ref) {
+    try {
+      membership = await call("collections_containing", { archive, ref });
+    } catch (e) {
+      membership = [];
+    }
+  }
+  const el = $("detColl");
+  if (!el) return;
+  el.innerHTML = membership.length
+    ? `<span class="dp"><span class="dp-k">Collections</span>` +
+      membership.map((n) => `<span class="chip coll" data-open-coll="${escapeHtml(n)}">${escapeHtml(n)}</span>`).join(" ") +
+      `</span>`
+    : "";
+  el.querySelectorAll("[data-open-coll]").forEach((n) => {
+    n.onclick = () => { setRailTab("collections"); showCollection(n.getAttribute("data-open-coll")); };
+  });
 }
 
 // ---- item management ----------------------------------------------------
@@ -1415,12 +1940,14 @@ function renderSessionPanel() {
   };
   const actions = `<div class="mg-actions">
       <button class="dbtn ghost" id="sessHold">${info.held ? "Release hold" : "Hold"}</button>
+      <button class="dbtn ghost" id="sessAddColl">Add to collection</button>
       <button class="dbtn ghost danger-text" id="sessDelete">Move session to trash</button>
     </div>`;
   body.innerHTML = head + about + counts + actions + notesHTML("sess", notesDraft) + related +
     (history || noteBox("info", "No manual operations recorded."));
   wirePaths(body);
   $("sessHold").onclick = () => holdSession(!!info.held);
+  $("sessAddColl").onclick = () => openCollectionPicker(info.run_id, info.run_id);
   $("sessDelete").onclick = deleteSession;
   wireNotes("sess", info.session_path, null, (saved) => {
     sessInfo.user_tags = saved.tags;
@@ -1819,8 +2346,17 @@ async function refreshAll() {
 // One table, two entry points: the macOS menu (which owns these
 // accelerators and emits menu://action) and the keydown handler used
 // everywhere else. Ids match install_menu() in main.rs.
+function addSelectionToCollection() {
+  const refs = selectedRefs();
+  if (!refs.length) { toast("Select a file first."); return; }
+  const label = refs.length === 1
+    ? (selected.display_name || selected.name) : `${refs.length} files`;
+  openCollectionPicker(refs, label);
+}
+
 const MENU_ACTIONS = {
   metadata: toggleMetadataPanel,
+  collect: addSelectionToCollection,
   session: toggleSessionPanel,
   archive: openArchivePanel,
   reload: refreshAll,
@@ -1853,6 +2389,7 @@ function initShortcuts() {
     else if (k === "r" && !shift) name = "reload";
     else if (k === "i" && shift) name = "import";
     else if (k === "o" && !shift) name = "open";
+    else if (k === "c" && shift) name = "collect";
     if (!name) return;
 
     e.preventDefault();   // Ctrl-R would otherwise reload the webview
@@ -1878,6 +2415,29 @@ $("sessInfoBtn").onclick = toggleSessionPanel;
 $("sessClose").onclick = () => { showSess = false; savePanels(); updateDock(); };
 $("sessRaw").onclick = () => { sessRaw = !sessRaw; renderSessionPanel(); };
 $("importBtn").onclick = startImport;
+$("tabSessions").onclick = () => setRailTab("sessions");
+$("tabCollections").onclick = () => setRailTab("collections");
+$("tabViews").onclick = () => setRailTab("views");
+$("newCollBtn").onclick = async () => {
+  const name = await promptName("New collection name", "");
+  if (!name) return;
+  try {
+    await call("create_collection", { archive, name });
+    await loadCollections();
+    showCollection(name);
+  } catch (e) { toast(`${e}`); }
+};
+$("saveViewBtn").onclick = saveCurrentSearch;
+$("addCollBtn").onclick = () => addSelectionToCollection();
+document.addEventListener("click", closeMenu);
+document.addEventListener("contextmenu", (e) => {
+  // Suppress the webview's own menu everywhere; ours is opt-in per element.
+  if (!e.target.closest("input, textarea, .ctxmenu")) e.preventDefault();
+});
+$("collNew").onchange = syncCollMode;
+$("collCancel").onclick = () => $("collScrim").classList.remove("show");
+$("collOk").onclick = doAddToCollection;
+$("collScrim").onclick = (e) => { if (e.target === $("collScrim")) $("collScrim").classList.remove("show"); };
 $("arcBtn").onclick = openArchivePanel;
 $("arcClose").onclick = () => $("arcScrim").classList.remove("show");
 $("arcScrim").onclick = (e) => { if (e.target === $("arcScrim")) $("arcScrim").classList.remove("show"); };
@@ -1926,10 +2486,16 @@ async function boot() {
   updateDock();
   renderSessionPanel();
 
+  setRailTab(LS.get("nebula.railTab", "sessions"));
   archives = LS.get("nebula.archives", []);
   const last = localStorage.getItem("nebula.archive") || null;
   if (!archives.length && last) archives = [{ id: last, label: last }];
 
+  try {
+    fileManagerName = (await call("file_manager_name", {})).name || "Finder";
+  } catch (e) {
+    fileManagerName = "Finder";
+  }
   try {
     registry = await call("list_archives", {});
   } catch (e) {

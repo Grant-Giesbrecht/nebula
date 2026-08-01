@@ -99,6 +99,24 @@ Other things worth knowing about the window:
   whole snapshot back out as a real directory tree.
 - The rail, the right-hand dock, and the split between the two docked
   panels are all **draggable**.
+- The rail has three tabs: **Sessions**, **Collections** and **Views**.
+  Opening a collection shows its entries in the main area, with nested
+  collections expanded in place, missing targets struck through, and
+  unreachable archives marked separately; **✕** removes an entry. A file's
+  detail bar gains **Add to collection** (existing or new, with a note) and
+  shows which collections it already belongs to — click one to open it.
+  **Searches** lists saved searches: click to run, **+ save** stores the
+  current search with its fields and dates.
+- **Multi-select** in the file list: Cmd/Ctrl-click toggles, Shift-click
+  extends a range, and *Add to collection* then takes the whole selection
+  (each ref carries its own session, so a selection spanning search results
+  works).
+- **Right-click** menus: a file offers add-to-collection, reveal in the file
+  manager, open, metadata, reseal and delete; a collection in the rail
+  offers *New folder inside…* (a nested collection — "folder" is just what
+  it is called in that context) and delete; a collection entry offers
+  add-to-collection, reveal, and remove-from-this-collection. The webview's
+  own context menu is suppressed everywhere except text inputs.
 - **Archive** (toolbar) opens the management panel: session/artefact counts,
   index age with a *Rebuild* button, `nebula check` (checksum verification
   optional, since it re-hashes everything), the code store's size with a
@@ -124,6 +142,7 @@ modifier; tooltips are rewritten to ⌘ / ⇧⌘ at boot on macOS):
 | `Mod-R`       | Reload archive + session info (re-runs an active search) |
 | `Mod-Shift-I` | Import files… |
 | `Mod-O`       | Open the selection in the default app |
+| `Mod-Shift-C` | Add the selection to a collection |
 
 On macOS these are listed in the **View** menu so they can be found without
 memorising them. That has an implementation consequence worth knowing:
@@ -246,7 +265,9 @@ Ops: `ping`, `resolve`, `list_archives`, `list_sessions`, `list_items`,
 `lineage`, `resolve_refs`, `code_info`, `restore_code`, `entry_point_link`,
 `open_url`, `get_annotations`, `set_annotation`, `archive_stats`,
 `rebuild_index`, `check`, `gc`, `delete_file`, `reseal`, `adopt_file`,
-`delete_session`, `hold`, `release`,
+`delete_session`, `hold`, `release`, `list_collections`, `collection_tree`,
+`create_collection`, `delete_collection`, `collection_add`, `collection_remove`,
+`collections_containing`, `list_views`, `run_view`, `save_view`, `delete_view`,
 `importable_sessions`,
 `frozen_sessions`, `import_new`, `import_file`, `open_path`,
 `file_manager_name`. Test any of them without the GUI:

@@ -254,7 +254,36 @@ def check(
                     existing_sessions=existing_sessions, existing_files=existing_files,
                     registry=registry, label=label))
 
+    issues.extend(_check_collections(archive_root, label))
     return issues
+
+
+def _check_collections(archive_root: Path, label: str) -> List[CheckIssue]:
+    """Collection entries that point at something missing.
+
+    Info, not error: a collection is a pointer list, so a dangling entry
+    costs nothing and may just mean a colleague's archive isn't mounted
+    right now. Unreachable *other* archives are reported separately from
+    things that are genuinely gone here.
+    """
+    from nebula import collection as collection_mod
+
+    out: List[CheckIssue] = []
+    for coll in collection_mod.list_all(archive_root):
+        for entry in coll.entries:
+            got = collection_mod.resolve_entry(archive_root, entry)
+            if got["exists"]:
+                continue
+            kind = ("unresolvable_collection_entry" if not got["resolved"]
+                    else "dangling_collection_entry")
+            out.append(CheckIssue(
+                kind, None, None,
+                f"collection {coll.name!r} lists {entry.ref!r}: "
+                f"{got['note_error'] or 'not found'}",
+                fix=(f"'nebula collection remove {label} {coll.name} {entry.ref}', "
+                     f"or restore what it points at"),
+                severity="info"))
+    return out
 
 
 def _check_code_ref(archive_root: Path, code: Optional[str], run_id: str,

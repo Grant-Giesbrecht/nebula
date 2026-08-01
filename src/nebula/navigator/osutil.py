@@ -28,6 +28,24 @@ def file_manager_name() -> str:
     return "File Manager"
 
 
+def reveal_path(path) -> bool:
+    """Show a file *in* the file manager with it selected, rather than
+    opening it. open_path on a file launches its application, which is not
+    what "reveal" means; on a folder the two coincide."""
+    target = Path(path)
+    try:
+        if sys.platform == "darwin":
+            subprocess.Popen(["open", "-R", str(target)])
+        elif sys.platform.startswith("win"):
+            subprocess.Popen(["explorer", f"/select,{target}"])
+        else:
+            # No portable "select" on Linux; open the containing folder.
+            subprocess.Popen(["xdg-open", str(target.parent if target.is_file() else target)])
+    except OSError:
+        return False
+    return True
+
+
 def open_url(url: str) -> bool:
     """Open a URL in the default browser. Separate from open_path because
     that one normalises through Path(), which mangles a URL ("https://x"

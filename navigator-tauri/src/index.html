@@ -20,7 +20,12 @@
           <button class="abtn" id="openArchive" title="Open another archive…">+</button>
           <button class="abtn" id="closeArchive" title="Close this archive">✕</button>
         </div>
-        <div class="rail-head"><span>Sessions</span><span id="sessCount"></span></div>
+        <div class="rail-tabs">
+          <button class="rtab on" id="tabSessions">Sessions</button>
+          <button class="rtab" id="tabCollections">Collections</button>
+          <button class="rtab" id="tabViews">Searches</button>
+        </div>
+        <div class="rail-head" id="sessHead"><span>Sessions</span><span id="sessCount"></span></div>
         <div class="search-row">
           <span class="s-ico">
             <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><circle cx="11" cy="11" r="7"/><line x1="16.5" y1="16.5" x2="21" y2="21"/></svg>
@@ -44,6 +49,22 @@
           </div>
         </div>
         <div class="session-list" id="sessionList"></div>
+
+        <div class="rail-pane hidden" id="collPane">
+          <div class="rail-head">
+            <span>Collections</span>
+            <span class="open-link" id="newCollBtn" title="New collection">+ new</span>
+          </div>
+          <div class="rail-list" id="collList"></div>
+        </div>
+
+        <div class="rail-pane hidden" id="viewPane">
+          <div class="rail-head">
+            <span>Saved searches</span>
+            <span class="open-link" id="saveViewBtn" title="Save the current search">+ save</span>
+          </div>
+          <div class="rail-list" id="viewList"></div>
+        </div>
       </aside>
 
       <div class="splitter v" id="splitRail" title="Drag to resize"></div>
@@ -145,6 +166,10 @@
               <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="12" y1="18" x2="12" y2="12"/><line x1="9" y1="15" x2="15" y2="15"/></svg>
               Write sidecar
             </button>
+            <button class="lbtn" id="addCollBtn" title="Add to a collection  (Ctrl-Shift-C)" disabled>
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 7h6l2 2h8v9a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V7z"/><line x1="12" y1="12" x2="12" y2="18"/><line x1="9" y1="15" x2="15" y2="15"/></svg>
+              Add to collection
+            </button>
             <button class="lbtn danger" id="delBtn" title="Move this artefact to the session's .trash/" disabled>
               <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></svg>
               Delete
@@ -155,6 +180,7 @@
             </button>
           </div>
           <div class="det-prov" id="detProv"></div>
+          <div class="det-prov" id="detColl"></div>
           <div class="det-text" id="detText">Select an item to see its provenance.</div>
         </div>
       </section>
@@ -239,6 +265,29 @@
     </div>
   </div>
 
+  <div class="scrim" id="collScrim">
+    <div class="dialog" role="dialog" aria-modal="true" aria-labelledby="collHead">
+      <div class="dlg-head" id="collHead">Add to collection</div>
+      <div class="dlg-body">
+        <div class="dlg-arc">adding <b id="collTarget"></b></div>
+        <div class="field">
+          <label>Collection</label>
+          <select id="collPick"></select>
+        </div>
+        <label class="check"><input type="checkbox" id="collNew" /> Create a new collection</label>
+        <div class="field indent" id="collNewFields" style="display:none">
+          <label>Name</label>
+          <input id="collNewName" placeholder="paper-2026" spellcheck="false" />
+        </div>
+        <div class="field"><label>Note</label><input id="collNote" placeholder="why this belongs here (optional)" /></div>
+      </div>
+      <div class="dlg-actions">
+        <button class="dbtn ghost" id="collCancel">Cancel</button>
+        <button class="dbtn fill" id="collOk">Add</button>
+      </div>
+    </div>
+  </div>
+
   <div class="scrim" id="cfmScrim">
     <div class="dialog" role="dialog" aria-modal="true" aria-labelledby="cfmHead">
       <div class="dlg-head" id="cfmHead">Are you sure?</div>
@@ -249,6 +298,8 @@
       </div>
     </div>
   </div>
+
+  <div class="ctxmenu hidden" id="ctxMenu"></div>
 
   <div class="toast" id="toast"></div>
 

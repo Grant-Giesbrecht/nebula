@@ -414,3 +414,64 @@ body.resizing *, body.resizing-y * { pointer-events:none; }
 .lbtn.danger:hover:not(:disabled) { background:var(--err-bg); }
 .dbtn.ghost.danger-text { color:var(--err); border-color:var(--err); }
 .dbtn.ghost.danger-text:hover { background:var(--err-bg); }
+
+/* rail tabs + collection/view panes */
+.rail-tabs { display:flex; gap:2px; padding:6px 8px 0; }
+.rtab { flex:1; height:24px; border:none; background:transparent; color:var(--text-faint);
+        font-family:var(--ui); font-size:11.5px; font-weight:600; cursor:pointer;
+        border-radius:6px; }
+.rtab:hover { background:rgba(128,140,160,.12); color:var(--text); }
+.rtab.on { background:var(--accent-soft); color:var(--accent); }
+.rail-pane { display:flex; flex-direction:column; min-height:0; flex:1; }
+.rail-pane.hidden { display:none; }
+.rail-list { overflow-y:auto; padding:2px 8px 10px; display:flex; flex-direction:column; gap:2px; }
+.rail-head .open-link { cursor:pointer; color:var(--accent); letter-spacing:0;
+                        text-transform:none; font-weight:600; }
+.citem { display:flex; align-items:baseline; gap:8px; padding:7px 9px; border-radius:7px;
+         cursor:pointer; }
+.citem:hover { background:rgba(128,140,160,.10); }
+.citem.sel { background:var(--sel-bg); }
+.citem .cname { flex:1; min-width:0; font-size:12.5px; font-weight:600;
+                white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+.citem .ccount { font-size:11px; color:var(--text-faint); }
+.citem .ctitle { display:block; font-weight:400; color:var(--text-dim); font-size:11.5px; }
+.rail-list .none { padding:14px 10px; color:var(--text-faint); font-size:12.5px; text-align:center; }
+
+/* collection contents in the item area */
+.ctree { padding:10px 14px; display:flex; flex-direction:column; gap:2px; }
+.ctree-head { display:flex; align-items:baseline; gap:9px; padding:2px 0 8px; }
+.ctree-head .t { font-size:15px; font-weight:700; }
+.ctree-head .d { font-size:12.5px; color:var(--text-dim); }
+.crow { display:flex; align-items:baseline; gap:8px; padding:4px 8px; border-radius:6px; }
+.crow.go { cursor:pointer; }
+.crow.go:hover { background:rgba(128,140,160,.10); }
+.crow .ckind { font-size:10.5px; font-weight:700; text-transform:uppercase; letter-spacing:.05em;
+               color:var(--text-faint); min-width:74px; }
+.crow .cref { font-family:var(--mono); font-size:12px; }
+.crow.go .cref { color:var(--accent); }
+.crow .cnote { font-size:11.5px; color:var(--text-dim); }
+.crow .cbad { font-size:11.5px; color:var(--err); }
+.crow.missing .cref, .crow.unresolved .cref { text-decoration:line-through; color:var(--text-faint); }
+.crow .cx { margin-left:auto; color:var(--text-faint); cursor:pointer; opacity:0; padding:0 4px; }
+.crow:hover .cx { opacity:1; }
+.crow .cx:hover { color:var(--err); }
+.cnest { margin-left:18px; border-left:1px solid var(--border); padding-left:8px; }
+.chip.coll { background:var(--accent-soft); color:var(--accent); }
+
+/* right-click menu */
+.ctxmenu { position:fixed; z-index:80; min-width:190px; background:var(--panel);
+           border:1px solid var(--border-strong); border-radius:9px; box-shadow:var(--shadow);
+           padding:5px; display:flex; flex-direction:column; }
+.ctxmenu.hidden { display:none; }
+.ctxmenu button { text-align:left; border:none; background:transparent; color:var(--text);
+                  font-family:var(--ui); font-size:12.5px; padding:6px 10px; border-radius:6px;
+                  cursor:pointer; white-space:nowrap; }
+.ctxmenu button:hover { background:var(--accent-soft); color:var(--accent); }
+.ctxmenu button.danger { color:var(--err); }
+.ctxmenu button.danger:hover { background:var(--err-bg); color:var(--err); }
+.ctxmenu button:disabled { color:var(--text-faint); cursor:default; background:transparent; }
+.ctxmenu .sep { height:1px; background:var(--border); margin:4px 6px; }
+.ctxmenu .head { font-size:10.5px; font-weight:700; letter-spacing:.05em; text-transform:uppercase;
+                 color:var(--text-faint); padding:4px 10px 2px; }
+tbody tr.multi { background:var(--sel-bg); }
+.det-count { font-size:12px; color:var(--accent); font-weight:600; }

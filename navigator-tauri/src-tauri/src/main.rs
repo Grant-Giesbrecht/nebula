@@ -336,6 +336,9 @@ fn install_menu(app: &tauri::App) -> tauri::Result<()> {
     let session = MenuItemBuilder::with_id("menu:session", "Show Session Info")
         .accelerator("CmdOrCtrl+Shift+S")
         .build(app)?;
+    let collect = MenuItemBuilder::with_id("menu:collect", "Add to Collection…")
+        .accelerator("CmdOrCtrl+Shift+C")
+        .build(app)?;
     let archive = MenuItemBuilder::with_id("menu:archive", "Archive Management…")
         .build(app)?;
     let reload = MenuItemBuilder::with_id("menu:reload", "Reload Archive")
@@ -352,6 +355,7 @@ fn install_menu(app: &tauri::App) -> tauri::Result<()> {
         .item(&metadata)
         .item(&session)
         .separator()
+        .item(&collect)
         .item(&archive)
         .item(&reload)
         .separator()

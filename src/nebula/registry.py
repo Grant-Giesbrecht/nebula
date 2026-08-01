@@ -26,6 +26,10 @@ class ArchiveConfig:
     name: str
     root: Path
     git_org: Optional[str] = None
+    #: Who owns this archive, for nebula:// URIs. None means "me" (see
+    #: nebula.identity) -- a colleague's archive mounted locally records
+    #: their name here so refs into it resolve to this path.
+    user: Optional[str] = None
 
     @property
     def index_path(self) -> Path:
@@ -62,6 +66,7 @@ class Registry:
                 name=name,
                 root=Path(os.path.expanduser(cfg["root"])),
                 git_org=cfg.get("git_org"),
+                user=cfg.get("user"),
             )
 
     def get(self, name: str) -> ArchiveConfig:
@@ -85,16 +90,41 @@ class Registry:
         self._load()
         return dict(self._archives)
 
-    def register(self, name: str, root: Path, git_org: Optional[str] = None) -> None:
+    def register(self, name: str, root: Path, git_org: Optional[str] = None,
+                 user: Optional[str] = None) -> None:
         """Add or update an archive entry and persist it to disk."""
         self._load()
-        self._archives[name] = ArchiveConfig(name=name, root=Path(root), git_org=git_org)
+        self._archives[name] = ArchiveConfig(name=name, root=Path(root),
+                                             git_org=git_org, user=user)
         self._save()
+
+    def find(self, name: str, user: Optional[str] = None) -> Optional[ArchiveConfig]:
+        """Look up an archive by name and (optionally) owner.
+
+        `user=None` means "whoever, as long as the name matches" -- the
+        compact ref case. A named user must match the entry's `user`, or
+        the local identity when the entry does not name one: an archive
+        with no recorded owner is assumed to be mine.
+        """
+        self._load()
+        cfg = self._archives.get(name)
+        if cfg is None or user is None:
+            return cfg
+        if cfg.user:
+            return cfg if cfg.user == user else None
+
+        from nebula.identity import get_user
+
+        return cfg if get_user() == user else None
 
     def _save(self) -> None:
         self.path.parent.mkdir(parents=True, exist_ok=True)
         raw = {
-            name: {"root": str(cfg.root), **({"git_org": cfg.git_org} if cfg.git_org else {})}
+            name: {
+                "root": str(cfg.root),
+                **({"git_org": cfg.git_org} if cfg.git_org else {}),
+                **({"user": cfg.user} if cfg.user else {}),
+            }
             for name, cfg in self._archives.items()
         }
         with open(self.path, "w") as f:
