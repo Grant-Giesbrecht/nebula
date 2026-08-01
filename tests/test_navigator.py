@@ -399,3 +399,77 @@ def test_sidecar_info_marks_assumed_source(tmp_path):
     fresh = _session_with(tmp_path / "archive2", {"new.csv": "x"})
     got = model.sidecar_info(fresh.path / "new.csv.meta.json")
     assert got["source_recorded"] is True and got["produced_by"]["source"] == "script"
+
+
+# ---------------------------------------------------------------------
+# derived_from on GUI import + ref validation
+# ---------------------------------------------------------------------
+
+def test_import_file_records_derived_from(tmp_path):
+    """The bridge op must pass derived_from through, matching the CLI's
+    `nebula import --derived-from`."""
+    from nebula.navigator import api
+    archive = tmp_path / "archive"
+    s = _session_with(archive, {"raw.csv": "x"})
+    src = tmp_path / "fit.json"
+    src.write_text("{}")
+
+    api.dispatch("import_file", {
+        "archive": str(archive), "run_id": s.id, "paths": [str(src)],
+        "origin": "by hand", "derived_from": ["raw.csv"], "allow_frozen": True,
+    })
+    info = model.sidecar_info(s.path / "fit.json.meta.json")
+    assert [r["ref"] for r in info["derived_from"]] == ["raw.csv"]
+    assert info["produced_by"]["origin"] == "by hand"
+    # ...and the new link is visible from the other end straight away
+    assert [d["filename"] for d in model.lineage(archive, s.path, "raw.csv")["downstream"]] \
+        == ["fit.json"]
+
+
+def test_import_file_ignores_blank_derived_from(tmp_path):
+    from nebula.navigator import api
+    archive = tmp_path / "archive"
+    s = _session_with(archive, {"raw.csv": "x"})
+    src = tmp_path / "note.txt"
+    src.write_text("hi")
+    api.dispatch("import_file", {
+        "archive": str(archive), "run_id": s.id, "paths": [str(src)],
+        "derived_from": ["", "  "], "allow_frozen": True,
+    })
+    assert model.sidecar_info(s.path / "note.txt.meta.json")["derived_from"] == []
+
+
+def test_resolve_refs_reports_each_case(tmp_path):
+    archive = tmp_path / "archive"
+    s = _session_with(archive, {"raw.csv": "x"})
+    got = model.resolve_refs(archive, s.id,
+                             ["raw.csv", "nope.csv", "S-9999/x.csv", "a|b|c"])
+
+    assert got[0]["valid"] and got[0]["exists"]
+    assert got[1]["valid"] and not got[1]["exists"] and got[1]["note"] == "file is missing"
+    assert got[2]["valid"] and "S-9999 not found" in got[2]["note"]
+    assert not got[3]["valid"] and got[3]["error"]      # unparseable ref
+
+
+def test_list_items_carries_build_provenance(tmp_path):
+    """The details strip shows repo/commit/entry point without opening the
+    sidecar, so list_items has to carry them."""
+    archive = tmp_path / "archive"
+    s = _session_with(archive, {"raw.csv": "x"})
+    sc = s.path / "raw.csv.meta.json"
+    data = json.loads(sc.read_text())
+    data["produced_by"].update({"repo": "nebula", "commit": "48c4a28c" + "0" * 32,
+                                "dirty": True, "entry_point": "examples/run.py"})
+    sc.write_text(json.dumps(data))
+
+    it = {i.name: i for i in model.list_items(s.path)}["raw.csv"]
+    assert it.repo == "nebula" and it.commit.startswith("48c4a28c")
+    assert it.dirty is True and it.entry_point == "examples/run.py"
+
+
+def test_list_items_counts_derived_from(tmp_path):
+    archive = tmp_path / "archive"
+    s = _derived_session(archive)
+    items = {i.name: i for i in model.list_items(s.path)}
+    assert items["log.txt"].n_derived_from == 1
+    assert items["raw.csv"].n_derived_from == 0

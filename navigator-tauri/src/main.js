@@ -482,11 +482,46 @@ function updateDetails() {
   $("openArt").disabled = !hasArt;
   $("openSc").disabled = !hasSc;
   $("editSc").disabled = !hasSc;
-  if (!it) { $("detText").textContent = "Select an item to see its provenance."; return; }
+  if (!it) {
+    $("detText").textContent = "Select an item to see its provenance.";
+    $("detProv").innerHTML = "";
+    return;
+  }
   const lines = it.detail.split("\n");
   $("detText").innerHTML = lines
     .map((ln, i) => (i === 0 ? `<span class="hl">${escapeHtml(ln)}</span>` : escapeHtml(ln)))
     .join("\n");
+  $("detProv").innerHTML = provenanceLine(it);
+}
+
+// The "produced by" facts worth seeing without opening the panel: what
+// built the file, and from where. Same phrasing as the sidecar panel.
+function buildHTML(pb) {
+  if (!pb.repo && !pb.commit) return "";
+  const dirty = pb.dirty === true ? ' <span class="warn-text">(uncommitted changes)</span>'
+    : pb.dirty === false ? ' <span class="ok-text">(clean)</span>' : "";
+  return `${escapeHtml(pb.repo || "?")} @ <span class="mono">${escapeHtml((pb.commit || "?").slice(0, 8))}</span>${dirty}`;
+}
+
+function provenanceLine(it) {
+  const build = buildHTML(it);
+  const bits = [];
+  if (build) bits.push(`<span class="dp"><span class="dp-k">Built from</span>${build}</span>`);
+  if (it.entry_point) {
+    bits.push(`<span class="dp"><span class="dp-k">Entry point</span><span class="mono">${escapeHtml(it.entry_point)}</span></span>`);
+  }
+  if (!bits.length) {
+    // An imported file has no git provenance -- say what it does have.
+    if (it.source === "external") {
+      bits.push(`<span class="dp"><span class="dp-k">Imported</span>${escapeHtml(it.origin || "no origin recorded")}</span>`);
+    } else if (it.has_sidecar) {
+      bits.push(`<span class="dp dim">no build provenance recorded in this sidecar</span>`);
+    }
+  }
+  if (it.n_derived_from) {
+    bits.push(`<span class="dp"><span class="dp-k">Derived from</span>${it.n_derived_from} source(s)</span>`);
+  }
+  return bits.join("");
 }
 
 // ---- pretty-print helpers (shared by both panels) -----------------------
@@ -598,11 +633,7 @@ function renderSidecarPanel() {
     pathRow("Sidecar", info.path));
 
   // The git fields say more together than apart: "nebula @ 48c4a28c (dirty)".
-  const build = pb.repo || pb.commit
-    ? `${escapeHtml(pb.repo || "?")} @ <span class="mono">${escapeHtml((pb.commit || "?").slice(0, 8))}</span>` +
-      (pb.dirty === true ? ' <span class="warn-text">(uncommitted changes)</span>'
-       : pb.dirty === false ? ' <span class="ok-text">(clean)</span>' : "")
-    : null;
+  const build = buildHTML(pb) || null;
 
   const provenance = group(
     pb.source === "external" ? "Imported" : "Produced by",
@@ -870,14 +901,68 @@ async function showImportDialog() {
   const canExisting = importable.length > 0;
   $("modeExisting").disabled = !canExisting;
   document.querySelector(`input[name="mode"][value="${canExisting ? 'existing' : 'new'}"]`).checked = true;
-  syncMode();
   $("dlgTags").value = ""; $("dlgDesc").value = ""; $("dlgOrigin").value = "";
+  $("dlgDerived").value = ""; $("dlgRefs").innerHTML = "";
+  syncMode();
   $("scrim").classList.add("show");
 }
 function syncMode() {
   const existing = $("modeExisting").checked;
   $("dlgSession").disabled = !existing;
   $("newFields").style.display = existing ? "none" : "flex";
+  // `nebula import-new` has no --derived-from, and manual.import_new does
+  // not accept one, so the GUI doesn't pretend to offer it for a brand-new
+  // session -- that would silently drop what you typed.
+  $("dlgDerived").disabled = !existing;
+  $("dlgRefs").innerHTML = existing ? $("dlgRefs").innerHTML
+    : `<span class="ref bad">not available when creating a new session — import first, then add refs</span>`;
+  if (existing) refreshDerivedCandidates();
+}
+
+function derivedRefs() {
+  return $("dlgDerived").value.split(",").map((r) => r.trim()).filter(Boolean);
+}
+
+// Offer the target session's own files for completion: same-session refs
+// are the common case, and a bare filename is a valid ref.
+async function refreshDerivedCandidates() {
+  const runId = $("dlgSession").value;
+  const s = sessions.find((x) => x.run_id === runId);
+  if (!s) { $("dlgDerivedList").innerHTML = ""; return; }
+  try {
+    const its = await call("list_items", { session_path: s.path, verify: false });
+    $("dlgDerivedList").innerHTML = its
+      .filter((i) => i.has_artifact)
+      .map((i) => `<option value="${escapeHtml(i.name)}"></option>`).join("");
+  } catch (e) {
+    $("dlgDerivedList").innerHTML = "";
+  }
+  validateDerived();
+}
+
+// Refs are allowed to dangle (the CLI permits it), so a missing target is
+// a warning, not a block -- but a ref that doesn't parse is an error.
+let derivedTimer = null;
+function scheduleValidateDerived() {
+  clearTimeout(derivedTimer);
+  derivedTimer = setTimeout(validateDerived, 200);
+}
+
+async function validateDerived() {
+  const refs = derivedRefs();
+  const box = $("dlgRefs");
+  if (!$("modeExisting").checked) return;
+  if (!refs.length) { box.innerHTML = ""; return; }
+  try {
+    const res = await call("resolve_refs", { archive, run_id: $("dlgSession").value, refs });
+    box.innerHTML = res.map((r) => {
+      if (!r.valid) return `<span class="ref bad">${escapeHtml(r.text)} — ${escapeHtml(r.error || "invalid ref")}</span>`;
+      if (r.exists) return `<span class="ref ok">${escapeHtml(r.ref)} ✓</span>`;
+      return `<span class="ref warn">${escapeHtml(r.ref)} — ${escapeHtml(r.note || "not found")}</span>`;
+    }).join("");
+  } catch (e) {
+    box.innerHTML = "";
+  }
 }
 async function doImport() {
   const origin = $("dlgOrigin").value.trim() || null;
@@ -885,7 +970,8 @@ async function doImport() {
     let targetRunId;
     if ($("modeExisting").checked) {
       targetRunId = $("dlgSession").value;
-      await call("import_file", { archive, run_id: targetRunId, paths: pendingPaths, origin, allow_frozen: true });
+      await call("import_file", { archive, run_id: targetRunId, paths: pendingPaths,
+                                  origin, derived_from: derivedRefs(), allow_frozen: true });
     } else {
       const tags = $("dlgTags").value.split(",").map((t) => t.trim()).filter(Boolean);
       const res = await call("import_new", { archive, paths: pendingPaths, tags, description: $("dlgDesc").value.trim(), origin });
@@ -1115,6 +1201,8 @@ $("sessRaw").onclick = () => { sessRaw = !sessRaw; renderSessionPanel(); };
 $("importBtn").onclick = startImport;
 $("modeExisting").onchange = syncMode;
 $("modeNew").onchange = syncMode;
+$("dlgSession").onchange = refreshDerivedCandidates;
+$("dlgDerived").oninput = scheduleValidateDerived;
 $("dlgCancel").onclick = () => $("scrim").classList.remove("show");
 $("dlgImport").onclick = doImport;
 $("scrim").onclick = (e) => { if (e.target === $("scrim")) $("scrim").classList.remove("show"); };

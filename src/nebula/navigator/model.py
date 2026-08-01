@@ -76,6 +76,13 @@ class Item:
     timestamp: Optional[str] = None    # sidecar 'created', else file mtime (ISO)
     artifact_path: Optional[Path] = None
     sidecar_path: Optional[Path] = None
+    # produced_by's git fields, carried on the item so a list view can show
+    # "what built this" without opening the sidecar panel per file.
+    repo: Optional[str] = None
+    commit: Optional[str] = None
+    dirty: Optional[bool] = None
+    entry_point: Optional[str] = None
+    n_derived_from: int = 0            # how many sources it declares
 
     @property
     def status_label(self) -> str:
@@ -182,11 +189,19 @@ def list_items(session_dir, *, verify_checksums: bool = False) -> List[Item]:
         sc_path = sidecar_path_for(art_path)
 
         source = origin = sha = created = None
+        repo = commit = entry_point = None
+        dirty = None
+        n_derived = 0
         if has_s:
             try:
                 meta = read_sidecar(art_path)
                 source = meta.produced_by.source
                 origin = meta.produced_by.origin
+                repo = meta.produced_by.repo
+                commit = meta.produced_by.commit
+                dirty = meta.produced_by.dirty
+                entry_point = meta.produced_by.entry_point
+                n_derived = len(meta.derived_from)
                 sha = meta.sha256
                 created = meta.created
             except Exception:
@@ -222,6 +237,8 @@ def list_items(session_dir, *, verify_checksums: bool = False) -> List[Item]:
             timestamp=created,
             artifact_path=art_path if has_a else None,
             sidecar_path=sc_path if has_s else None,
+            repo=repo, commit=commit, dirty=dirty, entry_point=entry_point,
+            n_derived_from=n_derived,
         ))
     return items
 
@@ -455,6 +472,34 @@ def lineage(archive, session_path, filename: str) -> dict:
         "upstream": upstream, "downstream": downstream,
         "complete": True,   # downstream is same-archive only, by construction
     }
+
+
+def resolve_refs(archive, run_id: str, refs: List[str]) -> List[dict]:
+    """Check derived_from refs before they are written.
+
+    Each entry comes back with whether it parses at all, and -- if it does
+    -- whether it points at something that exists, using the same
+    resolution as :func:`lineage`. A ref is *allowed* to dangle (the CLI
+    permits it, and a target may legitimately arrive later), so this
+    reports rather than rejects; the caller decides how loudly to warn.
+    """
+    from nebula.refs import parse_ref
+
+    archive_root, label = resolve(archive)
+    out: List[dict] = []
+    for text in refs:
+        entry = {"text": text, "valid": False, "error": None}
+        try:
+            ref = parse_ref(text)
+        except ValueError as e:
+            entry["error"] = str(e)
+            out.append(entry)
+            continue
+        entry["valid"] = True
+        entry.update(_resolve_ref(ref, archive_root=archive_root,
+                                  archive_label=label, run_id=run_id))
+        out.append(entry)
+    return out
 
 
 ITEM_SEARCH_FIELDS = ("filename", "tags", "origin", "session")

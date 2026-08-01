@@ -68,6 +68,11 @@ def _item_to_dict(it: "model.Item") -> Dict[str, Any]:
         "artifact_path": str(it.artifact_path) if it.artifact_path else None,
         "sidecar_path": str(it.sidecar_path) if it.sidecar_path else None,
         "detail": it.detail,
+        "repo": it.repo,
+        "commit": it.commit,
+        "dirty": it.dirty,
+        "entry_point": it.entry_point,
+        "n_derived_from": it.n_derived_from,
     }
 
 
@@ -167,15 +172,23 @@ def op_import_new(args: Dict[str, Any]) -> Dict[str, Any]:
 
 def op_import_file(args: Dict[str, Any]) -> Dict[str, Any]:
     root, _ = model.resolve(args["archive"])
+    # derived_from mirrors the CLI's `nebula import --derived-from`: the
+    # same refs are recorded on every file in this import.
+    derived_from = [r for r in (args.get("derived_from") or []) if str(r).strip()]
     dests = []
     for p in args["paths"]:
         dest = manual.import_file(
             root, args["run_id"], str(p),
             origin=args.get("origin") or None,
+            derived_from=derived_from or None,
             allow_frozen=bool(args.get("allow_frozen", False)),
         )
         dests.append(str(dest))
     return {"run_id": args["run_id"], "dests": dests}
+
+
+def op_resolve_refs(args: Dict[str, Any]) -> List[Dict[str, Any]]:
+    return model.resolve_refs(args["archive"], args["run_id"], args.get("refs") or [])
 
 
 def op_open_path(args: Dict[str, Any]) -> Dict[str, Any]:
@@ -197,6 +210,7 @@ OPS = {
     "list_archives": op_list_archives,
     "search_items": op_search_items,
     "lineage": op_lineage,
+    "resolve_refs": op_resolve_refs,
     "importable_sessions": op_importable_sessions,
     "frozen_sessions": op_frozen_sessions,
     "import_new": op_import_new,

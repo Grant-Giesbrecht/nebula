@@ -333,3 +333,21 @@ body.resizing *, body.resizing-y * { pointer-events:none; }
 .toast.show { opacity:.96; }
 
 :focus-visible { outline:2px solid var(--accent); outline-offset:2px; }
+
+/* provenance strip under the detail buttons */
+.det-prov { display:flex; flex-wrap:wrap; gap:6px 16px; font-size:12px; color:var(--text-dim); }
+.det-prov:empty { display:none; }
+.dp { display:inline-flex; align-items:baseline; gap:6px; white-space:nowrap; max-width:100%; }
+.dp-k { font-size:10.5px; font-weight:700; letter-spacing:.05em; text-transform:uppercase;
+        color:var(--text-faint); }
+.dp .mono { font-family:var(--mono); font-size:11.5px; overflow:hidden; text-overflow:ellipsis; }
+.dp.dim { color:var(--text-faint); font-style:italic; }
+
+/* derived_from entry in the import dialog */
+.lbl-hint { text-transform:none; letter-spacing:0; font-weight:500; color:var(--text-faint); }
+.reflist { display:flex; flex-direction:column; gap:2px; margin-top:4px; }
+.reflist:empty { display:none; }
+.ref { font-size:11.5px; font-family:var(--mono); }
+.ref.ok { color:var(--ok); }
+.ref.warn { color:var(--warn); }
+.ref.bad { color:var(--err); }

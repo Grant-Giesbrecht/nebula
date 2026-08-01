@@ -115,6 +115,7 @@
               Open sidecar in editor
             </button>
           </div>
+          <div class="det-prov" id="detProv"></div>
           <div class="det-text" id="detText">Select an item to see its provenance.</div>
         </div>
       </section>
@@ -174,6 +175,13 @@
           </div>
         </div>
         <div class="field"><label>Origin</label><input id="dlgOrigin" placeholder="where did these come from? e.g. emailed by Jane" /></div>
+        <div class="field">
+          <label>Derived from <span class="lbl-hint">optional — comma-separated refs</span></label>
+          <input id="dlgDerived" list="dlgDerivedList" spellcheck="false"
+                 placeholder="raw.csv,  S-0152/raw.csv,  postdoc|S-0152/raw.csv" />
+          <datalist id="dlgDerivedList"></datalist>
+          <div class="reflist" id="dlgRefs"></div>
+        </div>
       </div>
       <div class="dlg-actions">
         <button class="dbtn ghost" id="dlgCancel">Cancel</button>
