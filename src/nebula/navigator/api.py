@@ -167,6 +167,86 @@ def op_provenance_tree(args: Dict[str, Any]) -> Dict[str, Any]:
         depth=int(args.get("depth") or model.DEFAULT_TREE_DEPTH))
 
 
+def op_archive_kind(args: Dict[str, Any]) -> Dict[str, Any]:
+    """What kind of archive this is, and what that permits."""
+    from nebula.config import archive_identity
+
+    root, label = model.resolve(args["archive"])
+    ident = archive_identity(root)
+    ident["label"] = label
+    ident["writable"] = ident["kind"] != "fragment" and not ident["locked"]
+    return ident
+
+
+def op_transfer_plan(args: Dict[str, Any]) -> Dict[str, Any]:
+    """Dry run for export/merge/adopt: what would move, before it moves."""
+    from nebula import transfer
+
+    op = args.get("op")
+    try:
+        if op == "export":
+            plan = transfer.plan_export(
+                args["archive"], args["dest"],
+                sessions=args.get("sessions") or None,
+                refs=args.get("refs") or None,
+                collection=args.get("collection") or None,
+                include_foreign=args.get("include_foreign", True))
+        elif op == "merge":
+            plan = transfer.plan_merge(args["source"], args["archive"])
+        elif op == "adopt":
+            plan = transfer.plan_adopt(args["source"], args["archive"],
+                                       sessions=args.get("sessions") or None)
+        else:
+            return {"ok": False, "error": f"unknown transfer {op!r}"}
+    except Exception as e:      # noqa: BLE001 -- reported, not raised at the GUI
+        return {"ok": False, "error": str(e)}
+    return {"ok": True, "plan": plan.to_dict()}
+
+
+def op_transfer_run(args: Dict[str, Any]) -> Dict[str, Any]:
+    """Do it, having shown the plan first."""
+    from nebula import transfer
+
+    op = args.get("op")
+    try:
+        if op == "export":
+            plan = transfer.export(
+                args["archive"], args["dest"],
+                sessions=args.get("sessions") or None,
+                refs=args.get("refs") or None,
+                collection=args.get("collection") or None,
+                include_foreign=args.get("include_foreign", True))
+        elif op == "merge":
+            plan = transfer.merge(args["source"], args["archive"],
+                                  verify=args.get("verify", True))
+        elif op == "adopt":
+            plan = transfer.adopt(args["source"], args["archive"],
+                                  sessions=args.get("sessions") or None,
+                                  verify=args.get("verify", True))
+        else:
+            return {"ok": False, "error": f"unknown transfer {op!r}"}
+    except Exception as e:      # noqa: BLE001
+        return {"ok": False, "error": str(e)}
+    return {"ok": True, "plan": plan.to_dict()}
+
+
+def op_index_view(args: Dict[str, Any]) -> Dict[str, Any]:
+    """A read-only page of index.db, for the index inspector."""
+    return model.index_view(
+        args["archive"], table=args.get("table") or "sessions",
+        query=args.get("query") or "", run_id=args.get("run_id") or "",
+        limit=int(args.get("limit") or 200), offset=int(args.get("offset") or 0))
+
+
+def op_index_sweep(args: Dict[str, Any]) -> Dict[str, Any]:
+    """Run the freshness sweep on demand and report what it did."""
+    from nebula import index as index_mod
+
+    root, _ = model.resolve(args["archive"])
+    return {"swept": index_mod.ensure_fresh(root),
+            "status": index_mod.status(root)}
+
+
 def op_code_info(args: Dict[str, Any]) -> Dict[str, Any]:
     return model.code_info(args["archive"], args["code"])
 
@@ -556,6 +636,11 @@ OPS = {
     "search_items": op_search_items,
     "lineage": op_lineage,
     "provenance_tree": op_provenance_tree,
+    "index_view": op_index_view,
+    "archive_kind": op_archive_kind,
+    "transfer_plan": op_transfer_plan,
+    "transfer_run": op_transfer_run,
+    "index_sweep": op_index_sweep,
     "resolve_refs": op_resolve_refs,
     "code_info": op_code_info,
     "restore_code": op_restore_code,

@@ -10,7 +10,22 @@
   <div class="app">
     <div class="titlebar">
       <div class="title" id="wtitle">Nebula Navigator</div>
+      <span class="kind-badge hidden" id="kindBadge"></span>
       <button class="theme-toggle" id="themeBtn">◐ Theme</button>
+    </div>
+
+    <div class="scrim" id="xferScrim">
+      <div class="dialog wide" role="dialog" aria-modal="true" aria-labelledby="xferTitle">
+        <div class="dlg-head row" id="xferTitle"><span>Transfer</span>
+          <button class="p-btn" id="xferClose" title="Close">✕</button></div>
+        <div class="dlg-body scroll" id="xferBody"></div>
+        <div class="dlg-actions xfer-actions">
+          <label class="check" id="xferForeignWrap"><input type="checkbox" id="xferForeign" checked /> Include data from other archives</label>
+          <div class="spacer"></div>
+          <button class="dbtn ghost" id="xferCancel">Cancel</button>
+          <button class="btn-primary" id="xferOk">Continue</button>
+        </div>
+      </div>
     </div>
 
     <div class="tabbar hidden" id="tabbar">
@@ -159,6 +174,22 @@
           <button class="tbtn" id="treeReload" title="Recompute">↻</button>
         </div>
 
+        <div class="toolbar idx-tools hidden" id="idxTools">
+          <div class="seg" id="idxTabs"></div>
+          <div class="vdiv"></div>
+          <span class="s-ico idx-s">
+            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><circle cx="11" cy="11" r="7"/><line x1="16.5" y1="16.5" x2="21" y2="21"/></svg>
+          </span>
+          <input id="idxSearch" class="idx-search" placeholder="Filter rows…" spellcheck="false" />
+          <div class="spacer"></div>
+          <span class="idx-page" id="idxPage"></span>
+          <button class="tbtn" id="idxPrev" title="Previous page">‹</button>
+          <button class="tbtn" id="idxNext" title="Next page">›</button>
+          <div class="vdiv"></div>
+          <button class="tbtn" id="idxSweep" title="Run the freshness sweep now">Sweep</button>
+          <button class="tbtn" id="idxRebuild" title="Rebuild from scratch">Rebuild</button>
+        </div>
+
         <div class="search-row wide">
           <span class="s-ico">
             <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><circle cx="11" cy="11" r="7"/><line x1="16.5" y1="16.5" x2="21" y2="21"/></svg>
@@ -187,6 +218,8 @@
         <div class="item-area" id="itemArea"><div class="empty">Open an archive to begin.</div></div>
 
         <div class="tree-area hidden" id="treeArea"></div>
+
+        <div class="idx-area hidden" id="idxArea"></div>
 
         <div class="details">
           <div class="det-actions">

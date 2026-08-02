@@ -192,6 +192,10 @@ index.pending_changes("postdoc")     # what a sweep would do, without doing it
 index.status("postdoc")              # size, session count, schema, seals
 ```
 
+The Navigator can show all of this: `Archive ▸ Inspect index…` opens a
+read-only browser over the index's own tables, and a session's info pane
+compares its live signature with the indexed one.
+
 A sweep costs one `scandir` per session and reads no file contents. On a
 very large archive, a finished year can be **sealed** so it is skipped
 entirely:
@@ -329,6 +333,103 @@ what you will find in Finder, and what a ref has to name. The sidecar and
 details panels lead with **the name that was asked for**, with "stored as
 …" beneath, since that is the name in the code that produced it. Hovering
 the badge gives whichever half you are not looking at.
+
+## Archive kinds: standard, intake, fragment
+
+All three are the same directory layout. What differs is policy, declared in
+`archive.yaml`:
+
+| kind | session ids | merge *from* | merge *into* | writable |
+|---|---|---|---|---|
+| `standard` | `S-26-0012`, permanent | — | yes (renaming the source) | yes |
+| `intake` | `I-26-0012`, **provisional** | yes, renaming | no | yes |
+| `fragment` | someone else's, frozen | refused | no | **no** |
+
+An **intake archive** is for capturing data somewhere you would not point at
+your real archive: a lab bench, an untrusted machine, a laptop with no room.
+It is created with a timestamp for a name, which makes that name a
+coordinate:
+
+```
+nebula intake /media/usb --label scope2      # intake_2026_07_31_190230_scope2
+nebula merge intake_2026_07_31_190230_scope2 postdoc --dry-run
+nebula merge intake_2026_07_31_190230_scope2 postdoc
+nebula prune intake_2026_07_31_190230_scope2
+```
+
+Write "saved in `intake_2026_07_31_190230/I-26-0001`" in a paper notebook and
+it resolves forever: the merge renames the session to `S-26-0043` and records
+the pair on both sides, so no location information is lost across the import.
+The `I-` prefix is the standing instruction that a permanent id exists to be
+looked up — and an `I-` session found in a standard archive is a merge that
+never finished.
+
+A merge carries the whole session, not just its files: sidecars, annotations,
+the **captured source** and the **collections** that referenced it. Code needs
+no rewriting — a code id is a hash of the bytes, so it means the same thing in
+every archive, and a blob already present in the destination is by definition
+identical and is skipped. Collections do need rewriting, since they are lists
+of references; a collection whose name is already taken is imported under a
+suffixed name rather than being merged into, so nothing curated in the
+destination silently gains entries. Fragments sitting inside an intake are
+reported rather than absorbed — they belong to their authors, under
+`$NEBULA_HOME/fragments`.
+
+Merging is careful in five ways that copying files is not: cross-session
+`derived_from` refs are rewritten to the new ids; refs that pointed *back* at
+the destination collapse to local refs; each session is marked as it lands so
+a re-run is a no-op; the intake **locks itself** afterwards (`nebula unlock`
+to override), so data written later cannot be mistaken for data already
+merged; and `prune` verifies every session actually landed rather than
+trusting that lock. Merging into a sealed year is refused.
+
+A **fragment** is an excerpt you hand a colleague. Session ids are kept
+exactly, so anything citing them stays valid — which is why a fragment is
+never merged and never written to.
+
+```
+nebula export postdoc ~/for-jane --collection paper-2026
+nebula export postdoc ~/for-jane --ref S-26-0012/fit.png --dry-run
+```
+
+Selection reuses collections, since a collection is already a curated set of
+sessions and files. Exports close over **lineage** (a figure without its raw
+data is a picture, not a reference) and over the **code store**, and they
+embed data owned by other archives by default — `--exclude-foreign` lists it
+instead. Partial sessions are marked as partial, and anything that will not
+resolve in the result is reported.
+
+On the receiving end, fragments are filed by owner, mirroring the URI:
+
+```
+nebula receive ~/Downloads/from-john      # -> $NEBULA_HOME/fragments/jane/lab
+```
+
+A fragment John forwards may itself contain an excerpt of Jane's archive;
+that lands under **Jane**, so the same source archive arriving via two
+colleagues ends up in one place. A session already installed with *different*
+content is never silently replaced — it is kept and reported
+(`--overwrite-foreign` to force).
+
+Referencing a fragment is the light-touch option, but a ref into a folder on
+your own disk is not durable provenance. `nebula adopt` takes a copy into
+your archive under your own ids, recording the `nebula://` URI it came from,
+and refusing to adopt the same session twice:
+
+```
+nebula adopt ~/nebula/fragments/grant/postdoc mine --dry-run
+```
+
+### Where archives live
+
+`$NEBULA_HOME` (default `~/nebula`) is scanned by `nebula scan` to discover
+archives and register what is new. The convention discovers; the registry
+still resolves, so an archive on a NAS registered by hand keeps the name and
+path you gave it. An archive's **name and owner live in its own
+`archive.yaml`** and travel with it — `nebula register` takes the name the
+archive declares rather than one you supply, because that is the name its
+author wrote into refs. Two archives claiming one name coexist as
+`<user>-<name>`.
 
 ## Refs and nebula URIs
 
@@ -534,6 +635,15 @@ live so a restore stays honest.
 ## CLI
 
 ```
+nebula init <root> [--kind standard|intake|fragment] [--name N] [--register]
+nebula intake <parent> [--label L]                 # timestamped capture archive
+nebula export <archive> <dest> [--collection C] [--session S] [--ref R] [--dry-run]
+nebula merge <intake> <standard> [--dry-run] [--no-verify] [--no-lock]
+nebula adopt <fragment> <standard> [--session S] [--dry-run]
+nebula receive <fragment> [--overwrite-foreign] [--dry-run]
+nebula prune <intake> [--force]                    # delete a fully-merged intake
+nebula unlock <intake>                             # write to it again after a merge
+nebula scan [--home DIR]                           # discover archives under NEBULA_HOME
 nebula rebuild <archive>                           # rebuild the index from sidecars
 nebula index <archive> [--rebuild]                 # index status + freshness sweep
 nebula seal <archive> <year> [--force]             # declare a year finished (sweeps skip it)

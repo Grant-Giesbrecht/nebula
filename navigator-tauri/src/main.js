@@ -220,6 +220,7 @@ async function loadArchive(arc) {
     renderArchiveSelect();
     $("wtitle").textContent = `Nebula Navigator — ${label}`;
     await reload();
+    await loadArchiveKind();
     if (railTab === "collections") await loadCollections();
     if (railTab === "views") await loadViews();
   } catch (e) {
@@ -297,6 +298,7 @@ function blankTab(kind, state) {
 function activeTabObj() { return tabs.find((t) => t.id === activeTab) || null; }
 
 function tabTitle(tab) {
+  if (tab.kind === "index") return "Index";
   if (tab.kind === "tree") {
     const st = tab.state || {};
     return st.filename ? st.filename : (st.run_id ? `${st.run_id} relations` : "Relations");
@@ -311,6 +313,7 @@ function tabTitle(tab) {
 const TAB_ICONS = {
   browse: `<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/></svg>`,
   tree: `<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><circle cx="6" cy="6" r="2.5"/><circle cx="18" cy="12" r="2.5"/><circle cx="6" cy="18" r="2.5"/><path d="M8.5 6H13a2 2 0 0 1 2 2v1.5"/><path d="M8.5 18H13a2 2 0 0 0 2-2v-1.5"/></svg>`,
+  index: `<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="16" rx="2"/><line x1="3" y1="9" x2="21" y2="9"/><line x1="9" y1="9" x2="9" y2="20"/></svg>`,
 };
 
 function renderTabs() {
@@ -333,16 +336,20 @@ function renderTabs() {
 }
 
 function applyTabChrome() {
-  // The relations view replaces the file list, so the file-list chrome goes
+  // A tree or index tab replaces the file list, so the file-list chrome goes
   // with it rather than sitting there inert.
-  const tree = (activeTabObj() || {}).kind === "tree";
+  const kind = (activeTabObj() || {}).kind || "browse";
+  const tree = kind === "tree", idx = kind === "index", browse = kind === "browse";
   $("treeArea").classList.toggle("hidden", !tree);
   $("treeTools").classList.toggle("hidden", !tree);
-  $("itemArea").classList.toggle("hidden", tree);
-  document.querySelector(".main .search-row.wide").classList.toggle("hidden", tree);
-  document.querySelector(".main .toolbar:not(.tree-tools)").classList.toggle("hidden", tree);
-  $("rail").classList.toggle("hidden", tree);
-  document.getElementById("splitRail").classList.toggle("hidden", tree);
+  $("idxArea").classList.toggle("hidden", !idx);
+  $("idxTools").classList.toggle("hidden", !idx);
+  $("itemArea").classList.toggle("hidden", !browse);
+  document.querySelector(".main .search-row.wide").classList.toggle("hidden", !browse);
+  document.querySelector(".main .toolbar:not(.tree-tools):not(.idx-tools)")
+    .classList.toggle("hidden", !browse);
+  $("rail").classList.toggle("hidden", !browse);
+  document.getElementById("splitRail").classList.toggle("hidden", !browse);
 }
 
 async function selectTab(id) {
@@ -356,6 +363,7 @@ async function selectTab(id) {
   applyTabChrome();
   if (!tab) return;
   if (tab.kind === "tree") { await renderTreeTab(tab); return; }
+  if (tab.kind === "index") { await renderIndexTab(tab); return; }
   await restoreBrowse(tab.state || {});
 }
 
@@ -502,12 +510,341 @@ function openRelationsTab(runId, filename) {
                    direction: "both", depth: 3 });
 }
 
+function openIndexTab(runId) {
+  if (!archive) { toast("No archive open."); return; }
+  addTab("index", { table: "sessions", query: "", run_id: runId || "", offset: 0 });
+}
+
 function openRelationsForSelection() {
   if (!archive) { toast("No archive open."); return; }
   if (selected && curSession) return openRelationsTab(curSession.run_id, selected.name);
   if (selected && selected.run_id) return openRelationsTab(selected.run_id, selected.name);
   if (curSession) return openRelationsTab(curSession.run_id, null);
   toast("Open a session or select a file first.");
+}
+
+// The two things about a session that are *claims* rather than data: the
+// signature the index recorded for it, and any lock (a hold, or a seal over
+// its year). Both are shown next to what is true on disk right now, so the
+// index can be checked rather than believed.
+function indexStateHTML(ix, runId) {
+  if (!ix) return "";
+  const short = (v) => (v ? String(v).slice(0, 12) : "—");
+  const sig = (label, value, cls) =>
+    `<div class="sig-row"><span class="dp-k">${escapeHtml(label)}</span>`
+    + `<span class="sig ${cls || ""}">${escapeHtml(short(value))}</span></div>`;
+
+  let verdict;
+  if (!ix.index_exists) {
+    verdict = noteBox("info", "No index yet — the Navigator reads the filesystem "
+      + "directly, so nothing here depends on one.");
+  } else if (!ix.index_usable) {
+    verdict = noteBox("info", "The index was written by a different version of nebula; "
+      + "it will be rebuilt the next time anything reads it.");
+  } else if (!ix.indexed) {
+    verdict = noteBox("info", "This session is not in the index yet. The next read "
+      + "sweeps it in automatically.");
+  } else if (ix.in_sync) {
+    verdict = noteBox("ok", "The index matches what is on disk.");
+  } else {
+    verdict = noteBox("info", "This session has changed since it was indexed. "
+      + "The next read picks it up — or sweep now from the index window.");
+  }
+
+  const seal = ix.sealed
+    ? row("Year seal", `${escapeHtml(ix.year)} sealed ${escapeHtml(fmtCreated(ix.seal && ix.seal.sealed))}`
+        + (ix.skipped_by_seal
+           ? ` — <span class="warn-text">freshness sweeps skip this year</span>`
+           : ` — not yet verified by the index, so sweeps still check it`),
+        { html: true })
+    : row("Year seal", `${ix.year} is not sealed`);
+
+  return group("Index & locks",   // group() escapes the title itself
+    sig("On disk", ix.live_sig) +
+    sig("Indexed", ix.indexed_sig,
+        ix.indexed ? (ix.in_sync ? "sig-ok" : "sig-bad") : "") +
+    verdict +
+    row("Hold", holdText(runId)) +
+    seal +
+    `<div class="mg-actions"><button class="dbtn ghost" id="sessIndexOpen">`
+    + `Show this session in the index…</button></div>`);
+}
+
+function holdText(runId) {
+  const info = sessInfo || {};
+  if (!info.held) return info.appendable ? "not held (still appendable today)" : "not held";
+  return info.hold_until === "forever"
+    ? "held indefinitely — writes stay allowed until released"
+    : `held until ${fmtCreated(info.hold_until)}`;
+}
+
+// ---- archive kinds and transfers ---------------------------------------
+// Three kinds share one format and differ only in policy: a standard
+// archive owns its ids, an intake archive's are provisional (I-...) until a
+// merge renames them, and a fragment carries someone else's ids unchanged
+// so a citation stays valid. The badge exists because those differences are
+// invisible in the file list but change what the buttons may do.
+let archiveKind = null;
+
+async function loadArchiveKind() {
+  archiveKind = null;
+  if (archive) {
+    try { archiveKind = await call("archive_kind", { archive }); } catch (e) { archiveKind = null; }
+  }
+  renderKindBadge();
+}
+
+function renderKindBadge() {
+  const el = $("kindBadge");
+  const k = archiveKind;
+  if (!k || (k.kind === "standard" && !k.locked)) { el.classList.add("hidden"); return; }
+  el.classList.remove("hidden");
+  el.className = `kind-badge ${k.locked ? "locked" : k.kind}`;
+  el.textContent = k.locked ? "merged — locked" : k.kind;
+  el.title = k.locked
+    ? `Merged into ${k.merged_to} on ${k.merged_at}. Writing is refused so nothing `
+      + `written now could be mistaken for data that has already been merged.`
+    : k.kind === "fragment"
+      ? `An excerpt of ${k.user || "someone"}'s ${k.name}. Ids are theirs and are kept `
+        + `exactly, so a reference to one stays valid. Read-only.`
+      : `Sessions here are numbered I-<yy>-<nnnn> and are provisional: merging into a `
+        + `standard archive renames them and records what they became.`;
+}
+
+let xferState = null;
+
+function xferRowsHTML(plan) {
+  return (plan.sessions || []).map((s) => {
+    const renamed = s.new_run_id !== s.run_id;
+    const bits = [];
+    if (s.partial) bits.push(`${s.omitted} omitted`);
+    if (s.note) bits.push(s.note);
+    return `<div class="xfer-row ${s.foreign ? "foreign" : ""}">
+        <span class="rid">${escapeHtml(s.run_id)}</span>
+        ${renamed ? `<span class="arrow">→</span><span class="new">${escapeHtml(s.new_run_id)}</span>` : ""}
+        ${bits.length ? `<span class="tag">${escapeHtml(bits.join(" · "))}</span>` : ""}
+        <span class="n">${s.files.length} file(s) · ${_human(s.bytes)}</span>
+      </div>`;
+  }).join("");
+}
+
+function xferPlanHTML(plan, op) {
+  const renamed = Object.keys(plan.renames || {}).length;
+  const notes = [];
+  if (op === "export") {
+    notes.push("Session ids are kept exactly as they are here, so anything citing "
+      + "them stays valid. The result is read-only and cannot be merged.");
+  } else if (op === "merge") {
+    notes.push("Each session gets a new permanent id, and both archives record the "
+      + "pairing — so a notebook entry naming the intake id still resolves.");
+  } else {
+    notes.push("Copies are taken; the fragment is not modified. Each session records "
+      + "the nebula:// URI it came from.");
+  }
+  const head = `<div class="xfer-sum">
+      <span class="big">${plan.n_sessions} session(s)</span>
+      <span>${plan.n_files} file(s)</span>
+      <span>${_human(plan.bytes)}</span>
+      ${renamed ? `<span>${renamed} renamed</span>` : ""}
+      ${plan.foreign_bytes ? `<span>${_human(plan.foreign_bytes)} from other archives</span>` : ""}
+    </div>`;
+  const list = plan.sessions.length
+    ? `<div class="xfer-list">${xferRowsHTML(plan)}</div>`
+    : noteBox("info", "Nothing to transfer.");
+  const skipped = (plan.skipped || []).length
+    ? noteBox("info", `Skipped: ` + plan.skipped
+        .map((s) => `${s.run_id} (${s.note})`).join(", ")) : "";
+  const dangling = (plan.dangling || []).length
+    ? noteBox("info", `${plan.dangling.length} reference(s) will not resolve in the `
+        + `result: ` + plan.dangling.slice(0, 4).map((d) => d.ref).join(", ")
+        + (plan.dangling.length > 4 ? "…" : "")) : "";
+  const colls = (plan.collections || []).length
+    ? noteBox("info", `Collections coming too: ` + plan.collections
+        .map((c) => c.renamed ? `${c.name} → ${c.new_name}` : c.name).join(", ")
+        + (plan.collections.some((c) => c.renamed)
+           ? " (renamed where the name was already taken, so nothing curated here "
+             + "silently gains entries)" : "")) : "";
+  const warn = (plan.warnings || []).map((w) => noteBox("err", w)).join("");
+  return head + list + skipped + dangling + colls + warn + noteBox("info", notes[0]);
+}
+
+async function openTransfer(op, args, { title }) {
+  xferState = { op, args, plan: null };
+  $("xferTitle").querySelector("span").textContent = title;
+  $("xferBody").innerHTML = `<div class="idx-note">Working out what would move…</div>`;
+  $("xferForeignWrap").classList.toggle("hidden", op !== "export");
+  $("xferOk").disabled = true;
+  $("xferScrim").classList.add("show");
+
+  const res = await call("transfer_plan", Object.assign({ op, archive }, args,
+    op === "export" ? { include_foreign: $("xferForeign").checked } : {}));
+  if (!res.ok) {
+    $("xferBody").innerHTML = noteBox("err", res.error || "could not plan the transfer");
+    return;
+  }
+  xferState.plan = res.plan;
+  $("xferBody").innerHTML = xferPlanHTML(res.plan, op);
+  $("xferOk").disabled = !res.plan.n_sessions;
+  $("xferOk").textContent = op === "export" ? "Export" : op === "merge" ? "Merge" : "Adopt";
+}
+
+async function runTransfer() {
+  if (!xferState || !xferState.plan) return;
+  const { op, args } = xferState;
+  $("xferOk").disabled = true;
+  $("xferOk").textContent = "Working…";
+  const res = await call("transfer_run", Object.assign({ op, archive }, args,
+    op === "export" ? { include_foreign: $("xferForeign").checked } : {}));
+  $("xferScrim").classList.remove("show");
+  if (!res.ok) { toast(res.error || "transfer failed"); return; }
+  const p = res.plan;
+  toast(op === "export"
+    ? `Exported ${p.n_sessions} session(s) to ${args.dest}`
+    : `${op === "merge" ? "Merged" : "Adopted"} ${p.n_sessions} session(s)`);
+  if (op !== "export") { await reload(); await loadArchiveKind(); }
+}
+
+async function exportSelection({ collection = null, sessions = null, refs = null,
+                                 label = "" }) {
+  if (!archive) { toast("No archive open."); return; }
+  const dest = await pickFolder(`Where should the fragment go?`);
+  if (!dest) return;
+  const name = (label || "selection").replace(/[^A-Za-z0-9._-]+/g, "-");
+  openTransfer("export", { dest: `${dest}/${name}-fragment`, collection, sessions, refs },
+               { title: `Export ${label || "selection"}` });
+}
+
+async function pickFolder(title) {
+  try {
+    const picked = await dialogOpen({ directory: true, multiple: false, title });
+    return typeof picked === "string" ? picked : null;
+  } catch (e) { return null; }
+}
+
+async function startMerge() {
+  if (!archive) { toast("No archive open."); return; }
+  const source = await pickFolder("Which intake archive should be merged in?");
+  if (!source) return;
+  openTransfer("merge", { source }, { title: "Merge intake archive" });
+}
+
+async function startAdopt() {
+  if (!archive) { toast("No archive open."); return; }
+  const source = await pickFolder("Which fragment should be adopted?");
+  if (!source) return;
+  openTransfer("adopt", { source }, { title: "Adopt from a fragment" });
+}
+
+// ---- index inspector ----------------------------------------------------
+// A read-only window onto index.db. It shows the index *as it is* and never
+// sweeps on its own: a status display that quietly repaired what it was
+// describing could never show you a problem. Sweeping is a button.
+const IDX_PAGE = 200;
+let idxData = null;
+
+async function renderIndexTab(tab) {
+  const st = tab.state;
+  $("idxSearch").value = st.query || "";
+  $("idxArea").innerHTML = `<div class="idx-note">Reading the index…</div>`;
+  if (!archive) { $("idxArea").innerHTML = `<div class="idx-note">No archive open.</div>`; return; }
+  try {
+    idxData = await call("index_view", {
+      archive, table: st.table || "sessions", query: st.query || "",
+      run_id: st.run_id || "", limit: IDX_PAGE, offset: st.offset || 0,
+    });
+  } catch (e) {
+    idxData = null;
+    $("idxArea").innerHTML = `<div class="idx-note">Couldn't read the index: ${escapeHtml(String(e))}</div>`;
+    return;
+  }
+  renderIndexView();
+  $("statusbar").textContent = `${activeLabel()} — index: ${idxData.table}`
+    + ` (${idxData.total} row(s))`;
+}
+
+function idxCell(v) {
+  if (v === null || v === undefined) return `<span class="null">null</span>`;
+  const text = String(v);
+  return `<span title="${escapeHtml(text)}">${escapeHtml(text)}</span>`;
+}
+
+function renderIndexView() {
+  if (!idxData) return;
+  const st = (activeTabObj() || {}).state || {};
+  const s = idxData.status || {};
+
+  $("idxTabs").innerHTML = (idxData.tables || []).map((t) => `
+    <button class="tbtn ${t.name === idxData.table ? "on" : ""}" data-itab="${t.name}">
+      ${escapeHtml(t.name)}<span class="idx-count">${t.rows === null ? "—" : t.rows}</span>
+    </button>`).join("");
+  $("idxTabs").querySelectorAll("[data-itab]").forEach((el) => {
+    el.onclick = () => {
+      const tab = activeTabObj();
+      if (!tab) return;
+      tab.state.table = el.getAttribute("data-itab");
+      tab.state.offset = 0;
+      saveTabs();
+      renderIndexTab(tab);
+    };
+  });
+
+  const head = `<div class="idx-head">
+      <span><span class="k">File</span><span class="v mono">${escapeHtml(s.path || "")}</span></span>
+      <span><span class="k">Schema</span><span class="v">v${escapeHtml(String(s.schema_version || "?"))}`
+        + `${s.usable === false ? " (out of date)" : ""}</span></span>
+      <span><span class="k">Built</span><span class="v">${escapeHtml(fmtCreated(s.built) || "—")}</span></span>
+      <span><span class="k">Size</span><span class="v">${_human(s.size || 0)}</span></span>
+      ${(s.sealed_years || []).length
+        ? `<span><span class="k">Sealed</span><span class="v">`
+          + (s.sealed_years || []).map((y) => `${escapeHtml(y.year)} (${y.sessions})`).join(", ")
+          + `</span></span>` : ""}
+      ${st.run_id ? `<span><span class="k">Filtered</span><span class="v mono">`
+        + `${escapeHtml(st.run_id)}</span> <span class="open-link" id="idxClearRun">show all</span></span>` : ""}
+    </div>`;
+
+  if (idxData.error) {
+    $("idxArea").innerHTML = head + `<div class="idx-note">${escapeHtml(idxData.error)}</div>`;
+    wireIndexHead();
+    return;
+  }
+
+  const cols = idxData.columns || [];
+  const rows = idxData.rows || [];
+  const body = rows.length
+    ? `<table class="idx-table"><thead><tr>`
+      + cols.map((c) => `<th>${escapeHtml(c)}</th>`).join("")
+      + `</tr></thead><tbody>`
+      + rows.map((r) => `<tr>` + cols.map((c) => `<td>${idxCell(r[c])}</td>`).join("") + `</tr>`).join("")
+      + `</tbody></table>`
+    : `<div class="idx-note">No rows${idxData.query ? " match that filter" : ""}.</div>`;
+
+  $("idxArea").innerHTML = head + body;
+  wireIndexHead();
+
+  const from = rows.length ? (idxData.offset + 1) : 0;
+  $("idxPage").textContent = `${from}–${idxData.offset + rows.length} of ${idxData.total}`;
+  $("idxPrev").disabled = idxData.offset <= 0;
+  $("idxNext").disabled = idxData.offset + rows.length >= idxData.total;
+}
+
+function wireIndexHead() {
+  const clear = $("idxClearRun");
+  if (!clear) return;
+  clear.onclick = () => {
+    const tab = activeTabObj();
+    if (!tab) return;
+    tab.state.run_id = ""; tab.state.offset = 0;
+    saveTabs();
+    renderIndexTab(tab);
+  };
+}
+
+function idxPageBy(delta) {
+  const tab = activeTabObj();
+  if (!tab || tab.kind !== "index") return;
+  tab.state.offset = Math.max(0, (tab.state.offset || 0) + delta * IDX_PAGE);
+  saveTabs();
+  renderIndexTab(tab);
 }
 
 // ---- relations (tree) view ---------------------------------------------
@@ -2091,6 +2428,8 @@ function showItemMenu(x, y) {
     { head: label },
     { label: many ? "Add all to collection…" : "Add to collection…",
       action: () => openCollectionPicker(selectedRefs(), label) },
+    { label: "Export as a fragment…", disabled: !selectedRefs().length,
+      action: () => exportSelection({ refs: selectedRefs(), label }) },
     { label: "Show relations", disabled: many || !it,
       action: () => openRelationsTab(it && it.run_id ? it.run_id
                                      : (curSession && curSession.run_id), it && it.name) },
@@ -2116,6 +2455,9 @@ function showSessionMenu(x, y, s) {
     { label: "Open", action: () => selectSession(s) },
     { label: "Open in new tab", action: () => openSessionInNewTab(s) },
     { label: "Show relations", action: () => openRelationsTab(s.run_id, null) },
+    { label: "Show in index", action: () => openIndexTab(s.run_id) },
+    { label: "Export as a fragment…",
+      action: () => exportSelection({ sessions: [s.run_id], label: s.run_id }) },
     { separator: true },
     { label: `Reveal in ${fileManagerName}`, action: () => call("reveal_path", { path: s.path }) },
   ]);
@@ -2128,6 +2470,8 @@ function showCollectionMenu(x, y, name) {
     { label: "New folder inside…", action: () => newNestedCollection(name) },
     { label: "Open", action: () => showCollection(name) },
     { label: "Open in new tab", action: () => openCollectionInNewTab(name) },
+    { label: "Export as a fragment…",
+      action: () => exportSelection({ collection: name, label: name }) },
     { label: "Rename…", action: () => renameCollection(name) },
     { separator: true },
     { label: "Delete collection…", danger: true, action: () => deleteCollection(name) },
@@ -2511,7 +2855,27 @@ function renderArchivePanel() {
             : "")
       : noteBox("info", "No index yet. `nebula ls` and the CLI's graph queries build one on "
           + "demand; the Navigator reads the filesystem directly and works without it.")) +
-    `<div class="mg-actions"><button class="dbtn ghost" id="arcRebuild">Rebuild index</button></div></div>`;
+    `<div class="mg-actions"><button class="dbtn ghost" id="arcRebuild">Rebuild index</button>`
+    + `<button class="dbtn ghost" id="arcInspect">Inspect index…</button></div></div>`;
+
+  const ident = (a.identity || {});
+  const transfers = `<div class="mg"><div class="mg-h">Archives &amp; transfers`
+    + `<span class="issue-w">${escapeHtml(ident.kind || "standard")}</span></div>`
+    + row("This archive", `${escapeHtml(ident.name || a.label)}`
+        + (ident.user ? ` — ${escapeHtml(ident.user)}` : ""))
+    + (ident.locked
+        ? noteBox("info", `Merged into ${escapeHtml(ident.merged_to || "another archive")} `
+            + `on ${escapeHtml(fmtCreated(ident.merged_at))}. Writing is refused until it `
+            + `is unlocked, so nothing written now can be mistaken for merged data.`)
+        : "")
+    + `<div class="mg-note">Merge brings an intake archive's sessions in under new `
+    + `permanent ids. Adopt copies sessions out of a fragment someone sent you. `
+    + `Export writes a fragment others can read, keeping these ids exactly.</div>`
+    + `<div class="mg-actions">
+         <button class="dbtn ghost" id="arcMerge">Merge intake…</button>
+         <button class="dbtn ghost" id="arcAdopt">Adopt fragment…</button>
+         <button class="dbtn ghost" id="arcExport">Export…</button>
+       </div></div>`;
 
   const issues = checkResult ? checkIssuesHTML(checkResult) : "";
   const integrity = `<div class="mg"><div class="mg-h">Integrity</div>` +
@@ -2541,9 +2905,20 @@ function renderArchivePanel() {
       + `Change them with <span class="mono">nebula config</span>.</div>`) + `</div>`;
 
   const body = $("arcBody");
-  body.innerHTML = staleWarn + overview + index + integrity + gc + settings;
+  body.innerHTML = staleWarn + overview + index + transfers + integrity + gc + settings;
   wirePaths(body);
   $("arcRebuild").onclick = rebuildIndex;
+  $("arcInspect").onclick = () => {
+    $("arcScrim").classList.remove("show");
+    openIndexTab("");
+  };
+  $("arcMerge").onclick = () => { $("arcScrim").classList.remove("show"); startMerge(); };
+  $("arcAdopt").onclick = () => { $("arcScrim").classList.remove("show"); startAdopt(); };
+  $("arcExport").onclick = () => {
+    $("arcScrim").classList.remove("show");
+    exportSelection({ sessions: curSession ? [curSession.run_id] : null,
+                      label: curSession ? curSession.run_id : "archive" });
+  };
   $("arcCheck").onclick = runCheck;
   $("arcGc").onclick = () => runGc(false);
   if ($("arcGcDelete")) $("arcGcDelete").onclick = () => runGc(true);
@@ -2866,6 +3241,8 @@ function renderSessionPanel() {
       { html: info.n_problems > 0 }) +
     row("Total size", info.size_human));
 
+  const indexed = indexStateHTML(info.index, info.run_id);
+
   const related = group("Related runs",
     (info.related_runs || []).length
       ? info.related_runs.map((r) => lineageRow(r, "rel")).join("")
@@ -2893,8 +3270,10 @@ function renderSessionPanel() {
       <button class="dbtn ghost danger-text" id="sessDelete">Move session to trash</button>
     </div>`;
   body.innerHTML = head + about + counts + actions + notesHTML("sess", notesDraft) + related +
-    (history || noteBox("info", "No manual operations recorded."));
+    indexed + (history || noteBox("info", "No manual operations recorded."));
   wirePaths(body);
+  const inspect = $("sessIndexOpen");
+  if (inspect) inspect.onclick = () => openIndexTab(info.run_id);
   $("sessHold").onclick = () => holdSession(!!info.held);
   $("sessAddColl").onclick = () => openCollectionPicker(info.run_id, info.run_id);
   $("sessDelete").onclick = deleteSession;
@@ -3327,6 +3706,7 @@ const MENU_ACTIONS = {
   "next-tab": () => cycleTab(1),
   "prev-tab": () => cycleTab(-1),
   relations: openRelationsForSelection,
+  "index-view": () => openIndexTab(curSession ? curSession.run_id : ""),
   collect: addSelectionToCollection,
   "tab-sessions": () => setRailTab("sessions"),
   "tab-collections": () => setRailTab("collections"),
@@ -3418,6 +3798,56 @@ $("calToggle").onclick = () => {
   if (showCal && !activity) loadActivity(); else renderCalendar();
 };
 $("tabAdd").onclick = () => addTab("browse");
+$("xferClose").onclick = () => $("xferScrim").classList.remove("show");
+$("xferCancel").onclick = () => $("xferScrim").classList.remove("show");
+$("xferOk").onclick = runTransfer;
+$("xferForeign").onchange = () => {
+  // Re-plan: whether a colleague's data is embedded changes the size, which
+  // is the number this dialog exists to show before anything moves.
+  if (xferState && xferState.op === "export") {
+    openTransfer("export", xferState.args, { title: $("xferTitle").querySelector("span").textContent });
+  }
+};
+$("xferScrim").onclick = (e) => { if (e.target === $("xferScrim")) $("xferScrim").classList.remove("show"); };
+$("idxPrev").onclick = () => idxPageBy(-1);
+$("idxNext").onclick = () => idxPageBy(1);
+let idxSearchTimer = null;
+$("idxSearch").oninput = () => {
+  clearTimeout(idxSearchTimer);
+  idxSearchTimer = setTimeout(() => {
+    const tab = activeTabObj();
+    if (!tab || tab.kind !== "index") return;
+    tab.state.query = $("idxSearch").value.trim();
+    tab.state.offset = 0;
+    saveTabs();
+    renderIndexTab(tab);
+  }, 250);
+};
+$("idxSweep").onclick = async () => {
+  const tab = activeTabObj();
+  if (!tab || tab.kind !== "index") return;
+  try {
+    const res = await call("index_sweep", { archive });
+    const s = res.swept || {};
+    toast(s.rebuilt
+      ? `Rebuilt: ${s.reason || "index was unusable"}`
+      : `Swept ${s.checked_sessions || 0} session(s) — ${s.added || 0} added, `
+        + `${s.updated || 0} updated, ${s.removed || 0} removed`
+        + ((s.skipped_years || []).length ? `, ${s.skipped_years.join(", ")} skipped (sealed)` : ""));
+    await renderIndexTab(tab);
+    await refreshSessionInfo();
+  } catch (e) { toast(`Sweep failed: ${e}`); }
+};
+$("idxRebuild").onclick = async () => {
+  const tab = activeTabObj();
+  if (!tab || tab.kind !== "index") return;
+  try {
+    await call("rebuild_index", { archive });
+    toast("Index rebuilt");
+    await renderIndexTab(tab);
+    await refreshSessionInfo();
+  } catch (e) { toast(`Rebuild failed: ${e}`); }
+};
 $("treeUp").onchange = treeDirChanged;
 $("treeDown").onchange = treeDirChanged;
 $("treeDepth").onchange = () => {
@@ -3522,6 +3952,7 @@ async function boot() {
       // active tab restores itself here rather than at restoreTabs().
       const tab = activeTabObj();
       if (tab && tab.kind === "tree") await renderTreeTab(tab);
+      else if (tab && tab.kind === "index") await renderIndexTab(tab);
       else if (tab && tab.state && (tab.state.sessionRun || tab.state.collection
                                     || tab.state.searchMode)) {
         await restoreBrowse(tab.state);

@@ -184,6 +184,51 @@ The footer says whether the answer came **from the index** or was **read
 from sidecars**. Both are correct; only one is fast, and the view shouldn't
 imply the wrong one. See `model.provenance_tree()`.
 
+### The Index window
+
+`Archive ▸ Inspect index…`, or right-click a session ▸ `Show in index`, opens
+a read-only tab onto `index.db` itself: every table (`sessions`,
+`artifacts`, `derived_from`, `related_runs`, `year_seals`, `meta`) with row
+counts, real column names, a contains-filter and paging.
+
+It is a dump rather than a report, on purpose — the point is to see what the
+index actually holds, including the columns that make it work: `rel_path`
+(relative, so the archive is movable), `sig` (the stat signature freshness
+is judged by), and `year` (the bucket a seal can skip).
+
+**It never sweeps on its own.** A status display that quietly repaired what
+it was describing could never show you a problem, so `Sweep` and `Rebuild`
+are buttons, and `Sweep` reports exactly what it did.
+
+### Signatures and locks in the session pane
+
+The session info pane ends with **Index & locks**, which puts the session's
+live signature next to the one the index recorded and says whether they
+agree — the same comparison `ensure_fresh` makes, visible rather than
+implied. Below it are the two things that are *claims* rather than data:
+
+- **Hold** — held indefinitely, held until a time, or not held.
+- **Year seal** — whether this session's year is sealed, and, importantly,
+  whether the index has verified that seal yet. Only then do sweeps skip
+  the year, and the pane says so, because a skipped year is a year the
+  index has stopped checking.
+
+### Archive kinds and transfers
+
+The titlebar carries a **kind badge** for anything that is not a plain
+standard archive — `intake`, `fragment`, or `merged — locked` — because the
+difference is invisible in the file list but changes what is allowed.
+
+`Archive ▸ Merge intake… / Adopt fragment… / Export…` and the right-click
+menus on sessions, collections and files all open the same **plan dialog**.
+It asks the backend what *would* move and shows it before anything does:
+session count, file count, bytes, the rename map (`I-26-0001 → S-26-0044`),
+foreign data listed separately with its size, partial sessions with how much
+was omitted, skipped sessions with why, and anything that will not resolve in
+the result. Nothing runs until Continue. Toggling "include data from other
+archives" re-plans, because it changes the size — which is the number the
+dialog exists to show.
+
 ### Keyboard shortcuts
 
 Cmd on macOS, Ctrl on Windows/Linux (`hasMod()` in `main.js` picks the

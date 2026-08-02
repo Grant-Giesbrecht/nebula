@@ -119,6 +119,42 @@ def read_manifest(archive_root, digest: str) -> Optional[dict]:
         return None
 
 
+def copy_manifest(src_root, dest_root, digest: str) -> dict:
+    """Copy one snapshot (its manifest and every blob it names) between
+    archives.
+
+    Content addressing makes this the easy half of a transfer: an id is a
+    hash of the bytes, so anything already present is by definition
+    identical and is skipped. Two archives can never disagree about what a
+    digest means, which is why no rewriting is needed here -- unlike
+    session ids, a code id is the same everywhere.
+    """
+    out = {"manifest": digest, "blobs_copied": 0, "blobs_present": 0, "missing": []}
+    manifest = read_manifest(src_root, digest)
+    if manifest is None:
+        out["missing"].append(digest)
+        return out
+
+    for blob in sorted(set((manifest.get("files") or {}).values())):
+        dest = blob_path(dest_root, blob)
+        if dest.is_file():
+            out["blobs_present"] += 1
+            continue
+        src = blob_path(src_root, blob)
+        if not src.is_file():
+            out["missing"].append(blob)
+            continue
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        _write_once(dest, src.read_bytes())
+        out["blobs_copied"] += 1
+
+    target = manifest_path(dest_root, digest)
+    if not target.is_file():
+        target.parent.mkdir(parents=True, exist_ok=True)
+        _write_once(target, manifest_path(src_root, digest).read_bytes())
+    return out
+
+
 # -- first-party detection ------------------------------------------------
 
 def _sysconfig_roots() -> List[Path]:

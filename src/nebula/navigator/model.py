@@ -454,6 +454,139 @@ def session_info(session_dir) -> dict:
         "size": sum(it.size or 0 for it in items),
     })
     out["size_human"] = _human_size(out["size"])
+    out["index"] = session_index_state(session_dir, meta.run_id)
+    return out
+
+
+def session_index_state(session_dir, run_id: str) -> dict:
+    """What the index believes about this session, next to what is actually
+    on disk -- so the two can be compared rather than taken on faith.
+
+    Cheap by construction: one scandir for the live signature, one indexed
+    row, and the year's seal file if there is one. Nothing is swept or
+    repaired here; a panel that silently fixed what it was describing could
+    never show a problem.
+    """
+    from nebula import index as index_mod
+
+    session_dir = Path(session_dir)
+    archive_root = session_dir.parents[2]
+    year = session_dir.parent.name
+    out = {
+        "live_sig": index_mod.session_signature(session_dir),
+        "indexed_sig": None, "in_sync": None, "indexed": False,
+        "index_exists": False, "index_usable": False, "built": None,
+        "year": year, "sealed": False, "seal": None, "skipped_by_seal": False,
+    }
+    target = index_mod.index_path_for(archive_root)
+    out["index_exists"] = target.is_file()
+
+    seal = index_mod.read_seal(archive_root, year)
+    if seal:
+        out["sealed"] = True
+        out["seal"] = {"digest": seal.get("digest"), "sealed": seal.get("sealed"),
+                       "sessions": seal.get("sessions")}
+
+    if not out["index_exists"]:
+        return out
+    try:
+        conn = index_mod.open_index(archive_root)
+    except Exception:           # noqa: BLE001 -- an unusable index is a fact to show
+        return out
+    try:
+        out["index_usable"] = index_mod.status(archive_root)["usable"]
+        row = conn.execute("SELECT sig FROM sessions WHERE run_id = ?",
+                           (run_id,)).fetchone()
+        if row is not None:
+            out["indexed"] = True
+            out["indexed_sig"] = row["sig"]
+            out["in_sync"] = row["sig"] == out["live_sig"]
+        seal_row = conn.execute("SELECT digest FROM year_seals WHERE year = ?",
+                                (year,)).fetchone()
+        # A sweep only skips this session's year when the index has already
+        # verified it against exactly this seal.
+        out["skipped_by_seal"] = bool(
+            seal and seal_row and seal_row["digest"] == str(seal.get("digest")))
+    except Exception:           # noqa: BLE001
+        pass
+    finally:
+        conn.close()
+    return out
+
+
+#: Tables the index browser can show, in the order it offers them.
+INDEX_TABLES = ("sessions", "artifacts", "derived_from", "related_runs",
+                "year_seals", "meta")
+
+
+def index_view(archive, *, table: str = "sessions", query: str = "",
+               run_id: str = "", limit: int = 200, offset: int = 0) -> dict:
+    """A read-only look at what is actually in index.db.
+
+    Deliberately a dump rather than a report: the point is to see what the
+    index holds, including the columns (rel_path, sig, year) that exist to
+    make it self-maintaining and portable. Paged, because "show me the
+    index" must stay answerable on an archive with a hundred thousand rows.
+    """
+    from nebula import index as index_mod
+
+    root, label = resolve(archive)
+    status = index_mod.status(root)
+    out = {"archive": label, "root": str(root), "status": status,
+           "table": table, "tables": [], "columns": [], "rows": [],
+           "total": 0, "limit": limit, "offset": offset,
+           "query": query, "run_id": run_id, "error": None}
+    if not status["exists"]:
+        out["error"] = "no index yet"
+        return out
+    if not status["usable"]:
+        out["error"] = ("this index was written by a different version of "
+                        "nebula; it will be rebuilt the next time it is read")
+        return out
+    if table not in INDEX_TABLES:
+        table = "sessions"
+        out["table"] = table
+
+    try:
+        conn = index_mod.open_index(root)
+    except Exception as e:      # noqa: BLE001
+        out["error"] = f"could not open the index: {e}"
+        return out
+    try:
+        for name in INDEX_TABLES:
+            try:
+                n = conn.execute(f"SELECT count(*) FROM {name}").fetchone()[0]
+            except Exception:   # noqa: BLE001 -- a table the schema dropped
+                n = None
+            out["tables"].append({"name": name, "rows": n})
+
+        cols = [r["name"] for r in conn.execute(f"PRAGMA table_info({table})").fetchall()]
+        out["columns"] = cols
+
+        where, params = [], []
+        if run_id and "run_id" in cols:
+            where.append("run_id = ?")
+            params.append(run_id)
+        if query:
+            # A plain contains-match across the text columns: this is a
+            # magnifying glass, not a query language.
+            like = [f"CAST({c} AS TEXT) LIKE ?" for c in cols]
+            where.append("(" + " OR ".join(like) + ")")
+            params.extend([f"%{query}%"] * len(cols))
+        clause = (" WHERE " + " AND ".join(where)) if where else ""
+
+        out["total"] = conn.execute(
+            f"SELECT count(*) FROM {table}{clause}", params).fetchone()[0]
+        order = " ORDER BY created DESC" if "created" in cols else (
+            " ORDER BY run_id" if "run_id" in cols else "")
+        rows = conn.execute(
+            f"SELECT * FROM {table}{clause}{order} LIMIT ? OFFSET ?",
+            params + [max(1, min(1000, limit)), max(0, offset)]).fetchall()
+        out["rows"] = [{c: row[c] for c in cols} for row in rows]
+    except Exception as e:      # noqa: BLE001
+        out["error"] = f"could not read the index: {e}"
+    finally:
+        conn.close()
     return out
 
 
@@ -1142,9 +1275,12 @@ def archive_stats(archive) -> dict:
         except OSError:
             pass
 
+    from nebula.config import archive_identity
+
     settings = read_settings(root)
+    ident = archive_identity(root)
     return {
-        "label": label, "root": str(root),
+        "label": label, "root": str(root), "identity": ident,
         "n_sessions": len(sessions), "n_items": n_items, "n_problems": n_problems,
         "size": sum(_session_size(s.path) for s in sessions),
         "index": index_info,

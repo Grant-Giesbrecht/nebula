@@ -438,3 +438,140 @@ def test_open_fresh_builds_an_index_on_demand(tmp_path):
         assert conn.execute("SELECT count(*) FROM sessions").fetchone()[0] == 1
     finally:
         conn.close()
+
+
+# ---------------------------------------------------------------------
+# What the GUI shows about the index
+# ---------------------------------------------------------------------
+
+def test_index_view_dumps_real_columns(tmp_path):
+    from nebula.navigator import model
+
+    archive = tmp_path / "arc"
+    s = _session(archive)
+    index.rebuild(archive)
+
+    got = model.index_view(archive, table="sessions")
+    assert got["error"] is None
+    # the columns that make the index self-maintaining and portable are
+    # exactly the ones worth being able to see
+    assert {"rel_path", "sig", "year"} <= set(got["columns"])
+    row = got["rows"][0]
+    assert row["run_id"] == s.id
+    assert not Path(row["rel_path"]).is_absolute()
+    assert row["sig"] == index.session_signature(s.path)
+
+
+def test_index_view_offers_every_table_with_counts(tmp_path):
+    from nebula.navigator import model
+
+    archive = tmp_path / "arc"
+    s = nebula.new(archive, description="one")
+    with s.artifact("raw.csv") as fn:
+        fn.write_text("r")
+    with s.artifact("proc.csv", derived_from=["raw.csv"]) as fn:
+        fn.write_text("p")
+    s.close()
+    index.rebuild(archive)
+
+    got = model.index_view(archive)
+    counts = {t["name"]: t["rows"] for t in got["tables"]}
+    assert counts["sessions"] == 1 and counts["artifacts"] == 2
+    assert counts["derived_from"] == 1
+    assert set(model.INDEX_TABLES) == set(counts)
+
+
+def test_index_view_filters_and_pages(tmp_path):
+    from nebula.navigator import model
+
+    archive = tmp_path / "arc"
+    for i in range(5):
+        _session(archive, f"run {i}")
+    index.rebuild(archive)
+
+    page = model.index_view(archive, limit=2, offset=0)
+    assert len(page["rows"]) == 2 and page["total"] == 5
+    page2 = model.index_view(archive, limit=2, offset=4)
+    assert len(page2["rows"]) == 1
+
+    one = model.index_view(archive, run_id="S-26-0003")
+    assert [r["run_id"] for r in one["rows"]] == ["S-26-0003"]
+    hit = model.index_view(archive, query="run 4")
+    assert len(hit["rows"]) == 1 and hit["rows"][0]["description"] == "run 4"
+
+
+def test_index_view_explains_a_missing_or_old_index(tmp_path):
+    from nebula.navigator import model
+
+    archive = tmp_path / "arc"
+    _session(archive)
+    assert "no index" in model.index_view(archive)["error"]
+
+    index.rebuild(archive)
+    conn = sqlite3.connect(archive / "index.db")
+    conn.execute("INSERT OR REPLACE INTO meta VALUES ('schema_version', '1')")
+    conn.commit()
+    conn.close()
+    assert "different version" in model.index_view(archive)["error"]
+
+
+def test_index_view_does_not_sweep(tmp_path):
+    """The inspector shows the index as it is. One that quietly repaired
+    what it was describing could never show a problem."""
+    from nebula.navigator import model
+
+    archive = tmp_path / "arc"
+    s = _session(archive)
+    index.rebuild(archive)
+    _touch_sidecar(s.path)
+
+    before = model.index_view(archive)["rows"][0]["sig"]
+    assert model.index_view(archive)["rows"][0]["sig"] == before
+    assert index.pending_changes(archive)["stale"] is True    # still stale
+
+
+def test_session_info_compares_its_signature_with_the_index(tmp_path):
+    from nebula.navigator import model
+
+    archive = tmp_path / "arc"
+    s = _session(archive)
+    index.rebuild(archive)
+
+    ix = model.session_info(s.path)["index"]
+    assert ix["indexed"] is True and ix["in_sync"] is True
+    assert ix["live_sig"] == ix["indexed_sig"] != ""
+
+    _touch_sidecar(s.path)
+    ix = model.session_info(s.path)["index"]
+    assert ix["in_sync"] is False
+    assert ix["live_sig"] != ix["indexed_sig"]
+
+
+def test_session_info_reports_locks(tmp_path):
+    from nebula.navigator import model
+
+    archive = tmp_path / "arc"
+    d = _past_year_session(archive, "2020", "S-20-0001")
+    _session(archive)
+    index.rebuild(archive)
+
+    ix = model.session_info(d)["index"]
+    assert ix["sealed"] is False and ix["skipped_by_seal"] is False
+
+    index.seal_year(archive, "2020")
+    ix = model.session_info(d)["index"]
+    assert ix["sealed"] is True and ix["seal"]["digest"]
+    # sealing alone doesn't grant the skip; a sweep has to verify it first
+    assert ix["skipped_by_seal"] is False
+    index.ensure_fresh(archive)
+    assert model.session_info(d)["index"]["skipped_by_seal"] is True
+
+
+def test_session_info_survives_having_no_index(tmp_path):
+    from nebula.navigator import model
+
+    archive = tmp_path / "arc"
+    s = _session(archive)
+    ix = model.session_info(s.path)["index"]
+    assert ix["index_exists"] is False and ix["indexed"] is False
+    assert ix["live_sig"]        # still tells you what is on disk

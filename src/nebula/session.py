@@ -183,9 +183,16 @@ def provenance_for(caller_file: Optional[str]) -> ProducedBy:
 # Session id allocation
 # ---------------------------------------------------------------------
 
-#: S-<yy>-<nnnn>, e.g. S-26-0012. Both groups are captured so a folder name
-#: alone tells you its year and its number within that year.
-_ID_RE = re.compile(rf"^{re.escape(SESSION_PREFIX)}(\d{{2}})-(\d{{{ID_WIDTH},}})$")
+#: S-<yy>-<nnnn> (or I-<yy>-<nnnn> in an intake archive), e.g. S-26-0012.
+#: The prefix, year and number are all captured, so a folder name alone
+#: tells you which kind of archive minted it, when, and its number within
+#: that year. An I- id is provisional by construction: merging replaces it
+#: and records what it became, so an I- id found in a standard archive is a
+#: merge that did not finish.
+_ID_RE = re.compile(rf"^([SI])-(\d{{2}})-(\d{{{ID_WIDTH},}})$")
+
+#: Every prefix an id may legitimately carry, for parsing.
+ID_PREFIXES = ("S-", "I-")
 
 #: Everything a session lives under, so the archive root stays readable.
 DATA_DIR = "data"
@@ -199,8 +206,20 @@ def year_dir(archive_root: Path, year: int) -> Path:
     return data_root(archive_root) / f"{year:04d}"
 
 
-def _format_id(year2: int, n: int) -> str:
-    return f"{SESSION_PREFIX}{year2:02d}-{n:0{ID_WIDTH}d}"
+def _format_id(year2: int, n: int, prefix: str = SESSION_PREFIX) -> str:
+    return f"{prefix}{year2:02d}-{n:0{ID_WIDTH}d}"
+
+
+def id_prefix(run_id: str) -> Optional[str]:
+    """The prefix a session id carries ("S-" or "I-"), or None."""
+    m = _ID_RE.match(run_id or "")
+    return f"{m.group(1)}-" if m else None
+
+
+def is_provisional(run_id: str) -> bool:
+    """True for an intake id -- one that is expected to be replaced by a
+    merge, and so must never be cited as though it were permanent."""
+    return id_prefix(run_id) == "I-"
 
 
 def id_year(run_id: str) -> Optional[int]:
@@ -208,10 +227,11 @@ def id_year(run_id: str) -> Optional[int]:
     parse. Two-digit years are read as 20xx -- this format is not intended
     to outlive that assumption."""
     m = _ID_RE.match(run_id)
-    return 2000 + int(m.group(1)) if m else None
+    return 2000 + int(m.group(2)) if m else None
 
 
-def resolve_run_id(text: str, *, now: Optional[datetime.datetime] = None) -> str:
+def resolve_run_id(text: str, *, now: Optional[datetime.datetime] = None,
+                   prefix: str = SESSION_PREFIX) -> str:
     """Expand a user-typed session id to its canonical form.
 
         S-26-0012 -> S-26-0012      (already canonical)
@@ -219,48 +239,58 @@ def resolve_run_id(text: str, *, now: Optional[datetime.datetime] = None) -> str
         0012 / 12 -> S-<this year>-0012
 
     Ids restart each year, so a bare number is only meaningful against a
-    year; the current one is the useful default. Deliberately CLI-facing:
-    the library keeps taking exact ids, the same way resolve_archive is
-    strict for the API and lenient for the terminal.
+    year; the current one is the useful default. `prefix` supplies the one
+    to assume when the text doesn't carry it -- callers pass the archive's
+    own, so a bare "12" typed at an intake archive means I-26-0012.
+
+    Deliberately CLI-facing: the library keeps taking exact ids, the same
+    way resolve_archive is strict for the API and lenient for the terminal.
     """
     raw = (text or "").strip().upper()
     if not raw:
         raise ValueError("empty session id")
     if _ID_RE.match(raw):
         return raw
-    m = re.match(rf"^(?:{re.escape(SESSION_PREFIX)})?(\d{{2}})-(\d+)$", raw)
+    m = re.match(r"^([SI]-)?(\d{2})-(\d+)$", raw)
     if m:
-        return _format_id(int(m.group(1)), int(m.group(2)))
+        return _format_id(int(m.group(2)), int(m.group(3)), m.group(1) or prefix)
     if raw.isdigit():
         now = now or datetime.datetime.now().astimezone()
-        return _format_id(now.year % 100, int(raw))
+        return _format_id(now.year % 100, int(raw), prefix)
     raise ValueError(
-        f"{text!r} is not a session id; expected S-<yy>-<nnnn> (e.g. S-26-0012) "
-        f"or a bare number for the current year (e.g. 0012)"
+        f"{text!r} is not a session id; expected S-<yy>-<nnnn> (e.g. S-26-0012), "
+        f"I-<yy>-<nnnn> in an intake archive, or a bare number for the current "
+        f"year (e.g. 0012)"
     )
 
 
 def _existing_ids(archive_root: Path, year: int) -> List[int]:
     """Session numbers already used in one year. Numbering is per-year, so
-    only that year's folder matters."""
+    only that year's folder matters.
+
+    Prefix-blind on purpose: an S- and an I- session may not share a number
+    within a year. They should never coexist (an archive mints one kind),
+    but if a merge left one behind, reusing its number would put two
+    different sessions at one coordinate.
+    """
     ids = []
     ydir = year_dir(archive_root, year)
     if not ydir.is_dir():
         return ids
     for session_dir in ydir.iterdir():
         m = _ID_RE.match(session_dir.name)
-        if m and int(m.group(1)) == year % 100:
-            ids.append(int(m.group(2)))
+        if m and int(m.group(2)) == year % 100:
+            ids.append(int(m.group(3)))
     return ids
 
 
-def _allocate_new_id(archive_root: Path, year: int) -> str:
+def _allocate_new_id(archive_root: Path, year: int, prefix: str = SESSION_PREFIX):
     """Next free id for the given year. The folder listing is the source of
     truth -- no separate counter file to keep in sync. Collisions (e.g. two
     processes racing) are resolved by retrying with the next id if folder
     creation fails because the target already exists; see new()."""
     existing = _existing_ids(archive_root, year)
-    return _format_id(year % 100, (max(existing) + 1) if existing else 1)
+    return _format_id(year % 100, (max(existing) + 1) if existing else 1, prefix)
 
 
 # ---------------------------------------------------------------------
@@ -695,13 +725,18 @@ def new(
     archive_root, resolved_name = resolve_archive(archive)
     name = archive_name or resolved_name or "local"
 
+    from nebula.config import read_settings
+
+    settings = read_settings(archive_root, apply_env=False)
+    _refuse_if_unwritable(archive_root, settings)
+
     now = datetime.datetime.now().astimezone()
     ydir = year_dir(archive_root, now.year)
     ydir.mkdir(parents=True, exist_ok=True)
 
     with _lock:
         for _ in range(10):  # small retry budget for cross-process races
-            run_id = _allocate_new_id(archive_root, now.year)
+            run_id = _allocate_new_id(archive_root, now.year, settings.prefix)
             session_dir = ydir / run_id
             try:
                 session_dir.mkdir(parents=False, exist_ok=False)
@@ -723,6 +758,32 @@ def new(
     )
     write_session_yaml(session_dir, meta)
     return Session(session_dir, meta, archive=name, on_missing_meta=on_missing_meta)
+
+
+class ArchiveNotWritable(PermissionError):
+    """A write aimed at an archive that is not supposed to receive one."""
+
+
+def _refuse_if_unwritable(archive_root, settings) -> None:
+    """Guard the two archive kinds that must not be written to.
+
+    A fragment is someone else's excerpt: adding a session to it would
+    produce an archive that is neither theirs nor yours, under ids only one
+    of you owns. A merged intake is worse -- data written after a merge
+    looks merged, so it can be pruned away having never been copied
+    anywhere. Both are recoverable by an explicit unlock, never by accident.
+    """
+    if settings.kind == "fragment":
+        raise ArchiveNotWritable(
+            f"{archive_root} is a fragment (an excerpt of another archive) and "
+            f"cannot be written to. Adopt what you need into your own archive "
+            f"with 'nebula adopt', or write into a standard archive.")
+    if settings.locked:
+        raise ArchiveNotWritable(
+            f"{archive_root} was merged into {settings.merged_to or 'another archive'} "
+            f"on {settings.merged_at} and is locked, so nothing written now could "
+            f"be mistaken for data that has already been merged. "
+            f"Run 'nebula unlock {archive_root}' if you really mean to keep using it.")
 
 
 def _find_session_dir(archive_root: Path, run_id: str) -> Path:

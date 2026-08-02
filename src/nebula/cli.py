@@ -370,13 +370,29 @@ def cmd_check(args):
 
 def _run_id_arg(text: str) -> str:
     """argparse type for session ids: accepts the canonical S-<yy>-<nnnn>
-    or a bare number for the current year, so `nebula show arc 12` works."""
+    or a bare number for the current year, so `nebula show arc 12` works.
+
+    The prefix a bare number expands to depends on the archive, which
+    argparse cannot see here -- so this assumes S- and the commands that
+    know their archive re-resolve (see _run_id_for)."""
     from nebula.session import resolve_run_id
 
     try:
         return resolve_run_id(text)
     except ValueError as e:
         raise argparse.ArgumentTypeError(str(e))
+
+
+def _run_id_for(root, text: str) -> str:
+    """Re-resolve a session id against the archive it belongs to, so a bare
+    number typed at an intake archive becomes I-26-0012 rather than S-."""
+    from nebula.config import read_settings
+    from nebula.session import resolve_run_id
+
+    try:
+        return resolve_run_id(text, prefix=read_settings(root, apply_env=False).prefix)
+    except ValueError:
+        return text
 
 
 def _bool_arg(text: str) -> bool:
@@ -726,9 +742,216 @@ def cmd_whoami(args):
 
 
 def cmd_register(args):
+    """Register an archive under the name it declares for itself.
+
+    The name and owner are part of a nebula URI, so an archive has to keep
+    the ones its author used -- otherwise a fragment stops resolving under
+    the name they cited. A name can still be forced with --as for the rare
+    collision the automatic <user>-<name> fallback doesn't suit.
+    """
+    from nebula.config import archive_identity
+
     reg = get_registry()
-    reg.register(args.name, Path(args.root), git_org=args.git_org, user=args.user)
-    print(f"registered archive {args.name!r} -> {args.root}")
+    root = Path(args.root)
+    if args.name and not root.exists() and Path(args.name).exists():
+        root, args.name = Path(args.name), None      # tolerate reversed arguments
+    ident = archive_identity(root)
+    cfg = reg.register_archive(root, git_org=args.git_org, key=args.name or None)
+    kind = f" ({ident['kind']})" if ident["kind"] != "standard" else ""
+    owner = f" owned by {ident['user']}" if ident["user"] else ""
+    print(f"registered {cfg.name!r}{kind}{owner} -> {cfg.root}")
+    if not ident["declared"]:
+        print(f"  note: {root/'archive.yaml'} does not name this archive, so its "
+              f"folder name was used. 'nebula init' records one.")
+
+
+def cmd_scan(args):
+    """Discover archives under NEBULA_HOME and register what is new."""
+    from nebula.registry import nebula_home
+
+    home = Path(args.home) if args.home else nebula_home()
+    found = get_registry().discover(home)
+    if not found:
+        print(f"no new archives under {home}")
+        return
+    for cfg in found:
+        kind = f" ({cfg.kind})" if cfg.kind != "standard" else ""
+        print(f"registered {cfg.name!r}{kind} -> {cfg.root}")
+
+
+def cmd_init(args):
+    """Create an archive that knows its own name, owner and kind."""
+    from nebula import transfer
+
+    root = transfer.init_archive(Path(args.root), kind=args.kind,
+                                 name=args.name or "", user=args.user or "")
+    from nebula.config import archive_identity
+
+    ident = archive_identity(root)
+    print(f"created {ident['kind']} archive {ident['name']!r} at {root}")
+    if args.register:
+        cfg = get_registry().register_archive(root)
+        print(f"registered as {cfg.name!r}")
+
+
+def cmd_intake(args):
+    """Create a timestamped intake archive for capturing data."""
+    from nebula import transfer
+
+    root = transfer.new_intake(Path(args.parent), label=args.label or "")
+    print(f"created intake archive {root.name}")
+    print(f"  {root}")
+    print(f"  sessions here are numbered I-<yy>-<nnnn> and are provisional: "
+          f"merging renames them and records what they became.")
+
+
+def _print_plan(plan, *, verb: str) -> None:
+    d = plan.to_dict()
+    print(f"{verb}: {d['n_sessions']} session(s), {d['n_files']} file(s), "
+          f"{_human_bytes(d['bytes'])}")
+    if d["foreign_bytes"]:
+        print(f"  including {_human_bytes(d['foreign_bytes'])} belonging to other "
+              f"archives")
+    for s in d["sessions"]:
+        arrow = f" -> {s['new_run_id']}" if s["new_run_id"] != s["run_id"] else ""
+        extra = []
+        if s["partial"]:
+            extra.append(f"{s['omitted']} file(s) omitted")
+        if s["note"]:
+            extra.append(s["note"])
+        print(f"  {s['run_id']}{arrow}  {len(s['files'])} file(s)"
+              + (f"  [{'; '.join(extra)}]" if extra else ""))
+    for skip in d["skipped"]:
+        print(f"  skipped {skip['run_id']}: {skip['note']}")
+    for item in d["dangling"]:
+        print(f"  dangling {item['ref']}: {item['note']}")
+    for warning in d["warnings"]:
+        print(f"  warning: {warning}", file=sys.stderr)
+
+
+def _human_bytes(n: int) -> str:
+    step = 1024.0
+    value = float(n or 0)
+    for unit in ("B", "KB", "MB", "GB", "TB"):
+        if value < step or unit == "TB":
+            return f"{value:.0f} {unit}" if unit == "B" else f"{value:.1f} {unit}"
+        value /= step
+    return f"{value:.1f} TB"
+
+
+def cmd_export(args):
+    from nebula import transfer
+
+    root, _ = _resolve_archive_cli(args.archive)
+    try:
+        plan = transfer.plan_export(
+            root, Path(args.dest), sessions=args.session or None,
+            refs=args.ref or None, collection=args.collection,
+            include_foreign=not args.exclude_foreign)
+    except transfer.TransferError as e:
+        print(str(e), file=sys.stderr)
+        sys.exit(1)
+    _print_plan(plan, verb="would export" if args.dry_run else "exporting")
+    if args.dry_run:
+        return
+    transfer.export(root, Path(args.dest), plan=plan)
+    print(f"wrote fragment to {args.dest}")
+
+
+def cmd_merge(args):
+    from nebula import transfer
+
+    src, _ = _resolve_archive_cli(args.source)
+    dst, _ = _resolve_archive_cli(args.dest)
+    try:
+        plan = transfer.plan_merge(src, dst)
+    except transfer.TransferError as e:
+        print(str(e), file=sys.stderr)
+        sys.exit(1)
+    _print_plan(plan, verb="would merge" if args.dry_run else "merging")
+    if args.dry_run:
+        return
+    if not plan.sessions:
+        print("nothing to merge")
+        return
+    try:
+        transfer.merge(src, dst, verify=not args.no_verify, lock=not args.no_lock)
+    except transfer.TransferError as e:
+        print(str(e), file=sys.stderr)
+        sys.exit(1)
+    print(f"merged into {plan.dest}; {plan.source} is now locked "
+          f"(nebula unlock {args.source} to keep using it)")
+
+
+def cmd_adopt(args):
+    from nebula import transfer
+
+    src, _ = _resolve_archive_cli(args.source)
+    dst, _ = _resolve_archive_cli(args.dest)
+    try:
+        plan = transfer.plan_adopt(src, dst, sessions=args.session or None)
+    except transfer.TransferError as e:
+        print(str(e), file=sys.stderr)
+        sys.exit(1)
+    _print_plan(plan, verb="would adopt" if args.dry_run else "adopting")
+    if args.dry_run:
+        return
+    if not plan.sessions:
+        print("nothing to adopt")
+        return
+    transfer.adopt(src, dst, plan=plan, verify=not args.no_verify)
+    print(f"adopted {len(plan.sessions)} session(s) into {plan.dest}; "
+          f"{plan.source} was not modified")
+
+
+def cmd_receive(args):
+    """File an incoming fragment where refs into it resolve."""
+    from nebula import transfer
+
+    try:
+        plans = transfer.plan_receive(args.source, home=args.home)
+    except transfer.TransferError as e:
+        print(str(e), file=sys.stderr)
+        sys.exit(1)
+    for item in plans:
+        where = "already here" if item["exists"] else "new"
+        nested = " (nested)" if item["nested"] else ""
+        print(f"{item['user'] or 'unknown'}/{item['name']}{nested} -> {item['dest']}"
+              f"  [{where}]")
+    if args.dry_run:
+        return
+    got = transfer.receive(args.source, home=args.home,
+                           overwrite_foreign=args.overwrite_foreign)
+    print(f"installed {len(got['installed'])} fragment(s): "
+          f"{got['added']} session(s) added, {got['skipped']} already present")
+    for c in got["conflicts"]:
+        print(f"  conflict: {c['archive']}/{c['run_id']} differs "
+              f"({', '.join(c['files'][:3])}) -- {c['note']}", file=sys.stderr)
+
+
+def cmd_prune(args):
+    from nebula import transfer
+
+    root, _ = _resolve_archive_cli(args.archive)
+    try:
+        got = transfer.prune(root, force=args.force)
+    except transfer.TransferError as e:
+        print(str(e), file=sys.stderr)
+        sys.exit(1)
+    print(f"deleted {got['removed']}")
+
+
+def cmd_unlock(args):
+    from nebula import transfer
+
+    root, _ = _resolve_archive_cli(args.archive)
+    got = transfer.unlock(root)
+    was = got["was"]
+    if was["merged_at"]:
+        print(f"unlocked; it had been merged into {was['merged_to']} on {was['merged_at']}")
+        print("anything written now will need merging again")
+    else:
+        print("it was not locked")
 
 
 def main(argv=None):
@@ -962,9 +1185,78 @@ def main(argv=None):
     p = sub.add_parser("archives", help="list registered archives")
     p.set_defaults(func=cmd_archives)
 
-    p = sub.add_parser("register", help="register an archive in ~/.nebula/archives.yaml")
-    p.add_argument("name")
+    p = sub.add_parser("init", help="create an archive")
     p.add_argument("root")
+    p.add_argument("--kind", choices=("standard", "intake", "fragment"),
+                   default="standard")
+    p.add_argument("--name", help="the name it will carry in nebula:// URIs "
+                                  "(default: the folder name)")
+    p.add_argument("--user", help="who owns it (default: your local identity)")
+    p.add_argument("--register", action="store_true", help="also register it")
+    p.set_defaults(func=cmd_init)
+
+    p = sub.add_parser("intake", help="create a timestamped intake archive")
+    p.add_argument("parent", help="where to create it")
+    p.add_argument("--label", help="appended to the name, e.g. the instrument")
+    p.set_defaults(func=cmd_intake)
+
+    p = sub.add_parser("export", help="write a fragment: an excerpt others can read")
+    p.add_argument("archive", help="registered archive name, or a literal path")
+    p.add_argument("dest", help="directory to create")
+    p.add_argument("--session", action="append", type=_run_id_arg,
+                   help="a whole session (repeatable)")
+    p.add_argument("--ref", action="append",
+                   help="a single file, e.g. S-26-0012/raw.csv (repeatable)")
+    p.add_argument("--collection", help="everything in a collection")
+    p.add_argument("--exclude-foreign", action="store_true",
+                   help="list, but do not embed, data belonging to other archives")
+    p.add_argument("--dry-run", action="store_true")
+    p.set_defaults(func=cmd_export)
+
+    p = sub.add_parser("merge", help="merge an intake archive into a standard one")
+    p.add_argument("source", help="the intake archive")
+    p.add_argument("dest", help="the standard archive")
+    p.add_argument("--dry-run", action="store_true")
+    p.add_argument("--no-verify", action="store_true",
+                   help="skip re-hashing each file after copying")
+    p.add_argument("--no-lock", action="store_true",
+                   help="leave the intake archive writable afterwards")
+    p.set_defaults(func=cmd_merge)
+
+    p = sub.add_parser("adopt", help="copy sessions out of a fragment into your archive")
+    p.add_argument("source", help="the fragment")
+    p.add_argument("dest", help="your standard archive")
+    p.add_argument("--session", action="append", help="only these sessions")
+    p.add_argument("--dry-run", action="store_true")
+    p.add_argument("--no-verify", action="store_true")
+    p.set_defaults(func=cmd_adopt)
+
+    p = sub.add_parser("receive", help="file a fragment someone sent you")
+    p.add_argument("source", help="the fragment directory")
+    p.add_argument("--home", help="override NEBULA_HOME")
+    p.add_argument("--overwrite-foreign", action="store_true",
+                   help="replace differing copies instead of keeping what is here")
+    p.add_argument("--dry-run", action="store_true")
+    p.set_defaults(func=cmd_receive)
+
+    p = sub.add_parser("prune", help="delete a merged intake archive")
+    p.add_argument("archive")
+    p.add_argument("--force", action="store_true",
+                   help="delete even if some sessions were never merged")
+    p.set_defaults(func=cmd_prune)
+
+    p = sub.add_parser("unlock", help="let a merged intake archive be written to again")
+    p.add_argument("archive")
+    p.set_defaults(func=cmd_unlock)
+
+    p = sub.add_parser("scan", help="discover archives under NEBULA_HOME")
+    p.add_argument("--home", help="override NEBULA_HOME for this scan")
+    p.set_defaults(func=cmd_scan)
+
+    p = sub.add_parser("register", help="register an archive in ~/.nebula/archives.yaml")
+    p.add_argument("root")
+    p.add_argument("name", nargs="?", help="override the name it declares "
+                                           "(normally unnecessary)")
     p.add_argument("--git-org", help="GitHub org/user hosting this archive's repos")
     p.add_argument("--user", help="who owns this archive, for nebula:// URIs "
                                   "(omit for your own archives)")
