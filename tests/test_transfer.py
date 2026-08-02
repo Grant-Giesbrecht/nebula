@@ -726,3 +726,108 @@ def test_a_registered_name_still_wins_over_a_path(tmp_path):
     plan = transfer.plan_export("postdoc", str(tmp_path / "frag"),
                                 sessions=["S-26-0001"])
     assert Path(plan.source_root) == archive
+
+
+# ---------------------------------------------------------------------
+# Creating archives
+# ---------------------------------------------------------------------
+
+def test_init_lays_out_the_whole_skeleton(tmp_path):
+    """A fresh archive should look like one before any data exists."""
+    root = transfer.init_archive(tmp_path / "postdoc", name="postdoc")
+    assert sorted(p.name for p in root.iterdir()) == ["archive.yaml", "code", "data"]
+
+
+def test_init_records_the_rules_it_was_given(tmp_path):
+    from nebula.config import ArchiveSettings
+
+    root = transfer.init_archive(
+        tmp_path / "arc", name="arc",
+        settings=ArchiveSettings(on_overwrite="cancel", capture_code=False,
+                                 auto_index=False, code_max_file_bytes=4096))
+    got = read_settings(root, apply_env=False)
+    assert got.on_overwrite == "cancel" and got.capture_code is False
+    assert got.auto_index is False and got.code_max_file_bytes == 4096
+    # ...without letting them override what the kind means
+    assert got.kind == "standard" and got.name == "arc"
+
+
+def test_init_refuses_to_land_on_something_else(tmp_path):
+    root = tmp_path / "not-empty"
+    root.mkdir()
+    (root / "important.csv").write_text("data")
+    with pytest.raises(transfer.TransferError, match="not empty"):
+        transfer.init_archive(root)
+    assert (root / "important.csv").is_file()
+
+
+def test_an_intake_created_through_the_api_is_still_timestamped(tmp_path):
+    from nebula.config import ArchiveSettings
+
+    root = transfer.new_intake(tmp_path, label="scope2",
+                               settings=ArchiveSettings(capture_code=False))
+    assert root.name.startswith("intake_") and root.name.endswith("_scope2")
+    got = read_settings(root, apply_env=False)
+    assert got.kind == "intake" and got.capture_code is False
+    assert sorted(p.name for p in root.iterdir()) == ["archive.yaml", "code", "data"]
+
+
+def test_create_archive_op_registers_and_reports(tmp_path):
+    from nebula.navigator import api
+
+    res = api.dispatch("create_archive", {
+        "root": str(tmp_path / "postdoc"), "name": "postdoc", "kind": "standard",
+        "on_overwrite": "overwrite", "capture_code": False, "auto_index": True,
+    })
+    assert res["ok"] and res["registered"] == "postdoc"
+    assert res["identity"]["kind"] == "standard"
+    assert read_settings(res["root"], apply_env=False).on_overwrite == "overwrite"
+
+
+def test_create_archive_op_reports_failure_rather_than_raising(tmp_path):
+    from nebula.navigator import api
+
+    transfer.init_archive(tmp_path / "arc", name="arc")
+    res = api.dispatch("create_archive", {"root": str(tmp_path / "arc"), "name": "arc"})
+    assert res["ok"] is False and "already an archive" in res["error"]
+
+
+def test_identity_ops_round_trip(tmp_path, monkeypatch):
+    from nebula.navigator import api
+
+    monkeypatch.setenv("NEBULA_IDENTITY", str(tmp_path / "identity.yaml"))
+    monkeypatch.delenv("NEBULA_USER", raising=False)
+    assert api.dispatch("identity", {})["set"] is False
+
+    bad = api.dispatch("set_identity", {"user": "not a name"})
+    assert bad["ok"] is False and "spaces" in bad["error"]
+
+    good = api.dispatch("set_identity", {"user": "grant"})
+    assert good["ok"] and api.dispatch("identity", {})["user"] == "grant"
+
+
+def test_receive_fragment_op_can_preview(tmp_path):
+    from nebula.navigator import api
+
+    archive = transfer.init_archive(tmp_path / "postdoc", name="postdoc")
+    _write_run(archive, "one")
+    frag = tmp_path / "frag"
+    transfer.export(archive, frag, sessions=["S-26-0001"])
+
+    preview = api.dispatch("receive_fragment", {"source": str(frag), "dry_run": True})
+    assert preview["ok"] and preview["plan"][0]["name"] == "postdoc"
+    assert preview["plan"][0]["exists"] is False
+
+    done = api.dispatch("receive_fragment", {"source": str(frag)})
+    assert done["ok"] and done["result"]["added"] == 1
+    # ...and now it is there
+    assert api.dispatch("receive_fragment",
+                        {"source": str(frag), "dry_run": True})["plan"][0]["exists"] is True
+
+
+def test_receive_fragment_op_refuses_a_non_fragment(tmp_path):
+    from nebula.navigator import api
+
+    archive = transfer.init_archive(tmp_path / "postdoc", name="postdoc")
+    res = api.dispatch("receive_fragment", {"source": str(archive), "dry_run": True})
+    assert res["ok"] is False and "not a fragment" in res["error"]

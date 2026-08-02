@@ -781,14 +781,35 @@ def cmd_scan(args):
 
 def cmd_init(args):
     """Create an archive that knows its own name, owner and kind."""
-    from nebula import transfer
+    from nebula import identity, transfer
+    from nebula.config import ArchiveSettings, archive_identity
 
-    root = transfer.init_archive(Path(args.root), kind=args.kind,
-                                 name=args.name or "", user=args.user or "")
-    from nebula.config import archive_identity
+    settings = ArchiveSettings(
+        on_overwrite=args.on_overwrite or "duplicate",
+        capture_code=True if args.capture_code is None else args.capture_code,
+        auto_index=True if args.auto_index is None else args.auto_index,
+        code_max_file_bytes=args.max_file_bytes or 1048576,
+    )
+    try:
+        root = transfer.init_archive(Path(args.root), kind=args.kind,
+                                     name=args.name or "", user=args.user or "",
+                                     settings=settings)
+    except transfer.TransferError as e:
+        print(str(e), file=sys.stderr)
+        sys.exit(1)
 
     ident = archive_identity(root)
     print(f"created {ident['kind']} archive {ident['name']!r} at {root}")
+    print(f"  archive.yaml, data/ and code/")
+    print(f"  on_overwrite={settings.on_overwrite} capture_code={settings.capture_code} "
+          f"auto_index={settings.auto_index}")
+    if not ident["user"]:
+        # The owner is half of a nebula:// URI, so an archive without one
+        # cannot be referred to unambiguously once it leaves this machine.
+        print("\nno user name is set on this machine, so this archive records no "
+              "owner.\nRefs into it from elsewhere will be ambiguous -- set one with "
+              "'nebula whoami --set <name>',\nthen 'nebula config' this archive again.",
+              file=sys.stderr)
     if args.register:
         cfg = get_registry().register_archive(root)
         print(f"registered as {cfg.name!r}")
@@ -1193,6 +1214,14 @@ def main(argv=None):
                                   "(default: the folder name)")
     p.add_argument("--user", help="who owns it (default: your local identity)")
     p.add_argument("--register", action="store_true", help="also register it")
+    p.add_argument("--on-overwrite", choices=OVERWRITE_POLICIES, dest="on_overwrite",
+                   help="what a colliding write does (default: duplicate)")
+    p.add_argument("--capture-code", type=_bool_arg, metavar="true|false",
+                   dest="capture_code", help="snapshot first-party source on save")
+    p.add_argument("--auto-index", type=_bool_arg, metavar="true|false",
+                   dest="auto_index", help="re-index a session as it closes")
+    p.add_argument("--max-file-bytes", type=int, dest="max_file_bytes",
+                   help="per-file ceiling for the code snapshot")
     p.set_defaults(func=cmd_init)
 
     p = sub.add_parser("intake", help="create a timestamped intake archive")

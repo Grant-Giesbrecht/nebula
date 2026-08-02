@@ -167,6 +167,90 @@ def op_provenance_tree(args: Dict[str, Any]) -> Dict[str, Any]:
         depth=int(args.get("depth") or model.DEFAULT_TREE_DEPTH))
 
 
+def op_identity(args: Dict[str, Any]) -> Dict[str, Any]:
+    """Who this machine says you are, for the user segment of nebula URIs."""
+    from nebula import identity
+
+    user = identity.get_user()
+    return {"user": user or "", "set": bool(user),
+            "path": str(identity.identity_path())}
+
+
+def op_set_identity(args: Dict[str, Any]) -> Dict[str, Any]:
+    from nebula import identity
+
+    try:
+        path = identity.set_user(args["user"])
+    except identity.IdentityError as e:
+        return {"ok": False, "error": str(e)}
+    return {"ok": True, "user": identity.get_user(), "path": str(path)}
+
+
+def op_create_archive(args: Dict[str, Any]) -> Dict[str, Any]:
+    """Create an archive, with its settings chosen up front."""
+    from nebula import transfer
+    from nebula.config import ArchiveSettings
+    from nebula.registry import get_registry
+
+    settings = ArchiveSettings(
+        on_overwrite=args.get("on_overwrite") or "duplicate",
+        capture_code=bool(args.get("capture_code", True)),
+        auto_index=bool(args.get("auto_index", True)),
+        code_max_file_bytes=int(args.get("code_max_file_bytes") or 1048576),
+    )
+    try:
+        root = transfer.init_archive(
+            args["root"], kind=args.get("kind") or "standard",
+            name=args.get("name") or "", user=args.get("user") or "",
+            settings=settings)
+    except Exception as e:      # noqa: BLE001 -- reported to the dialog
+        return {"ok": False, "error": str(e)}
+    registered = None
+    if args.get("register", True):
+        try:
+            registered = get_registry().register_archive(root).name
+        except Exception:       # noqa: BLE001 -- the archive exists either way
+            registered = None
+    from nebula.config import archive_identity
+
+    return {"ok": True, "root": str(root), "registered": registered,
+            "identity": archive_identity(root)}
+
+
+def op_create_intake(args: Dict[str, Any]) -> Dict[str, Any]:
+    """Create a timestamped intake archive. The name is generated, not
+    supplied: it is the coordinate a notebook entry will cite."""
+    from nebula import transfer
+    from nebula.config import ArchiveSettings, archive_identity
+
+    settings = ArchiveSettings(
+        on_overwrite=args.get("on_overwrite") or "duplicate",
+        capture_code=bool(args.get("capture_code", True)),
+        auto_index=bool(args.get("auto_index", True)),
+    )
+    try:
+        root = transfer.new_intake(args["parent"], label=args.get("label") or "",
+                                   user=args.get("user") or "", settings=settings)
+    except Exception as e:      # noqa: BLE001
+        return {"ok": False, "error": str(e)}
+    return {"ok": True, "root": str(root), "registered": None,
+            "identity": archive_identity(root)}
+
+
+def op_receive_fragment(args: Dict[str, Any]) -> Dict[str, Any]:
+    """File a fragment into NEBULA_HOME/fragments, not into an archive."""
+    from nebula import transfer
+
+    try:
+        if args.get("dry_run"):
+            return {"ok": True, "plan": transfer.plan_receive(args["source"])}
+        got = transfer.receive(args["source"],
+                               overwrite_foreign=bool(args.get("overwrite_foreign")))
+    except Exception as e:      # noqa: BLE001
+        return {"ok": False, "error": str(e)}
+    return {"ok": True, "result": got}
+
+
 def op_archive_kind(args: Dict[str, Any]) -> Dict[str, Any]:
     """What kind of archive this is, and what that permits."""
     from nebula.config import archive_identity
@@ -638,6 +722,11 @@ OPS = {
     "provenance_tree": op_provenance_tree,
     "index_view": op_index_view,
     "archive_kind": op_archive_kind,
+    "identity": op_identity,
+    "set_identity": op_set_identity,
+    "create_archive": op_create_archive,
+    "create_intake": op_create_intake,
+    "receive_fragment": op_receive_fragment,
     "transfer_plan": op_transfer_plan,
     "transfer_run": op_transfer_run,
     "index_sweep": op_index_sweep,

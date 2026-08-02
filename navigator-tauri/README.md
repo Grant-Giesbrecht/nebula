@@ -270,6 +270,64 @@ the result. Nothing runs until Continue. Toggling "include data from other
 archives" re-plans, because it changes the size — which is the number the
 dialog exists to show.
 
+### Menus
+
+`main.rs` installs app / **File** / Edit / View / Window. The split is by
+what a thing *does*, not by what happened to be built first:
+
+- **File** — New Archive…, New Window, New Tab, Duplicate Tab, Open
+  Archive…, Import Files…, Import Intake Archive…, Import Fragment…, Adopt
+  from Fragment…, Export Fragment…, Open Selected File, Close Tab. Anything
+  that brings data in or sends it out lives here.
+- **Edit** — the native items (**keep them**: WKWebView's copy, paste and
+  select-all are driven by them) plus *Add to Collection…*, which edits a
+  collection rather than the view.
+- **View** — what is on screen: the three rail tabs, file metadata, session
+  info, relations, archive management, the index inspector, reload.
+- **Window** — tab navigation and the native window items.
+- The app menu carries **Set Your Name…**, since identity is about you
+  rather than about any archive.
+
+### Creating archives
+
+The toolbar's **New archive** button and `File ▸ New Archive…`
+(`Mod-Shift-N`) open a dialog that writes the whole skeleton —
+`archive.yaml`, `data/`, `code/` — with its rules chosen up front rather
+than discovered later: kind (standard or intake), name, folder, owner,
+whether to snapshot source on every save, whether to keep the index current
+as sessions close, whether to register it, and what a colliding write should
+do.
+
+An intake archive's name field is disabled, because a timestamp *is* the
+name — that is what makes "saved in `intake_2026_07_31_190230/I-26-0001`"
+resolvable after a merge.
+
+### Importing
+
+The toolbar's **Import** button (and the File menu) distinguishes four
+things that are genuinely different:
+
+| | what it does |
+|---|---|
+| **Files…** | adds files to the open session |
+| **Intake archive…** | *merges* it into this archive, renaming its sessions |
+| **Fragment…** | *files* it under `$NEBULA_HOME/fragments/<owner>/<archive>` — nothing is added to your archive |
+| **Adopt from Fragment…** | copies sessions out of a fragment into this archive, under your own ids |
+
+Importing a fragment previews first, listing each archive it would file —
+including ones a colleague forwarded, which land under *their* author — and
+reports any session already installed with different content, which is kept
+rather than replaced.
+
+### When no user name is set
+
+A red **no user set** badge sits in the titlebar until one is. Clicking it
+explains why it matters: archive names are not unique, so the user segment
+is what makes `nebula://grant/postdoc/S-26-0012` unambiguous — without it, a
+reference to your archive is ambiguous on anyone else's machine. The
+new-archive dialog repeats the warning, since the owner is written into
+`archive.yaml` at creation time. `nebula init` prints the same warning.
+
 ### Keyboard shortcuts
 
 Cmd on macOS, Ctrl on Windows/Linux (`hasMod()` in `main.js` picks the
@@ -290,6 +348,9 @@ modifier; tooltips are rewritten to ⌘ / ⇧⌘ at boot on macOS):
 | `Mod-Shift-]` / `Mod-Shift-[` | Next / previous tab |
 | `Ctrl-Tab`    | Cycle tabs (Ctrl on every platform, including macOS) |
 | `Mod-Shift-L` | Show relations for the selection |
+| `Mod-Shift-N` | New archive… |
+| `Mod-Shift-O` | Open archive… |
+| `Mod-Shift-E` | Export a fragment… |
 
 On macOS these are listed in the **View** menu so they can be found without
 memorising them. That has an implementation consequence worth knowing:

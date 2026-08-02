@@ -746,6 +746,144 @@ function holdText(runId) {
     : `held until ${fmtCreated(info.hold_until)}`;
 }
 
+// ---- who you are -------------------------------------------------------
+// The user segment of a nebula URI. Archive names are not unique -- two
+// people can both have a "postdoc" -- so an archive with no recorded owner
+// cannot be referred to unambiguously once a fragment of it leaves this
+// machine. Worth a standing warning rather than a surprise later.
+let identity = { user: "", set: false, path: "" };
+
+async function loadIdentity() {
+  try { identity = await call("identity", {}); } catch (e) { identity = { user: "", set: false }; }
+  $("noUserWarn").classList.toggle("hidden", !!identity.set);
+}
+
+function openIdentityDialog(reason) {
+  $("idUser").value = identity.user || "";
+  $("idNote").textContent = reason || (identity.path
+    ? `Stored on this machine only, in ${identity.path}.` : "");
+  $("idScrim").classList.add("show");
+  setTimeout(() => $("idUser").focus(), 30);
+}
+
+async function saveIdentity() {
+  const user = $("idUser").value.trim();
+  if (!user) { toast("Type a name first."); return; }
+  const res = await call("set_identity", { user });
+  if (!res.ok) { $("idNote").textContent = res.error || "that name cannot be used"; return; }
+  $("idScrim").classList.remove("show");
+  await loadIdentity();
+  toast(`You are ${res.user}`);
+  if ($("newArcScrim").classList.contains("show")) syncNewArchive();
+}
+
+// ---- creating an archive -----------------------------------------------
+function openNewArchive() {
+  $("arcName").value = "";
+  $("arcPath").value = "";
+  $("arcUser").value = identity.user || "";
+  $("arcKindStd").checked = true;
+  $("arcCapture").checked = true;
+  $("arcAutoIndex").checked = true;
+  $("arcRegister").checked = true;
+  $("arcOvDup").checked = true;
+  $("arcNewNote").textContent = "";
+  syncNewArchive();
+  $("newArcScrim").classList.add("show");
+}
+
+function syncNewArchive() {
+  const intake = $("arcKindIntake").checked;
+  $("arcNameHint").textContent = intake
+    ? "— an intake archive names itself with a timestamp"
+    : "— the name refs will use; defaults to the folder name";
+  $("arcName").disabled = intake;
+  $("arcName").placeholder = intake ? "intake_YYYY_MM_DD_HHMMSS (automatic)" : "postdoc";
+  $("arcUserWarn").textContent = identity.set ? ""
+    : "No name is set on this machine, so this archive will record no owner. "
+      + "Type one here, or set it once for every archive from the app menu.";
+  $("arcUserWarn").classList.toggle("hidden", identity.set && !$("arcUserWarn").textContent);
+}
+
+async function doCreateArchive() {
+  const intake = $("arcKindIntake").checked;
+  const parent = $("arcPath").value.trim();
+  if (!parent) { $("arcNewNote").textContent = "Choose a folder to create it in."; return; }
+  const name = $("arcName").value.trim();
+  if (!intake && !name) { $("arcNewNote").textContent = "Give the archive a name."; return; }
+
+  const args = {
+    kind: intake ? "intake" : "standard",
+    user: $("arcUser").value.trim(),
+    capture_code: $("arcCapture").checked,
+    auto_index: $("arcAutoIndex").checked,
+    register: $("arcRegister").checked,
+    on_overwrite: $("arcOvOver").checked ? "overwrite"
+      : $("arcOvCancel").checked ? "cancel" : "duplicate",
+  };
+  let res;
+  if (intake) {
+    // The timestamped name is the point of an intake archive, so it is
+    // generated rather than typed (see transfer.new_intake).
+    res = await call("create_intake", Object.assign({ parent, label: name }, args));
+  } else {
+    res = await call("create_archive", Object.assign(
+      { root: `${parent}/${name}`, name }, args));
+  }
+  if (!res.ok) { $("arcNewNote").textContent = res.error || "could not create it"; return; }
+  $("newArcScrim").classList.remove("show");
+  toast(`Created ${res.identity.kind} archive ${res.identity.name}`);
+  if (!intake) await loadArchive(res.root);        // open it straight away
+  await loadIdentity();
+}
+
+// ---- bringing data in --------------------------------------------------
+function openImportMenu(x, y) {
+  showMenu(x, y, [
+    { head: "Import" },
+    { label: "Files…", action: startImport },
+    { separator: true },
+    { label: "Intake archive…  (merge into this archive)", action: startMerge },
+    { label: "Fragment…  (file it under your fragments)", action: startReceive },
+    { label: "Adopt from a fragment…  (copy into this archive)", action: startAdopt },
+  ]);
+}
+
+// A fragment is filed into NEBULA_HOME/fragments rather than into an
+// archive: it is someone else's excerpt, kept under their name so refs into
+// it resolve. Adopting is the separate, deliberate step that copies data in.
+async function startReceive() {
+  const source = await pickFolder("Which fragment did you receive?");
+  if (!source) return;
+  const preview = await call("receive_fragment", { source, dry_run: true });
+  if (!preview.ok) { toast(preview.error || "that is not a fragment"); return; }
+  const rows = (preview.plan || []).map((p) =>
+    `<div class="xfer-row ${p.nested ? "foreign" : ""}">
+       <span class="rid">${escapeHtml(p.user || "unknown")}/${escapeHtml(p.name)}</span>
+       ${p.nested ? `<span class="tag">forwarded</span>` : ""}
+       <span class="n">${p.exists ? "already installed" : "new"}</span>
+     </div>`).join("");
+  const dest = (preview.plan[0] || {}).dest || "";
+  const ok = await confirmAction({
+    body: `<div class="xfer-sum"><span class="big">${preview.plan.length} fragment(s)</span></div>`
+      + `<div class="xfer-list">${rows}</div>`
+      + noteBox("info", `Filed under ${escapeHtml(dest.replace(/\/[^/]*$/, ""))}, by owner — a `
+        + `fragment forwarded by a colleague lands under whoever wrote it, so two copies of `
+        + `the same archive end up in one place. Nothing is added to your archive; use `
+        + `Adopt for that.`),
+    confirmLabel: "Import", danger: false,
+  });
+  if (!ok) return;
+  const res = await call("receive_fragment", { source });
+  if (!res.ok) { toast(res.error || "import failed"); return; }
+  const r = res.result;
+  toast(`Installed ${r.installed.length} fragment(s): ${r.added} session(s) added`
+    + (r.conflicts.length ? `, ${r.conflicts.length} kept as they were` : ""));
+  for (const c of r.conflicts) {
+    toast(`${c.archive}/${c.run_id} differs from the copy you already have — kept yours`);
+  }
+}
+
 // ---- archive kinds and transfers ---------------------------------------
 // Three kinds share one format and differ only in policy: a standard
 // archive owns its ids, an intake archive's are provisional (I-...) until a
@@ -4256,6 +4394,15 @@ const MENU_ACTIONS = {
   metadata: toggleMetadataPanel,
   "new-tab": () => addTab("browse"),
   "new-window": openNewWindow,
+  "new-archive": openNewArchive,
+  "open-archive": openArchive,
+  "import-intake": startMerge,
+  "import-fragment": startReceive,
+  "adopt-fragment": startAdopt,
+  "export": () => exportSelection({
+    sessions: curSession ? [curSession.run_id] : null,
+    label: curSession ? curSession.run_id : "archive" }),
+  identity: () => openIdentityDialog(),
   "close-tab": () => closeTab(activeTab),
   "duplicate-tab": duplicateTab,
   "next-tab": () => cycleTab(1),
@@ -4316,6 +4463,9 @@ function initShortcuts() {
     else if (k === "3" && !shift) name = "tab-searches";
     else if (k === "t" && !shift) name = "new-tab";
     else if (k === "n" && !shift) name = "new-window";
+    else if (k === "n" && shift) name = "new-archive";
+    else if (k === "o" && shift) name = "open-archive";
+    else if (k === "e" && shift) name = "export";
     else if (k === "w" && !shift) name = "close-tab";
     else if (k === "d" && !shift) name = "duplicate-tab";
     else if (k === "]" && shift) name = "next-tab";
@@ -4359,6 +4509,26 @@ $("calToggle").onclick = () => {
   if (showCal && !activity) loadActivity(); else renderCalendar();
 };
 $("tabAdd").onclick = () => addTab("browse");
+$("newArcBtn").onclick = openNewArchive;
+$("importBtn2").onclick = (ev) => {
+  const r = ev.currentTarget.getBoundingClientRect();
+  openImportMenu(r.left, r.bottom + 4);
+};
+$("noUserWarn").onclick = () => openIdentityDialog(
+  "Nothing else needs this, but a fragment of your archive does: without a name, "
+  + "a reference to it is ambiguous on anyone else's machine.");
+$("idClose").onclick = () => $("idScrim").classList.remove("show");
+$("idCancel").onclick = () => $("idScrim").classList.remove("show");
+$("idOk").onclick = saveIdentity;
+$("newArcClose").onclick = () => $("newArcScrim").classList.remove("show");
+$("newArcCancel").onclick = () => $("newArcScrim").classList.remove("show");
+$("newArcOk").onclick = doCreateArchive;
+$("arcKindStd").onchange = syncNewArchive;
+$("arcKindIntake").onchange = syncNewArchive;
+$("arcBrowse").onclick = async () => {
+  const dir = await pickFolder("Where should the archive live?");
+  if (dir) $("arcPath").value = dir;
+};
 $("xferClose").onclick = () => $("xferScrim").classList.remove("show");
 $("xferCancel").onclick = () => $("xferScrim").classList.remove("show");
 $("xferOk").onclick = runTransfer;
@@ -4487,6 +4657,7 @@ async function boot() {
   renderSessionPanel();
 
   recentColls = LS.get("nebula.recentColls", []);
+  loadIdentity();
   showCal = LS.get("nebula.showCal", false);
   setRailTab(LS.get("nebula.railTab", "sessions"));
   restoreTabs();

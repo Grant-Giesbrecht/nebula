@@ -309,8 +309,12 @@ fn bridge(op: String, args: Option<Value>, state: State<BridgeState>) -> Result<
 fn install_menu(app: &tauri::App) -> tauri::Result<()> {
     use tauri::menu::{AboutMetadata, MenuBuilder, MenuItemBuilder, SubmenuBuilder};
 
+    let identity_item = MenuItemBuilder::with_id("menu:identity", "Set Your Name…")
+        .build(app)?;
     let app_menu = SubmenuBuilder::new(app, "Nebula Navigator")
         .about(Some(AboutMetadata::default()))
+        .separator()
+        .item(&identity_item)
         .separator()
         .hide()
         .hide_others()
@@ -318,6 +322,10 @@ fn install_menu(app: &tauri::App) -> tauri::Result<()> {
         .separator()
         .quit()
         .build()?;
+
+    let edit_menu_extras = MenuItemBuilder::with_id("menu:collect", "Add to Collection…")
+        .accelerator("CmdOrCtrl+Shift+C")
+        .build(app)?;
 
     let edit_menu = SubmenuBuilder::new(app, "Edit")
         .undo()
@@ -327,6 +335,8 @@ fn install_menu(app: &tauri::App) -> tauri::Result<()> {
         .copy()
         .paste()
         .select_all()
+        .separator()
+        .item(&edit_menu_extras)
         .build()?;
 
     // Ids match the MENU_ACTIONS table in main.js.
@@ -335,9 +345,6 @@ fn install_menu(app: &tauri::App) -> tauri::Result<()> {
         .build(app)?;
     let session = MenuItemBuilder::with_id("menu:session", "Show Session Info")
         .accelerator("CmdOrCtrl+Shift+S")
-        .build(app)?;
-    let collect = MenuItemBuilder::with_id("menu:collect", "Add to Collection…")
-        .accelerator("CmdOrCtrl+Shift+C")
         .build(app)?;
     let archive = MenuItemBuilder::with_id("menu:archive", "Archive Management…")
         .build(app)?;
@@ -380,6 +387,52 @@ fn install_menu(app: &tauri::App) -> tauri::Result<()> {
         .accelerator("CmdOrCtrl+3")
         .build(app)?;
 
+    // Anything that brings data in or sends it out belongs in File; View is
+    // for what is on screen. Splitting them this way means Import/Export are
+    // where a Mac user reaches for them rather than buried under View.
+    let new_archive = MenuItemBuilder::with_id("menu:new-archive", "New Archive…")
+        .accelerator("CmdOrCtrl+Shift+N")
+        .build(app)?;
+    let new_window_item = MenuItemBuilder::with_id("menu:new-window", "New Window")
+        .accelerator("CmdOrCtrl+N")
+        .build(app)?;
+    let import_intake = MenuItemBuilder::with_id("menu:import-intake",
+                                                 "Import Intake Archive…")
+        .build(app)?;
+    let import_fragment = MenuItemBuilder::with_id("menu:import-fragment",
+                                                   "Import Fragment…")
+        .build(app)?;
+    let adopt_fragment = MenuItemBuilder::with_id("menu:adopt-fragment",
+                                                  "Adopt from Fragment…")
+        .build(app)?;
+    let export_item = MenuItemBuilder::with_id("menu:export", "Export Fragment…")
+        .accelerator("CmdOrCtrl+Shift+E")
+        .build(app)?;
+    let open_archive = MenuItemBuilder::with_id("menu:open-archive", "Open Archive…")
+        .accelerator("CmdOrCtrl+Shift+O")
+        .build(app)?;
+    let index_item = MenuItemBuilder::with_id("menu:index-view", "Inspect Index")
+        .build(app)?;
+    let file_menu = SubmenuBuilder::new(app, "File")
+        .item(&new_archive)
+        .item(&new_window_item)
+        .item(&new_tab)
+        .item(&dup_tab)
+        .separator()
+        .item(&open_archive)
+        .separator()
+        .item(&import)
+        .item(&import_intake)
+        .item(&import_fragment)
+        .item(&adopt_fragment)
+        .separator()
+        .item(&export_item)
+        .separator()
+        .item(&open_sel)
+        .separator()
+        .item(&close_tab)
+        .build()?;
+
     let view_menu = SubmenuBuilder::new(app, "View")
         .item(&tab_sessions)
         .item(&tab_collections)
@@ -389,25 +442,13 @@ fn install_menu(app: &tauri::App) -> tauri::Result<()> {
         .item(&session)
         .item(&relations)
         .separator()
-        .item(&collect)
         .item(&archive)
-        .item(&reload)
+        .item(&index_item)
         .separator()
-        .item(&open_sel)
-        .item(&import)
+        .item(&reload)
         .build()?;
 
-    let new_window_item = MenuItemBuilder::with_id("menu:new-window", "New Window")
-        .accelerator("CmdOrCtrl+N")
-        .build(app)?;
-
     let window_menu = SubmenuBuilder::new(app, "Window")
-        .item(&new_window_item)
-        .separator()
-        .item(&new_tab)
-        .item(&dup_tab)
-        .item(&close_tab)
-        .separator()
         .item(&next_tab)
         .item(&prev_tab)
         .separator()
@@ -419,7 +460,7 @@ fn install_menu(app: &tauri::App) -> tauri::Result<()> {
         .build()?;
 
     let menu = MenuBuilder::new(app)
-        .items(&[&app_menu, &edit_menu, &view_menu, &window_menu])
+        .items(&[&app_menu, &file_menu, &edit_menu, &view_menu, &window_menu])
         .build()?;
     app.set_menu(menu)?;
     Ok(())

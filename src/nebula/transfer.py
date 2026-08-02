@@ -1151,7 +1151,8 @@ def unlock(archive) -> dict:
     return {"root": str(root), "was": was}
 
 
-def new_intake(parent, *, label: str = "", user: str = "") -> Path:
+def new_intake(parent, *, label: str = "", user: str = "",
+               settings: Optional[ArchiveSettings] = None) -> Path:
     """Create a timestamped intake archive under `parent`.
 
     The name is the coordinate: "intake_2026_07_31_190230/I-26-0001" written
@@ -1165,16 +1166,20 @@ def new_intake(parent, *, label: str = "", user: str = "") -> Path:
     root = Path(parent) / name
     if root.exists():
         raise TransferError(f"{root} already exists")
-    (root / DATA_DIR).mkdir(parents=True)
-    write_settings(root, ArchiveSettings(
-        kind="intake", name=name, user=user or identity.get_user() or "",
-        created=_now()))
-    return root
+    return init_archive(root, kind="intake", name=name,
+                        user=user or identity.get_user() or "",
+                        settings=settings)
 
 
 def init_archive(root, *, kind: str = "standard", name: str = "",
-                 user: str = "") -> Path:
-    """Create an archive that knows its own name, owner and kind."""
+                 user: str = "", settings: Optional[ArchiveSettings] = None) -> Path:
+    """Create an archive that knows its own name, owner and kind.
+
+    Lays out the whole skeleton -- ``archive.yaml``, ``data/`` and ``code/``
+    -- rather than letting the directories appear on first write, so a fresh
+    archive is recognisably an archive when you look at it, and so a sync
+    tool has something to sync before any data exists.
+    """
     from nebula import identity
     from nebula.config import KINDS
 
@@ -1183,8 +1188,16 @@ def init_archive(root, *, kind: str = "standard", name: str = "",
     root = Path(root)
     if (root / ARCHIVE_CONFIG_FILE).is_file():
         raise TransferError(f"{root} is already an archive")
+    if root.exists() and any(root.iterdir()):
+        raise TransferError(f"{root} already exists and is not empty")
     (root / DATA_DIR).mkdir(parents=True, exist_ok=True)
-    write_settings(root, ArchiveSettings(
-        kind=kind, name=name or root.name,
-        user=user or identity.get_user() or "", created=_now()))
+    (root / codestore.CODE_DIR).mkdir(parents=True, exist_ok=True)
+
+    got = settings or ArchiveSettings()
+    got.kind = kind
+    got.name = name or root.name
+    got.user = user or identity.get_user() or ""
+    got.created = _now()
+    got.merged_at = got.merged_to = ""
+    write_settings(root, got)
     return root

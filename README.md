@@ -345,6 +345,12 @@ All three are the same directory layout. What differs is policy, declared in
 | `intake` | `I-26-0012`, **provisional** | yes, renaming | no | yes |
 | `fragment` | someone else's, frozen | refused | no | **no** |
 
+`nebula init` writes the whole skeleton — `archive.yaml`, `data/` and
+`code/` — and records the archive's rules at creation time. It warns if this
+machine has no user name set (`nebula whoami --set <name>`), because the
+owner is half of a nebula URI and an archive without one cannot be referred
+to unambiguously once a fragment of it leaves the machine.
+
 An **intake archive** is for capturing data somewhere you would not point at
 your real archive: a lab bench, an untrusted machine, a laptop with no room.
 It is created with a timestamp for a name, which makes that name a
@@ -635,7 +641,8 @@ live so a restore stays honest.
 ## CLI
 
 ```
-nebula init <root> [--kind standard|intake|fragment] [--name N] [--register]
+nebula init <root> [--kind standard|intake] [--name N] [--register]
+           [--on-overwrite P] [--capture-code true|false] [--auto-index true|false]
 nebula intake <parent> [--label L]                 # timestamped capture archive
 nebula export <archive> <dest> [--collection C] [--session S] [--ref R] [--dry-run]
 nebula merge <intake> <standard> [--dry-run] [--no-verify] [--no-lock]

@@ -712,3 +712,15 @@ body.marquee-on, body.marquee-on * { user-select:none; }
 .pick-row .recent { margin-left:auto; font-size:10px; letter-spacing:.05em;
                     text-transform:uppercase; color:var(--text-faint); }
 .pick-empty { padding:10px; font-size:12.5px; color:var(--text-faint); }
+
+
+/* new-archive dialog, and the missing-identity warning */
+.no-user { font-size:10px; font-weight:700; letter-spacing:.06em; text-transform:uppercase;
+           padding:2px 7px; border-radius:999px; margin-left:9px; cursor:pointer;
+           background:var(--err-bg); color:var(--err); }
+.no-user:hover { filter:brightness(1.08); }
+.row-pick { display:flex; gap:8px; align-items:center; }
+.row-pick input { flex:1; }
+.field .hint { font-weight:400; color:var(--text-faint); font-size:11px; margin-left:6px; }
+#newArcScrim .field { margin-bottom:4px; }
+#newArcScrim .check { padding:2px 0; align-items:flex-start; }
