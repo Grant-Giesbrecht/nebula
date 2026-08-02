@@ -1,10 +1,16 @@
 {
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "default",
-  "description": "Core permissions for the Navigator window, plus the file-open dialog used by Import.",
-  "windows": ["main"],
+  "description": "Core permissions for every Navigator window -- the main one, extra windows opened from File > New Window (nav-*), and torn-off panels (panel-*). Scoping this to \"main\" would leave those windows unable to invoke anything, including the bridge.",
+  "windows": [
+    "main",
+    "nav-*",
+    "panel-*"
+  ],
   "permissions": [
     "core:default",
+    "core:window:allow-close",
+    "core:window:allow-set-title",
     "dialog:default",
     "dialog:allow-open"
   ]

@@ -487,6 +487,55 @@ fn new_window(app: tauri::AppHandle) -> Result<String, String> {
     Ok(label)
 }
 
+/// Open a panel (sidecar or session info) as its own window.
+///
+/// The subject travels in the URL rather than in a follow-up message, so
+/// the window is self-sufficient the moment it boots -- no waiting for the
+/// webview to be ready, and no race between "window exists" and "window
+/// knows what to show".
+#[tauri::command]
+fn open_panel_window(app: tauri::AppHandle, kind: String, title: String,
+                     query: String) -> Result<String, String> {
+    use tauri::{WebviewUrl, WebviewWindowBuilder};
+
+    let label = format!("panel-{}-{}", kind, std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis())
+        .unwrap_or(0));
+    let url = format!("index.html?{query}");
+    WebviewWindowBuilder::new(&app, &label, WebviewUrl::App(url.into()))
+        .title(title)
+        .inner_size(460.0, 700.0)
+        .min_inner_size(320.0, 320.0)
+        .build()
+        .map_err(|e| e.to_string())?;
+    Ok(label)
+}
+
+/// Tell every window something changed, so a panel showing the same subject
+/// refreshes instead of quietly going stale.
+#[tauri::command]
+fn broadcast(app: tauri::AppHandle, event: String,
+             payload: serde_json::Value) -> Result<(), String> {
+    use tauri::Emitter;
+
+    app.emit(&event, payload).map_err(|e| e.to_string())
+}
+
+/// The main window, for a panel handing itself back.
+#[tauri::command]
+fn main_window_label(app: tauri::AppHandle) -> Option<String> {
+    use tauri::Manager;
+
+    if app.get_webview_window("main").is_some() {
+        return Some("main".into());
+    }
+    // The original window may have been closed; any non-panel window will do.
+    app.webview_windows().keys()
+        .find(|l| !l.starts_with("panel-"))
+        .cloned()
+}
+
 /// Which window is under the pointer right now, in screen coordinates.
 ///
 /// This is what makes a tab (or a selection of files) draggable *between*
@@ -548,7 +597,8 @@ fn main() {
         .plugin(tauri_plugin_dialog::init())
         .manage(BridgeState(Mutex::new(slot)))
         .invoke_handler(tauri::generate_handler![
-            bridge, new_window, window_at_cursor, send_to_window
+            bridge, new_window, window_at_cursor, send_to_window,
+            open_panel_window, main_window_label, broadcast
         ])
         .setup(|_app| {
             #[cfg(target_os = "macos")]

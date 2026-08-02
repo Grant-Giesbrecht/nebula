@@ -577,6 +577,7 @@ function removeTab(id) {
 // Something handed to this window by another one.
 async function acceptFromWindow(payload) {
   if (!payload) return;
+  if (payload.kind === "panel") { await dockPanelFromWindow(payload); return; }
   if (payload.kind === "tab") {
     if (payload.archive && payload.archive !== archive) {
       try { await loadArchive(payload.archive); } catch (e) { /* keep ours */ }
@@ -753,6 +754,287 @@ function holdText(runId) {
   return info.hold_until === "forever"
     ? "held indefinitely — writes stay allowed until released"
     : `held until ${fmtCreated(info.hold_until)}`;
+}
+
+// ---- panels in their own window ----------------------------------------
+// A panel can be torn off into a window of its own and put back with a
+// button. Deliberately buttons rather than a drag: while the OS is moving a
+// window there is no "drag ended" event to hang a drop on, so a drag would
+// mean debouncing Moved events and guessing -- for a gesture used a handful
+// of times a day.
+//
+// A torn-off panel *pins* to what it was showing. The reason to tear one
+// off is usually to compare it with something else, and a panel that keeps
+// changing under you defeats that; the docked panel goes on following the
+// selection.
+const PANEL_PARAMS = new URLSearchParams(location.search);
+const PANEL_MODE = PANEL_PARAMS.get("panel") || "";
+// What this window is currently showing. Seeded from the URL, but mutable:
+// with "follow" on it tracks the main window's selection, and Dock must
+// hand back what is on screen now rather than what was opened.
+let panelSubject = {
+  archive: PANEL_PARAMS.get("archive") || "",
+  run_id: PANEL_PARAMS.get("run_id") || "",
+  session_path: PANEL_PARAMS.get("session_path") || "",
+  filename: PANEL_PARAMS.get("filename") || "",
+  sidecar_path: PANEL_PARAMS.get("sidecar_path") || "",
+};
+let panelFollows = false;
+
+async function popOutPanel(kind) {
+  // The sidecar panel is keyed by the sidecar's path, so send that too --
+  // the window would otherwise have to guess at the naming convention.
+  const subject = kind === "sidecar"
+    ? (selected && selected.sidecar_path && curSession
+        ? { session_path: selected.session_path || curSession.path,
+            filename: selected.name, sidecar_path: selected.sidecar_path }
+        : null)
+    : (curSession ? { session_path: curSession.path } : null);
+  if (!subject) { toast("Nothing to show in a panel yet."); return; }
+
+  const query = new URLSearchParams(Object.assign(
+    { panel: kind, archive: archive || "",
+      run_id: (curSession && curSession.run_id) || "" }, subject)).toString();
+  const title = kind === "sidecar"
+    ? `Sidecar — ${subject.filename}`
+    : `Session — ${curSession.run_id}`;
+  try {
+    await invoke("open_panel_window", { kind, title, query });
+  } catch (e) {
+    toast(`Could not open the panel: ${e}`);
+    return;
+  }
+  // Free the dock: two copies of the same panel is just clutter.
+  if (kind === "sidecar") showSc = false; else showSess = false;
+  savePanels();
+  updateDock();
+}
+
+async function dockThisPanel() {
+  const payload = {
+    kind: "panel", panel: PANEL_MODE,
+    archive: panelSubject.archive,
+    session_path: panelSubject.session_path,
+    filename: panelSubject.filename,
+  };
+  try {
+    const label = await invoke("main_window_label");
+    if (label) await invoke("send_to_window", { label, payload });
+  } catch (e) {
+    toast(`${e}`);
+    return;
+  }
+  closeThisWindow();
+}
+
+function closeThisWindow() {
+  try {
+    const w = window.__TAURI__.window;
+    const cur = w && (w.getCurrentWindow ? w.getCurrentWindow() : w.getCurrent());
+    if (cur && cur.close) cur.close();
+  } catch (e) { /* nothing sensible to do if the window will not close */ }
+}
+
+// The main window receiving a panel back.
+async function dockPanelFromWindow(payload) {
+  if (payload.archive && payload.archive !== archive) {
+    try { await loadArchive(payload.archive); } catch (e) { /* keep ours */ }
+  }
+  if (payload.panel === "session") {
+    const sess = sessions.find((x) => x.path === payload.session_path);
+    if (sess && (!curSession || curSession.path !== sess.path)) await selectSession(sess);
+    showSess = true;
+  } else {
+    const sess = sessions.find((x) => x.path === payload.session_path);
+    if (sess && (!curSession || curSession.path !== sess.path)) await selectSession(sess);
+    const it = (items || []).find((i) => i.name === payload.filename);
+    if (it) { selected = it; applyItemView(); updateDetails(); }
+    showSc = true;
+    if (it) await openSidecarPanel(it);
+  }
+  savePanels();
+  updateDock();
+  await refreshSessionInfo();
+}
+
+// A window showing only one panel: everything else is hidden, and the panel
+// fetches its own subject rather than inheriting any state.
+async function bootPanelWindow() {
+  document.body.classList.add("panel-window");
+  for (const sel of [".apptoolbar", ".tabbar", ".rail", ".main", "#splitRail",
+                     "#splitDock", ".statusbar"]) {
+    const el = document.querySelector(sel);
+    if (el) el.classList.add("hidden");
+  }
+  archive = PANEL_PARAMS.get("archive") || null;
+  const sessionPath = PANEL_PARAMS.get("session_path") || "";
+  const filename = PANEL_PARAMS.get("filename") || "";
+
+  showSess = PANEL_MODE === "session";
+  showSc = PANEL_MODE === "sidecar";
+  $("dock").classList.remove("hidden");
+  updateDock();
+  for (const id of ["scClose", "sessClose", "scPop", "sessPop"]) $(id).classList.add("hidden");
+  const dockBtn = $(PANEL_MODE === "session" ? "sessDock" : "scDock");
+  dockBtn.classList.remove("hidden");
+  dockBtn.classList.add("dockbtn");
+  const followWrap = $(PANEL_MODE === "session" ? "sessFollowWrap" : "scFollowWrap");
+  const followBox = $(PANEL_MODE === "session" ? "sessFollow" : "scFollow");
+  followWrap.classList.remove("hidden");
+  followBox.onchange = () => setPanelFollow(followBox.checked);
+  initShortcuts();          // Esc, and Mod-Enter to save notes
+
+  try {
+    fileManagerName = (await call("file_manager_name", {})).name || "Finder";
+  } catch (e) { fileManagerName = "Finder"; }
+
+  await loadPanelSubject();
+
+  $("scDock").onclick = dockThisPanel;
+  $("sessDock").onclick = dockThisPanel;
+  $("scRaw").onclick = () => { scRaw = !scRaw; renderSidecarPanel(); };
+  $("sessRaw").onclick = () => { sessRaw = !sessRaw; renderSessionPanel(); };
+
+  // Another window editing the same annotations would leave this one showing
+  // something that is no longer true.
+  tauriEvent.listen("nebula://changed", () => refreshPanelWindow())
+    .catch(() => {});
+  tauriEvent.listen("nebula://selection", (e) => panelFollowSelection(e.payload))
+    .catch(() => {});
+
+  // Default to following: it is what the panel was doing in the dock a
+  // moment ago, so continuing is the least surprising behaviour. Pinning is
+  // one click, and the choice is remembered per panel kind.
+  setPanelFollow(LS.get(`nebula.panelFollow.${PANEL_MODE}`, true));
+}
+
+function refreshPanelWindow() { return loadPanelSubject(); }
+
+// One loader for boot and for refresh, using exactly the calls the docked
+// panel makes -- a second code path here is how the two drift apart.
+async function loadPanelSubject() {
+  const sessionPath = panelSubject.session_path;
+  const filename = panelSubject.filename;
+  const sidecarPath = panelSubject.sidecar_path;
+
+  if (!sessionPath || (PANEL_MODE === "sidecar" && !sidecarPath)) {
+    // Following a selection that has nothing to show is a normal state, not
+    // an error: click a file again and the panel fills back in.
+    const body = PANEL_MODE === "session" ? "sessBody" : "scBody";
+    $(body).innerHTML = noteBox("info", panelFollows
+      ? "Nothing selected in the main window."
+      : "Nothing to show.");
+    setPanelTitle();
+    return;
+  }
+
+  if (PANEL_MODE === "session") {
+    sessInfo = await call("session_info", { session_path: sessionPath });
+    curSession = { run_id: (sessInfo && sessInfo.run_id) || "", path: sessionPath };
+    renderSessionPanel();
+    setPanelTitle();
+    return;
+  }
+
+  scInfo = await call("sidecar_info", { sidecar_path: sidecarPath });
+  if (!scInfo) {
+    $("scBody").innerHTML = noteBox("err", `Could not read ${escapeHtml(sidecarPath)}`);
+    return;
+  }
+  scInfo.itemName = filename;
+  curSession = { run_id: panelSubject.run_id, path: sessionPath };
+  // Notes are not part of the sidecar -- they live in annotations.yaml, and
+  // list_items is what normally attaches them to an item. A panel window has
+  // no item list, so it asks for them directly; reading them off scInfo
+  // silently produced an empty notes editor over a file that had notes.
+  let notes = { tags: [], comment: "" };
+  try {
+    notes = await call("get_annotations", { session_path: sessionPath, filename })
+      || notes;
+  } catch (e) { /* an unreadable annotations.yaml is not worth losing the panel over */ }
+  selected = {
+    name: filename, session_path: sessionPath, sidecar_path: sidecarPath,
+    has_sidecar: true, user_tags: notes.tags || [],
+    user_comment: notes.comment || "",
+  };
+  scNotes = null;              // drop any draft from the file we just left
+  renderSidecarPanel();
+  setPanelTitle();
+  // Lineage and captured source each need a scan, so they follow the panel
+  // rather than delaying it -- same order as the docked panel.
+  await Promise.all([loadLineage(selected), loadCodeInfo(selected)]);
+}
+
+function setPanelTitle() {
+  const title = PANEL_MODE === "session"
+    ? `Session — ${panelSubject.run_id || "…"}`
+    : `Sidecar — ${panelSubject.filename || "…"}`;
+  try {
+    const w = window.__TAURI__.window;
+    const cur = w && (w.getCurrentWindow ? w.getCurrentWindow() : w.getCurrent());
+    if (cur && cur.setTitle) cur.setTitle(title);
+  } catch (e) { /* the title is a nicety */ }
+}
+
+// The main window's selection changed. Only act when following, and only
+// when it is actually a different subject -- reloading on every click would
+// make the panel flicker while someone arrows through a list.
+async function panelFollowSelection(sel) {
+  if (!panelFollows || !sel) return;
+  const next = PANEL_MODE === "session"
+    ? { session_path: sel.session_path || "", run_id: sel.run_id || "",
+        filename: "", sidecar_path: "", archive: sel.archive || panelSubject.archive }
+    : { session_path: sel.session_path || "", run_id: sel.run_id || "",
+        filename: sel.filename || "", sidecar_path: sel.sidecar_path || "",
+        archive: sel.archive || panelSubject.archive };
+  const same = next.session_path === panelSubject.session_path
+    && next.filename === panelSubject.filename
+    && next.sidecar_path === panelSubject.sidecar_path;
+  if (same) return;
+  panelSubject = next;
+  archive = next.archive || archive;
+  await loadPanelSubject();
+}
+
+function setPanelFollow(on) {
+  panelFollows = !!on;
+  LS.set(`nebula.panelFollow.${PANEL_MODE}`, panelFollows);
+  const box = $(PANEL_MODE === "session" ? "sessFollow" : "scFollow");
+  if (box) box.checked = panelFollows;
+  // Ask for the current selection straight away, so ticking the box does
+  // not leave the panel showing something stale until the next click.
+  if (panelFollows) {
+    try { invoke("broadcast", { event: "nebula://whats-selected", payload: {} }); }
+    catch (e) { /* nothing to do */ }
+  }
+}
+
+// Anything that writes to the archive tells the other windows, so a panel
+// showing the same thing refreshes instead of quietly going stale.
+// What the main window is looking at, for panels that follow it. Coalesced,
+// because arrowing down a list fires this on every row.
+let announceTimer = null;
+function announceSelection() {
+  if (PANEL_MODE) return;                    // panels do not drive each other
+  clearTimeout(announceTimer);
+  announceTimer = setTimeout(() => {
+    const payload = {
+      archive: archive || "",
+      run_id: (curSession && curSession.run_id) || "",
+      session_path: (selected && selected.session_path)
+        || (curSession && curSession.path) || "",
+      filename: selected ? selected.name : "",
+      sidecar_path: (selected && selected.sidecar_path) || "",
+    };
+    try { invoke("broadcast", { event: "nebula://selection", payload }); }
+    catch (e) { /* single-window installs do not care */ }
+  }, 120);
+}
+
+function announceChange(what) {
+  try {
+    invoke("broadcast", { event: "nebula://changed", payload: what || {} });
+  } catch (e) { /* single-window installs do not care */ }
 }
 
 // ---- dialogs: movable, and confirmable from the keyboard ---------------
@@ -1717,6 +1999,7 @@ function sessionChips(s) {
 async function selectSession(s) {
   curSession = s;
   scheduleTabSave();
+  announceSelection();
   selected = null; selectedIsSidecar = false; picked = []; pickAnchor = null;
   renderSessions();
   await reloadItems();
@@ -2508,6 +2791,7 @@ function selectItem(it, isSc, ev) {
   selectedIsSidecar = selected === it ? isSc : false;
   renderItemArea();
   updateDetails();
+  announceSelection();
   if (showSc && selected && selected.has_sidecar && picked.length === 1) {
     openSidecarPanel(selected);
   }
@@ -2540,6 +2824,7 @@ function moveSelection(delta, { extend = false, to = null } = {}) {
   selectedIsSidecar = false;
   renderItemArea();
   updateDetails();
+  announceSelection();
   revealSelected();
   if (showSc && selected.has_sidecar && picked.length === 1) openSidecarPanel(selected);
   if (showSess && selected.session_path) refreshSessionInfo();
@@ -3934,6 +4219,8 @@ function wireNotes(kind, sessionPath, filename, onSaved) {
       stateEl.textContent = "saved";
       toast(filename ? `Saved notes for ${filename}` : "Saved session notes");
       if (onSaved) onSaved(saved);
+      // A torn-off panel (or another window) may be showing this very file.
+      announceChange({ session_path: sessionPath, filename: filename || null });
     } catch (e) {
       stateEl.textContent = "";
       toast(`Could not save notes: ${e}`);   // e.g. a tag with a comma in it
@@ -4618,6 +4905,15 @@ function initShortcuts() {
     .catch((e) => console.error("menu listener failed", e));
   tauriEvent.listen("nebula://accept", (e) => acceptFromWindow(e.payload))
     .catch((e) => console.error("window hand-off listener failed", e));
+  tauriEvent.listen("nebula://changed", () => {
+    // Someone else edited what we may be showing.
+    if (showSc && selected) openSidecarPanel(selected);
+    if (showSess) refreshSessionInfo();
+  }).catch(() => {});
+  // A panel window that has just been told to follow asks what is selected,
+  // so ticking the box does not wait for the next click to take effect.
+  tauriEvent.listen("nebula://whats-selected", () => announceSelection())
+    .catch(() => {});
 
   document.addEventListener("keydown", (e) => {
     if (e.key === "Escape") { closePops(null); return; }
@@ -4685,6 +4981,10 @@ $("openSc").onclick = () => selected && openSidecarPanel(selected);
 $("scClose").onclick = () => { showSc = false; savePanels(); updateDock(); };
 $("scRaw").onclick = () => { scRaw = !scRaw; renderSidecarPanel(); };
 $("sessInfoBtn").onclick = toggleSessionPanel;
+$("scPop").onclick = () => popOutPanel("sidecar");
+$("sessPop").onclick = () => popOutPanel("session");
+$("scDock").classList.add("hidden");
+$("sessDock").classList.add("hidden");
 $("sessClose").onclick = () => { showSess = false; savePanels(); updateDock(); };
 $("sessRaw").onclick = () => { sessRaw = !sessRaw; renderSessionPanel(); };
 $("importBtn").onclick = startImport;
@@ -4846,6 +5146,7 @@ $("themeBtn").onclick = () => {
 
 // ---- boot ---------------------------------------------------------------
 async function boot() {
+  if (PANEL_MODE) { await bootPanelWindow(); return; }
   initPanes();
   makeDialogsDraggable();
   watchCalendarWidth();

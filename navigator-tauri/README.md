@@ -288,6 +288,51 @@ what a thing *does*, not by what happened to be built first:
 - The app menu carries **Set Your Name…**, since identity is about you
   rather than about any archive.
 
+### Panels in their own window
+
+The sidecar and session panels have a **⇱ pop-out** button that opens them
+as a separate OS window, and a **⇲ Dock** button in that window to put them
+back. Buttons rather than a drag on purpose: while the OS is moving a
+window there is no "drag ended" event to hang a drop on, so a drag would
+mean debouncing `Moved` events and guessing where the pointer was — for a
+gesture used a handful of times a day.
+
+A torn-off panel has a **follow** checkbox. With it on (the default) the
+panel tracks whatever is selected in the main window — which is what it was
+doing in the dock a moment earlier, so continuing is the least surprising
+behaviour. Turning it off pins the panel to what it is showing, which is
+what you want when comparing two sidecars side by side. The choice is
+remembered per panel kind.
+
+Following is cheap and quiet: the main window announces its selection on a
+120ms debounce (arrowing down a list would otherwise fire on every row),
+and a panel ignores an announcement that names what it is already showing.
+Ticking the box asks the main window what is selected right now, so it
+takes effect immediately rather than on the next click. A selection with
+nothing to show — a session with no file selected — renders as a state,
+not an error. **Dock hands back what the panel moved to**, not what it was
+opened with.
+
+The subject travels in the window's URL (`index.html?panel=sidecar&…`), so
+the window is self-sufficient the moment it boots — no waiting for the
+webview to be ready and no race between "the window exists" and "the window
+knows what to show". It then makes exactly the same backend calls the
+docked panel makes, through one shared loader, because a second code path
+is how the two versions drift apart.
+
+Edits broadcast: saving notes emits `nebula://changed` to every window, so a
+torn-off panel showing the same file refreshes rather than quietly going
+stale. Two windows editing one `annotations.yaml` is still last-write-wins,
+which is the archive's model everywhere else.
+
+**A capability note worth knowing**: `capabilities/default.json` scopes
+permissions by window label. It listed only `main`, which would have left
+every extra window — `File ▸ New Window` included — unable to invoke
+anything at all, bridge included. It now covers `main`, `nav-*` and
+`panel-*`, and grants `core:window:allow-close` so a panel window can close
+itself when docked. Add new window-label prefixes there or they will boot
+into a dead app.
+
 ### Dialogs
 
 Every dialog is **movable**: its header is a drag handle, so a box can be

@@ -389,6 +389,12 @@
         <section class="panel hidden" id="sessPanel">
           <div class="p-head">
             <span class="t" id="sessTitle">Session</span>
+            <button class="p-btn" id="sessPop" title="Open in its own window">⇱</button>
+            <label class="p-follow hidden" id="sessFollowWrap"
+                   title="Track whatever is selected in the main window, or stay on this one">
+              <input type="checkbox" id="sessFollow" /> follow
+            </label>
+            <button class="p-btn" id="sessDock" title="Put this panel back in the main window">⇲ Dock</button>
             <button class="p-btn" id="sessRaw" title="Show session.yaml source">{ }</button>
             <button class="p-btn" id="sessClose" title="Hide">✕</button>
           </div>
@@ -400,6 +406,12 @@
         <section class="panel hidden" id="scPanel">
           <div class="p-head">
             <span class="t" id="scTitle">Sidecar</span>
+            <button class="p-btn" id="scPop" title="Open in its own window">⇱</button>
+            <label class="p-follow hidden" id="scFollowWrap"
+                   title="Track whatever is selected in the main window, or stay on this one">
+              <input type="checkbox" id="scFollow" /> follow
+            </label>
+            <button class="p-btn" id="scDock" title="Put this panel back in the main window">⇲ Dock</button>
             <button class="p-btn" id="scRaw" title="Show raw JSON">{ }</button>
             <button class="p-btn" id="scClose" title="Hide">✕</button>
           </div>

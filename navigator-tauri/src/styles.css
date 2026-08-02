@@ -775,3 +775,18 @@ body.resizing, body.resizing-y, body.dragging-dialog, body.dragging-dialog * {
 /* draggable dialogs */
 .dlg-head { cursor:default; }
 .dialog { will-change:transform; }
+
+
+/* a panel living in its own window */
+body.panel-window .app { height:100vh; }
+body.panel-window .dock { flex:1 1 auto !important; width:auto !important; border-left:none; }
+body.panel-window .panel { flex:1 1 auto !important; }
+body.panel-window .p-head { -webkit-app-region:drag; padding-left:82px; }
+body.panel-window .p-head button { -webkit-app-region:no-drag; }
+.p-btn.dockbtn { font-size:11px; padding:2px 8px; }
+
+.p-follow { display:inline-flex; align-items:center; gap:4px; font-size:11px;
+            color:var(--text-faint); cursor:pointer; margin-right:2px; }
+.p-follow input { width:12px; height:12px; accent-color:var(--accent); }
+.p-follow.hidden { display:none; }
+body.panel-window .p-follow { -webkit-app-region:no-drag; }
