@@ -42,6 +42,14 @@ let sessions = [];
 let curSession = null;
 let items = [];
 let listView = true, showMeta = true, verify = false;
+// What the lists show. Kept apart from search/sort config because these are
+// purely about presentation -- none of them change which rows exist.
+const VIEW_DEFAULTS = {
+  itemTags: true, itemComment: true, itemDup: true, meta: true, verify: false,
+  sessUserTags: true, sessTags: false, sessComment: true, sessCounts: true,
+  sessDates: true,
+};
+let viewCfg = Object.assign({}, VIEW_DEFAULTS);
 let selected = null, selectedIsSidecar = false;
 // Multi-select: `selected` stays the primary (what the panels describe),
 // `picked` is everything highlighted. Cmd/Ctrl toggles, Shift extends.
@@ -228,6 +236,7 @@ async function loadArchive(arc) {
     saveArchives();
     renderArchiveSelect();
     $("wtitle").textContent = `Nebula Navigator — ${label}`;
+    $("appArcLabel").textContent = arc;
     await reload();
     await loadArchiveKind();
     if (railTab === "collections") await loadCollections();
@@ -746,6 +755,160 @@ function holdText(runId) {
     : `held until ${fmtCreated(info.hold_until)}`;
 }
 
+// ---- dialogs: movable, and confirmable from the keyboard ---------------
+// A dialog can cover the very thing you opened it to look at, so its header
+// is a drag handle. Position is per-dialog and resets when it is reopened:
+// a box that remembers where it was dragged to is a box that opens off
+// screen after the window is resized.
+function makeDialogsDraggable() {
+  document.querySelectorAll(".scrim .dialog").forEach((dlg) => {
+    const head = dlg.querySelector(".dlg-head");
+    if (!head || head.dataset.dragWired) return;
+    head.dataset.dragWired = "1";
+    head.addEventListener("pointerdown", (ev) => {
+      if (ev.button !== 0 || ev.target.closest("button, input, select, textarea")) return;
+      ev.preventDefault();
+      const start = dlg.getBoundingClientRect();
+      const x0 = ev.clientX, y0 = ev.clientY;
+      const cur = dialogOffset(dlg);
+      document.body.classList.add("dragging-dialog");
+
+      const move = (e) => {
+        // Clamp so the header stays reachable: a dialog dragged off the top
+        // can never be dragged back.
+        const dx = cur.x + (e.clientX - x0);
+        const dy = cur.y + (e.clientY - y0);
+        const minY = -start.top + 4;
+        const maxY = window.innerHeight - start.top - 40;
+        const minX = -start.left - start.width + 80;
+        const maxX = window.innerWidth - start.left - 80;
+        setDialogOffset(dlg, Math.max(minX, Math.min(maxX, dx)),
+                             Math.max(minY, Math.min(maxY, dy)));
+      };
+      const up = () => {
+        document.removeEventListener("pointermove", move);
+        document.removeEventListener("pointerup", up);
+        document.body.classList.remove("dragging-dialog");
+      };
+      document.addEventListener("pointermove", move);
+      document.addEventListener("pointerup", up);
+    });
+  });
+}
+
+function dialogOffset(dlg) {
+  const m = /translate\((-?[\d.]+)px,\s*(-?[\d.]+)px\)/.exec(dlg.style.transform || "");
+  return m ? { x: +m[1], y: +m[2] } : { x: 0, y: 0 };
+}
+
+function setDialogOffset(dlg, x, y) {
+  dlg.style.transform = `translate(${x}px, ${y}px)`;
+}
+
+function resetDialogPosition(scrim) {
+  const dlg = scrim && scrim.querySelector(".dialog");
+  if (dlg) dlg.style.transform = "";
+}
+
+// The primary button of whichever dialog is open -- what Cmd/Ctrl-Enter
+// presses. Deliberately the *primary* one: Enter should confirm, never
+// delete, so a dialog whose primary action is destructive still needs the
+// mouse.
+function openScrim() {
+  const shown = [...document.querySelectorAll(".scrim.show")];
+  return shown.length ? shown[shown.length - 1] : null;
+}
+
+function confirmOpenDialog() {
+  const scrim = openScrim();
+  if (!scrim) return false;
+  const btn = scrim.querySelector(".dlg-actions .btn-primary:not([disabled])")
+    || scrim.querySelector(".dlg-actions button:not([disabled]):last-child");
+  if (!btn) return false;
+  btn.click();
+  return true;
+}
+
+// With no dialog open, Cmd/Ctrl-Enter saves the notes editor being typed in
+// -- the same "commit what I just wrote" gesture, one layer out.
+function confirmNotesEditor(target) {
+  const notes = target && target.closest && target.closest(".notes");
+  if (!notes) return false;
+  const save = notes.querySelector("button");
+  if (!save || save.disabled) return false;
+  save.click();
+  return true;
+}
+
+// ---- view options ------------------------------------------------------
+const VIEW_BOXES = {
+  voItemTags: "itemTags", voItemComment: "itemComment", voItemDup: "itemDup",
+  voMeta: "meta", voVerify: "verify", voSessUserTags: "sessUserTags",
+  voSessTags: "sessTags", voSessComment: "sessComment",
+  voSessCounts: "sessCounts", voSessDates: "sessDates",
+};
+
+function openViewOptions() {
+  syncViewOptions();
+  showDialog("viewOptScrim");
+}
+
+// One way in for every dialog: reset where it sits, then show it.
+function showDialog(id) {
+  const scrim = $(id);
+  resetDialogPosition(scrim);
+  scrim.classList.add("show");
+  return scrim;
+}
+
+function syncViewOptions() {
+  for (const [id, key] of Object.entries(VIEW_BOXES)) $(id).checked = !!viewCfg[key];
+}
+
+function applyViewOptions({ reload = false } = {}) {
+  for (const [id, key] of Object.entries(VIEW_BOXES)) viewCfg[key] = $(id).checked;
+  LS.set("nebula.viewCfg", viewCfg);
+  // `showMeta` and `verify` predate this dialog and are read all over; keep
+  // them as the single source of truth rather than having two switches.
+  showMeta = viewCfg.meta;
+  const wasVerify = verify;
+  verify = viewCfg.verify;
+  renderSessions();
+  if (curSession || searchMode) renderItemArea();
+  // Verification is the only switch that changes what the backend has to do
+  // (it re-hashes every file), so it is the only one that re-lists -- and it
+  // has to re-run whichever view is active, not just a session listing.
+  if (reload && verify !== wasVerify) {
+    if (searchMode) runItemSearch(); else reloadItems();
+  }
+}
+
+// A comment is a paragraph; a list row has space for a mark. The text goes
+// in the tooltip, where length costs nothing.
+function commentMark(text) {
+  if (!text) return "";
+  return `<span class="cmark" title="${escapeHtml(text)}" aria-label="has a comment">
+      <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M4 5h16v11H9l-5 4z"/></svg>
+    </span>`;
+}
+
+// Tags are how you find things again, so clicking one searches for it --
+// in a new tab, because you were presumably in the middle of something.
+function tagChips(tags, cls) {
+  return (tags || []).map((t) =>
+    `<span class="chip ${cls} click" data-tag="${escapeHtml(t)}"
+       title="Search the archive for ${escapeHtml(t)}">${escapeHtml(t)}</span>`).join("");
+}
+
+function wireTagChips(root) {
+  (root || document).querySelectorAll("[data-tag]").forEach((el) => {
+    el.onclick = (ev) => {
+      ev.stopPropagation();          // not a row selection
+      openSearchInNewTab(el.getAttribute("data-tag"));
+    };
+  });
+}
+
 // ---- who you are -------------------------------------------------------
 // The user segment of a nebula URI. Archive names are not unique -- two
 // people can both have a "postdoc" -- so an archive with no recorded owner
@@ -762,7 +925,7 @@ function openIdentityDialog(reason) {
   $("idUser").value = identity.user || "";
   $("idNote").textContent = reason || (identity.path
     ? `Stored on this machine only, in ${identity.path}.` : "");
-  $("idScrim").classList.add("show");
+  showDialog("idScrim");
   setTimeout(() => $("idUser").focus(), 30);
 }
 
@@ -789,7 +952,7 @@ function openNewArchive() {
   $("arcOvDup").checked = true;
   $("arcNewNote").textContent = "";
   syncNewArchive();
-  $("newArcScrim").classList.add("show");
+  showDialog("newArcScrim");
 }
 
 function syncNewArchive() {
@@ -980,7 +1143,7 @@ async function openTransfer(op, args, { title }) {
   $("xferBody").innerHTML = `<div class="idx-note">Working out what would move…</div>`;
   $("xferForeignWrap").classList.toggle("hidden", op !== "export");
   $("xferOk").disabled = true;
-  $("xferScrim").classList.add("show");
+  showDialog("xferScrim");
 
   const res = await call("transfer_plan", Object.assign({ op, archive }, args,
     op === "export" ? { include_foreign: $("xferForeign").checked } : {}));
@@ -1506,12 +1669,13 @@ function renderSessions() {
   }
   let lastBucket = null;
   $("sessionList").innerHTML = shownSessions.map((s, i) => {
-    const bucket = dayBucket(s.created);
-    const header = bucket === lastBucket ? ""
+    const bucket = viewCfg.sessDates ? dayBucket(s.created) : null;
+    const header = (!bucket || bucket === lastBucket) ? ""
       : `<div class="day-head"><span>${escapeHtml(bucket)}</span></div>`;
     lastBucket = bucket;
     const held = s.held ? '<span class="tag-held">HELD</span>' : "";
-    const prob = s.n_problems ? `<span class="tag-prob">${s.n_problems} ⚠</span>` : "";
+    const prob = (viewCfg.sessCounts && s.n_problems)
+      ? `<span class="tag-prob">${s.n_problems} ⚠</span>` : "";
     const sel = curSession && s.run_id === curSession.run_id ? "sel" : "";
     const line1 = `${escapeHtml(s.run_id)} <span class="desc">${escapeHtml(s.description)}</span>`;
     return header + `<div class="session ${sel}" data-i="${i}">
@@ -1519,10 +1683,12 @@ function renderSessions() {
       <div class="meta">
         <div class="line1"><span class="rid">${line1}</span></div>
         <div class="line2"><span>${escapeHtml(s.status)}</span>${held}${prob}</div>
+        ${sessionChips(s)}
       </div>
       <span class="more" data-open="${i}" title="Open in file manager">⋯</span>
     </div>`;
   }).join("");
+  wireTagChips($("sessionList"));
   $("sessionList").querySelectorAll(".session").forEach((el) => {
     el.onclick = (ev) => {
       const openIdx = ev.target.getAttribute("data-open");
@@ -1537,6 +1703,15 @@ function renderSessions() {
       showSessionMenu(ev.clientX, ev.clientY, shownSessions[+el.dataset.i]);
     };
   });
+}
+
+function sessionChips(s) {
+  const bits = [];
+  if (viewCfg.sessUserTags) bits.push(tagChips(s.user_tags, "user"));
+  if (viewCfg.sessTags) bits.push(tagChips(s.tags, "tag"));
+  if (viewCfg.sessComment) bits.push(commentMark(s.user_comment));
+  const html = bits.filter(Boolean).join("");
+  return html ? `<div class="rowchips">${html}</div>` : "";
 }
 
 async function selectSession(s) {
@@ -2112,6 +2287,7 @@ async function jumpToSession(runId) {
 function renderItemArea() {
   $("itemArea").innerHTML = listView ? listHTML() : gridHTML();
   wireItems();
+  wireTagChips($("itemArea"));
 }
 
 async function reloadItems() {
@@ -2222,7 +2398,7 @@ function listHTML() {
   const rows = shownItems.map((it, idx) => {
     const created = fmtCreated(it.timestamp);
     let r = `<tr data-i="${idx}" data-sc="0" class="${sameSel(idx, false) ? 'sel' : ''} ${isPicked(idx) ? 'multi' : ''}">
-      <td><div class="namecell">${fileGlyph(it, 20)}<span class="fname">${escapeHtml(it.name)}</span>${dupBadge(it)}</div></td>
+      <td><div class="namecell">${fileGlyph(it, 20)}<span class="fname">${escapeHtml(it.name)}</span>${dupBadge(it)}${itemChips(it)}</div></td>
       ${searchMode ? sessionCell(it) : ""}
       <td class="created">${created}</td>
       <td>${pill(it)}</td></tr>`;
@@ -2252,14 +2428,22 @@ function gridHTML() {
   if (!shownItems.length) return emptyItemsHTML();
   return `<div class="grid">${shownItems.map((it, idx) => `
     <div class="cell ${sameSel(idx, false) || isPicked(idx) ? 'sel' : ''}" data-i="${idx}" data-sc="0" title="${escapeHtml(it.detail)}">
-      ${fileGlyph(it, 54)}<span class="cname">${escapeHtml(it.name)}${dupBadge(it)}</span>
+      ${fileGlyph(it, 54)}<span class="cname">${escapeHtml(it.name)}${dupBadge(it)}</span>${itemChips(it)}
       ${searchMode ? `<span class="cell-sess">${escapeHtml(it.run_id)}</span>` : ""}</div>`).join("")}</div>`;
 }
 // The list shows the name that is actually on disk -- that is what you will
 // find in Finder, and what a ref has to name -- while the panels lead with
 // the name that was asked for. The badge carries the other half either way.
+function itemChips(it) {
+  const bits = [];
+  if (viewCfg.itemTags) bits.push(tagChips(it.user_tags, "user"));
+  if (viewCfg.itemComment) bits.push(commentMark(it.user_comment));
+  const html = bits.filter(Boolean).join("");
+  return html ? `<span class="rowchips">${html}</span>` : "";
+}
+
 function dupBadge(it) {
-  if (!it.is_duplicate) return "";
+  if (!it.is_duplicate || !viewCfg.itemDup) return "";
   const asked = it.original_name || it.display_name;
   return `<span class="dup" title="asked for ${escapeHtml(asked)} — nebula wrote it as ` +
     `${escapeHtml(it.name)} so it would not overwrite the earlier one">` +
@@ -3238,7 +3422,7 @@ async function openCollectionPicker(refs, label) {
   $("collNewFields").style.display = none ? "flex" : "none";
   $("collNewName").value = "";
   $("collNote").value = "";
-  $("collScrim").classList.add("show");
+  showDialog("collScrim");
 }
 
 let pendingCollRef = null;
@@ -3476,7 +3660,7 @@ function confirmAction({ body, confirmLabel = "Confirm", danger = true }) {
   $("cfmBody").innerHTML = body;
   $("cfmOk").textContent = confirmLabel;
   $("cfmOk").classList.toggle("danger", danger);
-  $("cfmScrim").classList.add("show");
+  showDialog("cfmScrim");
   return new Promise((resolve) => { cfmResolve = resolve; });
 }
 function closeConfirm(result) {
@@ -3489,7 +3673,7 @@ let arcStats = null, checkResult = null, gcPreview = null;
 
 async function openArchivePanel() {
   if (!archive) { toast("Open an archive first."); return; }
-  $("arcScrim").classList.add("show");
+  showDialog("arcScrim");
   $("arcBody").innerHTML = `<div class="mg-note">Reading the archive…</div>`;
   await refreshArchiveStats();
 }
@@ -4437,6 +4621,15 @@ function initShortcuts() {
 
   document.addEventListener("keydown", (e) => {
     if (e.key === "Escape") { closePops(null); return; }
+    // Cmd/Ctrl-Enter commits: the open dialog's primary action, or the notes
+    // editor you are typing in. Plain Enter is left alone -- it inserts a
+    // newline in a comment box, which is a thing people do.
+    if ((e.key === "Enter" || e.key === "NumpadEnter") && hasMod(e)) {
+      if (confirmOpenDialog() || confirmNotesEditor(e.target)) {
+        e.preventDefault();
+        return;
+      }
+    }
     // Selection keys first: Cmd-A here means "select every file", not
     // "select the window's text", and the arrows walk the list.
     if (handleListKey(e)) { e.preventDefault(); return; }
@@ -4485,8 +4678,7 @@ $("archiveSel").onchange = (e) => onArchivePicked(e.target.value);
 $("refresh").onclick = () => reload();
 $("viewModeList").onclick = () => setView(true);
 $("viewModeGrid").onclick = () => setView(false);
-$("meta").onchange = (e) => { showMeta = e.target.checked; if (curSession || searchMode) renderItemArea(); };
-$("verify").onchange = (e) => { verify = e.target.checked; reloadItems(); };
+
 $("openArt").onclick = () => selected && selected.artifact_path && call("open_path", { path: selected.artifact_path });
 $("editSc").onclick = () => selected && selected.sidecar_path && call("open_path", { path: selected.sidecar_path });
 $("openSc").onclick = () => selected && openSidecarPanel(selected);
@@ -4510,7 +4702,29 @@ $("calToggle").onclick = () => {
 };
 $("tabAdd").onclick = () => addTab("browse");
 $("newArcBtn").onclick = openNewArchive;
+$("openArcBtn").onclick = openArchive;
+$("exportBtn").onclick = () => exportSelection({
+  sessions: curSession ? [curSession.run_id] : null,
+  label: curSession ? curSession.run_id : "archive" });
+$("viewOptBtn").onclick = openViewOptions;
+$("viewOptClose").onclick = () => $("viewOptScrim").classList.remove("show");
+$("viewOptDone").onclick = () => {
+  applyViewOptions({ reload: true });
+  $("viewOptScrim").classList.remove("show");
+};
+$("viewOptReset").onclick = () => {
+  viewCfg = Object.assign({}, VIEW_DEFAULTS);
+  syncViewOptions();
+  applyViewOptions({ reload: true });
+};
+for (const id of Object.keys(VIEW_BOXES)) {
+  $(id).onchange = () => applyViewOptions({ reload: true });
+}
 $("importBtn2").onclick = (ev) => {
+  // Without this the click keeps bubbling to the document-level closeMenu,
+  // which shuts the menu on the very click that opened it. (Right-click
+  // menus never hit this: they open on contextmenu, not click.)
+  ev.stopPropagation();
   const r = ev.currentTarget.getBoundingClientRect();
   openImportMenu(r.left, r.bottom + 4);
 };
@@ -4633,6 +4847,7 @@ $("themeBtn").onclick = () => {
 // ---- boot ---------------------------------------------------------------
 async function boot() {
   initPanes();
+  makeDialogsDraggable();
   watchCalendarWidth();
   initDragDrop();
 
@@ -4657,6 +4872,10 @@ async function boot() {
   renderSessionPanel();
 
   recentColls = LS.get("nebula.recentColls", []);
+  viewCfg = Object.assign({}, VIEW_DEFAULTS, LS.get("nebula.viewCfg", {}));
+  showMeta = viewCfg.meta;
+  verify = viewCfg.verify;
+  syncViewOptions();
   loadIdentity();
   showCal = LS.get("nebula.showCal", false);
   setRailTab(LS.get("nebula.railTab", "sessions"));

@@ -139,6 +139,10 @@ class SessionInfo:
     n_items: int = 0
     n_problems: int = 0
     user_tags: List[str] = field(default_factory=list)
+    #: The rail shows only *that* a comment exists, never its text -- a
+    #: paragraph does not belong in a list row. Carried in full anyway so
+    #: the indicator can show it on hover.
+    user_comment: str = ""
 
 
 def list_sessions(archive) -> List[SessionInfo]:
@@ -158,6 +162,7 @@ def list_sessions(archive) -> List[SessionInfo]:
             status=meta.status, tags=meta.tags, description=meta.description,
             held=_hold_active(meta), n_items=len(items), n_problems=problems,
             user_tags=annotations.get(session_dir)["tags"],
+            user_comment=annotations.get(session_dir)["comment"],
         ))
     out.sort(key=lambda s: s.created or "", reverse=True)
     return out

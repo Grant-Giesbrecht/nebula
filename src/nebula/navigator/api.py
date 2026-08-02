@@ -50,6 +50,7 @@ def _session_to_dict(s: "model.SessionInfo") -> Dict[str, Any]:
         "n_items": s.n_items,
         "n_problems": s.n_problems,
         "user_tags": list(s.user_tags),
+        "user_comment": s.user_comment,
     }
 
 

@@ -8,11 +8,36 @@
 </head>
 <body>
   <div class="app">
-    <div class="titlebar">
-      <div class="title" id="wtitle">Nebula Navigator</div>
-      <span class="kind-badge hidden" id="kindBadge"></span>
-      <span class="no-user hidden" id="noUserWarn" title="Click to set your name">no user set</span>
-      <button class="theme-toggle" id="themeBtn">◐ Theme</button>
+
+    <div class="scrim" id="viewOptScrim">
+      <div class="dialog" role="dialog" aria-modal="true" aria-labelledby="viewOptHead">
+        <div class="dlg-head row" id="viewOptHead"><span>View options</span>
+          <button class="p-btn" id="viewOptClose" title="Close">✕</button></div>
+        <div class="dlg-body scroll">
+          <div class="field">
+            <label>File browser</label>
+            <label class="check"><input type="checkbox" id="voItemTags" /> Your tags</label>
+            <label class="check"><input type="checkbox" id="voItemComment" /> A mark where you left a comment</label>
+            <label class="check"><input type="checkbox" id="voItemDup" checked /> Duplicate write order</label>
+            <label class="check"><input type="checkbox" id="voMeta" checked /> Metadata (.meta.json) rows</label>
+            <label class="check"><input type="checkbox" id="voVerify" /> Verify checksums when listing <span class="hint">re-hashes every file</span></label>
+          </div>
+          <div class="field">
+            <label>Session list</label>
+            <label class="check"><input type="checkbox" id="voSessUserTags" /> Your tags</label>
+            <label class="check"><input type="checkbox" id="voSessTags" /> Tags recorded when the session was created</label>
+            <label class="check"><input type="checkbox" id="voSessComment" /> A mark where you left a comment</label>
+            <label class="check"><input type="checkbox" id="voSessCounts" checked /> Item and problem counts</label>
+            <label class="check"><input type="checkbox" id="voSessDates" checked /> Group by day</label>
+          </div>
+          <div class="note">Tags are clickable: choosing one opens a new tab searching the archive for it.</div>
+        </div>
+        <div class="dlg-actions">
+          <button class="dbtn ghost" id="viewOptReset">Reset</button>
+          <div class="spacer"></div>
+          <button class="btn-primary" id="viewOptDone">Done</button>
+        </div>
+      </div>
     </div>
 
     <div class="scrim" id="newArcScrim">
@@ -98,6 +123,36 @@
           <button class="btn-primary" id="xferOk">Continue</button>
         </div>
       </div>
+    </div>
+
+    <div class="apptoolbar">
+      <button class="tbtn" id="newArcBtn" title="Create a new archive  (Ctrl-Shift-N)">
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/><line x1="12" y1="11" x2="12" y2="17"/><line x1="9" y1="14" x2="15" y2="14"/></svg>
+        New archive
+      </button>
+      <button class="tbtn" id="openArcBtn" title="Open an archive…  (Ctrl-Shift-O)">
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/></svg>
+        Open
+      </button>
+      <button class="tbtn" id="importBtn2" title="Bring data in: files, an intake archive, or a fragment">
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
+        Import
+      </button>
+      <button class="tbtn" id="exportBtn" title="Export a fragment…  (Ctrl-Shift-E)">
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>
+        Export
+      </button>
+      <div class="vdiv"></div>
+      <button class="tbtn" id="arcBtn" title="Archive management">
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="4" width="20" height="5" rx="1"/><path d="M4 9v9a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V9"/><line x1="10" y1="13" x2="14" y2="13"/></svg>
+        Archive
+      </button>
+      <div class="spacer"></div>
+      <span class="app-arc" id="appArcLabel"></span>
+      <span class="kind-badge hidden" id="kindBadge"></span>
+      <span class="no-user hidden" id="noUserWarn" title="Click to set your name">no user set</span>
+      <button class="theme-toggle" id="themeBtn">◐ Theme</button>
+      <span class="wtitle-sr" id="wtitle"></span>
     </div>
 
     <div class="tabbar hidden" id="tabbar">
@@ -210,21 +265,11 @@
             </div>
           </div>
           <div class="vdiv"></div>
-          <label class="check"><input type="checkbox" id="verify" /> Verify checksums</label>
-          <label class="check"><input type="checkbox" id="meta" checked /> Show metadata</label>
+          <button class="tbtn" id="viewOptBtn" title="What the lists show">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M2 12s3.5-7 10-7 10 7 10 7-3.5 7-10 7-10-7-10-7z"/></svg>
+            View
+          </button>
           <div class="vdiv"></div>
-          <button class="tbtn" id="newArcBtn" title="Create a new archive  (Ctrl-Shift-N)">
-            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/><line x1="12" y1="11" x2="12" y2="17"/><line x1="9" y1="14" x2="15" y2="14"/></svg>
-            New archive
-          </button>
-          <button class="tbtn" id="importBtn2" title="Bring data in: an intake archive, or a fragment">
-            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
-            Import
-          </button>
-          <button class="tbtn" id="arcBtn" title="Archive management">
-            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="4" width="20" height="5" rx="1"/><path d="M4 9v9a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V9"/><line x1="10" y1="13" x2="14" y2="13"/></svg>
-            Archive
-          </button>
           <button class="tbtn" id="sessInfoBtn" title="Session info — session.yaml  (Ctrl-Shift-S)">
             <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><line x1="12" y1="11" x2="12" y2="16"/><line x1="12" y1="8" x2="12.01" y2="8"/></svg>
             Session info

@@ -288,6 +288,65 @@ what a thing *does*, not by what happened to be built first:
 - The app menu carries **Set Your Name…**, since identity is about you
   rather than about any archive.
 
+### Dialogs
+
+Every dialog is **movable**: its header is a drag handle, so a box can be
+pushed aside to see what is underneath. Movement is clamped so the header
+always stays reachable — a dialog dragged off the top could never be
+dragged back — and the position resets when the dialog is reopened, since a
+box that remembers where it was put is a box that opens off-screen after
+the window is resized.
+
+**Mod-Enter confirms** the open dialog's *primary* action. Deliberately the
+primary one: Enter should never delete, so a dialog whose main action is
+destructive still needs the mouse. With no dialog open, Mod-Enter in a
+notes editor saves it — the same "commit what I just typed" gesture one
+layer out. Plain Enter is left alone, because a comment box needs newlines.
+
+### Selection is opt-in
+
+Dragging in the file list used to smear a text selection across every label
+it passed. The rule is now the one native apps use: **chrome is not text**.
+`body` is `user-select: none`, and selection is turned back on only where
+there is something worth copying — inputs, `pre`/`code`/`.mono`, the panel
+bodies, the index table, the status bar. During any drag (marquee, file,
+tab, dialog, splitter) it is forced off entirely.
+
+### Two toolbars
+
+The window has an **app toolbar** as its top row — New archive, Open,
+Import, Export, Archive management, then the open archive's path, the
+archive-kind badge, the no-user warning and the theme toggle on the right —
+and a
+**file toolbar** inside the browsing pane for things that act on the file
+list: reload, list/grid, sort, view options, session info, import files.
+The split is by scope: the top bar acts on archives, the lower one on what
+is being looked at.
+
+There is no separate title row — the archive name is in the OS title bar
+and the toolbar, which buys back ~38px of vertical space. The toolbar is
+padded left to clear the traffic lights and is itself a window-drag region,
+with the controls in it excluded.
+
+### View options
+
+The file toolbar's **View** button opens a dialog for what the lists
+*show* (nothing here changes which rows exist — that is search and sort):
+
+- **File browser** — your tags, a mark where you left a comment, duplicate
+  write order, metadata (`.meta.json`) rows, and checksum verification.
+- **Session list** — your tags, the tags recorded when the session was
+  created, a comment mark, item/problem counts, and day grouping.
+
+Verification is the only switch that re-lists, since it is the only one
+that makes the backend re-read files — and it re-runs whichever view is
+open, a session listing or a search.
+
+**Comments are marked, never quoted.** A comment is a paragraph and a list
+row is not the place for one, so it renders as a small note glyph with the
+text in the tooltip. **Tags are clickable**: choosing one opens a new tab
+searching the archive for it, leaving whatever you were doing intact.
+
 ### Creating archives
 
 The toolbar's **New archive** button and `File ▸ New Archive…`
