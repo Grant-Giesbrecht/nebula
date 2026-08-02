@@ -162,9 +162,50 @@ collection, to open it in a new tab. Tabs are persisted as locations, not
 as loaded data, so a restored tab pointing at a session that has since gone
 simply lands on the archive with nothing open.
 
-Tearing a tab out into a separate window is **not** implemented: Tauri
-would need a second webview plus a way to hand the location across, which
-is a larger change than the rest of this put together.
+**Multiple windows.** `File ▸ New Window` (`Mod-N`) opens another window on
+the same archive — one process, one Python bridge, since `bridge` is an
+app-wide Tauri command. Each window keeps its own tabs, saved under its
+window label, so two windows never overwrite each other's state.
+
+Tabs can be dragged **between** windows, and dragging one out of the strip
+and dropping it on empty space detaches it into a new window. A webview
+cannot see a pointer that has left it, so at drop time the front-end asks
+the Rust side which window is under the cursor (`window_at_cursor`, using
+screen coordinates and preferring the focused window when they overlap) and
+hands the tab over as a `nebula://accept` event (`send_to_window`). Files
+dragged into another window arrive the same way and open the collection
+picker there. Right-clicking a tab offers *Move to a new window* as a
+keyboard-and-mouse-free fallback.
+
+### Selecting files
+
+The file list behaves like a file manager's:
+
+- **Arrow keys** move the selection, **Shift** extends it, **Home/End** jump
+  to the ends and **PageUp/PageDown** move by a screenful — computed from the
+  actual row height, so it is right in grid view and at any window size.
+- **Mod-A** selects every file in view. It used to select the window's text,
+  which is never what you want here.
+- **Click and drag on empty space** sweeps a marquee over the rows it
+  crosses; Shift or Mod adds to the existing selection instead of replacing
+  it. Dragging *from a row* moves files instead, so the two gestures never
+  compete — the decision is made by where the gesture starts.
+- Keys are ignored while a text box has focus, so typing in a search box
+  still types.
+
+### Filing files into collections
+
+Four ways, in ascending order of ceremony:
+
+1. **Drag** the selection onto a collection — in the rail tree, in the
+   collection view, or in another window.
+2. **Add to &lt;name&gt;** on the right-click menu: one click into the
+   collection you used last.
+3. **Add to ▸** lists the five most recent, most recent first.
+4. **Add to collection…** opens the picker, which is a **tree** rather than a
+   dropdown, since collections nest and a flat list of names cannot show that
+   `figures` lives inside `paper-2026`. It opens with the last-used collection
+   selected and its ancestors expanded.
 
 ### The Relations tab
 

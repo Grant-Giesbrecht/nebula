@@ -5,6 +5,15 @@
 // one entry point; everything else is rendering.
 
 const invoke = window.__TAURI__.core.invoke;
+// Each window keeps its own tabs, so two windows do not overwrite one
+// another's saved state through the shared localStorage origin.
+const WINDOW_LABEL = (() => {
+  try {
+    const w = window.__TAURI__.window;
+    const cur = w && (w.getCurrentWindow ? w.getCurrentWindow() : w.getCurrent());
+    return (cur && cur.label) || "main";
+  } catch (e) { return "main"; }
+})();
 const dialogOpen = window.__TAURI__.dialog.open;
 const tauriEvent = window.__TAURI__.event;
 
@@ -332,6 +341,25 @@ function renderTabs() {
       if (close) { closeTab(close.getAttribute("data-close")); return; }
       selectTab(el.getAttribute("data-tab"));
     };
+    el.onpointerdown = (ev) => {
+      if (ev.target.closest("[data-close]")) return;
+      const tab = tabs.find((t) => t.id === el.getAttribute("data-tab"));
+      if (tab) startTabDrag(ev, tab);
+    };
+    el.oncontextmenu = (ev) => {
+      ev.preventDefault();
+      const tab = tabs.find((t) => t.id === el.getAttribute("data-tab"));
+      if (!tab) return;
+      showMenu(ev.clientX, ev.clientY, [
+        { head: tabTitle(tab) },
+        { label: "Move to a new window", action: () => moveTabToNewWindow(tab) },
+        { label: "Duplicate tab", action: () => addTab(tab.kind,
+            JSON.parse(JSON.stringify(tab.state || {}))) },
+        { separator: true },
+        { label: "Close tab", danger: true, disabled: tabs.length < 2,
+          action: () => closeTab(tab.id) },
+      ]);
+    };
   });
 }
 
@@ -357,7 +385,6 @@ async function selectTab(id) {
   const cur = activeTabObj();
   if (cur && cur.kind === "browse") cur.state = browseState();
   activeTab = id;
-  LS.set("nebula.activeTab", id);
   const tab = activeTabObj();
   renderTabs();
   applyTabChrome();
@@ -433,6 +460,142 @@ function closeTab(id) {
   }
 }
 
+async function openNewWindow() {
+  try {
+    await invoke("new_window");
+  } catch (e) {
+    toast(`Could not open a window: ${e}`);
+  }
+}
+
+// A tab dragged out of the strip goes wherever it was dropped: onto another
+// window if the pointer is over one, otherwise into a new window. The
+// webview cannot see a pointer that has left it, so the OS side answers
+// "which window is under the cursor" at drop time.
+async function dropOnOtherWindow(ev, payload) {
+  let label = null;
+  try {
+    label = await invoke("window_at_cursor");
+  } catch (e) { label = null; }
+  if (label && label === WINDOW_LABEL) return false;
+  if (!label) {
+    if (payload.kind !== "tab") return false;      // only tabs detach
+    try {
+      label = await invoke("new_window");
+      // The new window has to finish booting before it can be handed a tab.
+      await new Promise((r) => setTimeout(r, 700));
+    } catch (e) { return false; }
+  }
+  try {
+    await invoke("send_to_window", { label, payload });
+  } catch (e) {
+    toast(`${e}`);
+    return false;
+  }
+  return true;
+}
+
+function startTabDrag(ev, tab) {
+  if (ev.button !== 0) return;
+  const startX = ev.clientX, startY = ev.clientY;
+  let active = false, ghost = null;
+
+  const move = (e) => {
+    if (!active) {
+      if (Math.hypot(e.clientX - startX, e.clientY - startY) < 8) return;
+      active = true;
+      ghost = document.createElement("div");
+      ghost.className = "drag-ghost";
+      ghost.textContent = tabTitle(tab);
+      document.body.appendChild(ghost);
+      document.body.classList.add("dragging-entry");
+    }
+    ghost.style.left = `${e.clientX + 12}px`;
+    ghost.style.top = `${e.clientY + 12}px`;
+  };
+  const up = async (e) => {
+    document.removeEventListener("pointermove", move);
+    document.removeEventListener("pointerup", up);
+    document.body.classList.remove("dragging-entry");
+    if (ghost) ghost.remove();
+    if (!active) return;
+    const at = typeof document.elementFromPoint === "function"
+      ? document.elementFromPoint(e.clientX, e.clientY) : null;
+    const inStrip = !!at && $("tabbar").contains(at);
+    if (inStrip) { reorderTab(tab, e.clientX); return; }
+    const moved = await dropOnOtherWindow(e, {
+      kind: "tab", tab: { kind: tab.kind, state: tab.state },
+      archive,
+    });
+    if (moved) removeTab(tab.id);
+  };
+  document.addEventListener("pointermove", move);
+  document.addEventListener("pointerup", up);
+}
+
+function reorderTab(tab, x) {
+  const els = [...$("tabstrip").querySelectorAll(".wtab")];
+  let at = els.length;
+  els.forEach((el, i) => {
+    const r = el.getBoundingClientRect();
+    if (x < r.left + r.width / 2 && at === els.length) at = i;
+  });
+  const from = tabs.findIndex((t) => t.id === tab.id);
+  if (from < 0) return;
+  tabs.splice(from, 1);
+  tabs.splice(at > from ? at - 1 : at, 0, tab);
+  saveTabs();
+  renderTabs();
+}
+
+function removeTab(id) {
+  const idx = tabs.findIndex((t) => t.id === id);
+  if (idx < 0) return;
+  if (tabs.length < 2) {
+    // The window would be left empty; give it a plain browse tab instead.
+    tabs[idx] = blankTab("browse", {});
+    activeTab = tabs[idx].id;
+    saveTabs(); renderTabs(); applyTabChrome();
+    restoreBrowse({});
+    return;
+  }
+  tabs.splice(idx, 1);
+  const next = tabs[Math.min(idx, tabs.length - 1)];
+  saveTabs();
+  if (id === activeTab) { activeTab = null; selectTab(next.id); } else { renderTabs(); }
+}
+
+// Something handed to this window by another one.
+async function acceptFromWindow(payload) {
+  if (!payload) return;
+  if (payload.kind === "tab") {
+    if (payload.archive && payload.archive !== archive) {
+      try { await loadArchive(payload.archive); } catch (e) { /* keep ours */ }
+    }
+    addTab(payload.tab.kind, payload.tab.state);
+    return;
+  }
+  if (payload.kind === "refs") {
+    // Files dragged from another window: ask where they should go, rather
+    // than guessing a collection in a window that may be showing something
+    // else entirely.
+    openCollectionPicker(payload.refs, payload.label || `${payload.refs.length} files`);
+  }
+}
+
+async function moveTabToNewWindow(tab) {
+  try {
+    const label = await invoke("new_window");
+    await new Promise((r) => setTimeout(r, 700));
+    await invoke("send_to_window", {
+      label, payload: { kind: "tab", tab: { kind: tab.kind, state: tab.state }, archive },
+    });
+    removeTab(tab.id);
+  } catch (e) {
+    toast(`Could not move the tab: ${e}`);
+  }
+}
+
 function cycleTab(delta) {
   if (tabs.length < 2) return;
   const idx = tabs.findIndex((t) => t.id === activeTab);
@@ -445,7 +608,10 @@ function restoreTabs() {
   // loaded once afterwards, and whichever tab is active then restores
   // itself against it. A saved tab pointing at a session that has since
   // gone simply lands on the archive with nothing open.
-  const saved = LS.get("nebula.tabs", null);
+  // Per window: a second window starts fresh rather than inheriting, and
+  // closing one does not disturb the other's tabs.
+  const saved = LS.get(tabsKey(), null) || (WINDOW_LABEL === "main"
+    ? LS.get("nebula.tabs", null) : null);
   const list = saved && Array.isArray(saved.tabs) ? saved.tabs.filter((t) => t && t.id) : [];
   if (list.length) {
     tabs = list;
@@ -469,10 +635,12 @@ function scheduleTabSave() {
   tabSaveTimer = setTimeout(() => { saveTabs(); renderTabs(); }, 120);
 }
 
+function tabsKey() { return `nebula.tabs.${WINDOW_LABEL}`; }
+
 function saveTabs() {
   const cur = activeTabObj();
   if (cur && cur.kind === "browse") cur.state = browseState();
-  LS.set("nebula.tabs", { tabs, activeTab });
+  LS.set(tabsKey(), { tabs, activeTab });
 }
 
 function duplicateTab() {
@@ -1964,9 +2132,24 @@ function sameSel(idx, isSc) { return selected === shownItems[idx] && selectedIsS
 function isPicked(idx) { return picked.length > 1 && picked.includes(shownItems[idx]); }
 
 function wireItems() {
-  $("itemArea").querySelectorAll("[data-i]").forEach((el) => {
+  const area = $("itemArea");
+  // Dragging from empty space sweeps a marquee; dragging from a row moves
+  // files. Deciding by where the gesture *starts* keeps them from competing.
+  area.onpointerdown = (ev) => {
+    if (ev.target.closest("[data-i]")) return;
+    if (ev.target.closest("button, input, a, .crow, .ctree")) return;
+    startMarquee(ev);
+  };
+  area.querySelectorAll("[data-i]").forEach((el) => {
     const it = shownItems[+el.dataset.i];
     const isSc = el.dataset.sc === "1";
+    el.onpointerdown = (ev) => {
+      if (ev.button !== 0 || isSc) return;
+      // Drag whatever is highlighted; dragging an unselected row selects it
+      // first, which is what every file manager does.
+      if (!picked.includes(it)) selectItem(it, isSc, ev);
+      startItemDrag(ev);
+    };
     el.onclick = (ev) => {
       const jump = ev.target.getAttribute && ev.target.getAttribute("data-jump");
       if (jump) { ev.stopPropagation(); jumpToSession(jump); return; }
@@ -2008,6 +2191,169 @@ function selectItem(it, isSc, ev) {
   }
   if (showSess && selected && selected.session_path) refreshSessionInfo();
 }
+// ---- keyboard navigation in the file list ------------------------------
+// The list behaves like a file manager's: arrows move the selection, Shift
+// extends it, Home/End/PageUp/PageDown jump. Without this the only way to
+// walk a session is the mouse, and Cmd-A selected the window's text.
+function moveSelection(delta, { extend = false, to = null } = {}) {
+  if (!shownItems.length) return false;
+  const cur = selected ? shownItems.indexOf(selected) : -1;
+  let next;
+  if (to === "start") next = 0;
+  else if (to === "end") next = shownItems.length - 1;
+  else if (cur < 0) next = delta > 0 ? 0 : shownItems.length - 1;
+  else next = cur + delta;
+  next = Math.max(0, Math.min(shownItems.length - 1, next));
+  const it = shownItems[next];
+  if (!it) return false;
+
+  if (extend && pickAnchor && shownItems.includes(pickAnchor)) {
+    const a = shownItems.indexOf(pickAnchor);
+    picked = shownItems.slice(Math.min(a, next), Math.max(a, next) + 1);
+  } else {
+    picked = [it];
+    pickAnchor = it;
+  }
+  selected = it;
+  selectedIsSidecar = false;
+  renderItemArea();
+  updateDetails();
+  revealSelected();
+  if (showSc && selected.has_sidecar && picked.length === 1) openSidecarPanel(selected);
+  if (showSess && selected.session_path) refreshSessionInfo();
+  return true;
+}
+
+function revealSelected() {
+  const row = document.querySelector("#itemArea .sel");
+  if (row && row.scrollIntoView) row.scrollIntoView({ block: "nearest" });
+}
+
+function selectAllItems() {
+  if (!shownItems.length) return false;
+  picked = shownItems.slice();
+  pickAnchor = picked[0];
+  selected = selected && picked.includes(selected) ? selected : picked[0];
+  renderItemArea();
+  updateDetails();
+  return true;
+}
+
+// How many rows a PageUp/PageDown covers, from the actual list height --
+// a fixed guess would be wrong in grid view and at any other window size.
+function pageStep() {
+  const area = $("itemArea");
+  const row = area.querySelector("tbody tr, .cell");
+  if (!row) return 10;
+  const h = row.getBoundingClientRect().height || 24;
+  return Math.max(1, Math.floor((area.clientHeight || 400) / h) - 1);
+}
+
+function handleListKey(e) {
+  // Only when the file list is what the user is working in.
+  const tab = activeTabObj();
+  if (tab && tab.kind !== "browse") return false;
+  // e.target may be the document itself, which has no closest().
+  const el = e.target;
+  if (el && el.closest && el.closest("input, textarea, select")) return false;
+  if (!shownItems.length) return false;
+
+  if (hasMod(e) && (e.key || "").toLowerCase() === "a" && !e.shiftKey) {
+    return selectAllItems();
+  }
+  const extend = e.shiftKey;
+  switch (e.key) {
+    case "ArrowDown": return moveSelection(1, { extend });
+    case "ArrowUp": return moveSelection(-1, { extend });
+    case "ArrowRight": return listView ? false : moveSelection(1, { extend });
+    case "ArrowLeft": return listView ? false : moveSelection(-1, { extend });
+    case "Home": return moveSelection(0, { extend, to: "start" });
+    case "End": return moveSelection(0, { extend, to: "end" });
+    case "PageDown": return moveSelection(pageStep(), { extend });
+    case "PageUp": return moveSelection(-pageStep(), { extend });
+    default: return false;
+  }
+}
+
+// ---- marquee (rubber-band) selection -----------------------------------
+// Drag on empty space in the file list to sweep up rows. Starting on a row
+// is a file drag instead (see startItemDrag), so the two never compete.
+let marquee = null;
+
+function startMarquee(ev) {
+  if (ev.button !== 0 || !shownItems.length) return;
+  const area = $("itemArea");
+  const additive = ev.shiftKey || ev.metaKey || ev.ctrlKey;
+  // Clear and re-render *before* the box exists: renderItemArea rewrites
+  // the list's innerHTML, which would otherwise delete the box we just
+  // appended and leave the drag with nothing to draw.
+  if (!additive) { picked = []; selected = null; renderItemArea(); }
+  const box = document.createElement("div");
+  box.className = "marquee";
+  area.appendChild(box);
+  marquee = { x0: ev.clientX, y0: ev.clientY, box, base: additive ? picked.slice() : [] };
+  document.body.classList.add("marquee-on");
+
+  const move = (e) => {
+    if (!marquee) return;
+    const x = Math.min(marquee.x0, e.clientX), y = Math.min(marquee.y0, e.clientY);
+    const w = Math.abs(e.clientX - marquee.x0), h = Math.abs(e.clientY - marquee.y0);
+    const r = area.getBoundingClientRect();
+    Object.assign(marquee.box.style, {
+      left: `${x - r.left + area.scrollLeft}px`, top: `${y - r.top + area.scrollTop}px`,
+      width: `${w}px`, height: `${h}px`,
+    });
+    const hit = itemsIntersecting({ left: x, top: y, right: x + w, bottom: y + h });
+    picked = marquee.base.concat(hit.filter((it) => !marquee.base.includes(it)));
+    selected = picked[picked.length - 1] || null;
+    paintSelection();
+  };
+  const up = () => {
+    document.removeEventListener("pointermove", move);
+    document.removeEventListener("pointerup", up);
+    if (marquee) { marquee.box.remove(); marquee = null; }
+    document.body.classList.remove("marquee-on");
+    renderItemArea();
+    updateDetails();
+  };
+  document.addEventListener("pointermove", move);
+  document.addEventListener("pointerup", up);
+}
+
+function itemsIntersecting(rect) {
+  const out = [];
+  document.querySelectorAll("#itemArea [data-i][data-sc='0'], #itemArea .cell[data-i]")
+    .forEach((el) => {
+      const r = el.getBoundingClientRect();
+      if (r.right >= rect.left && r.left <= rect.right
+          && r.bottom >= rect.top && r.top <= rect.bottom) {
+        const it = shownItems[+el.getAttribute("data-i")];
+        if (it && !out.includes(it)) out.push(it);
+      }
+    });
+  return out;
+}
+
+// Repaint highlights without rebuilding the list: a marquee updates on
+// every pointermove, and re-rendering there would fight the drag.
+//
+// Mirrors what listHTML/gridHTML do, rather than inventing a third
+// convention: in the table the primary row is `sel` and the rest of a
+// multi-selection is `multi`; in the grid every chosen cell is `sel`.
+function paintSelection() {
+  document.querySelectorAll("#itemArea [data-i]").forEach((el) => {
+    const it = shownItems[+el.getAttribute("data-i")];
+    const isSc = el.getAttribute("data-sc") === "1";
+    const on = !!it && !isSc && picked.includes(it);
+    if (el.classList.contains("cell")) {
+      el.classList.toggle("sel", on);
+      return;
+    }
+    el.classList.toggle("sel", on && it === selected);
+    el.classList.toggle("multi", on && picked.length > 1);
+  });
+}
+
 function activate(it, isSc) {
   selectItem(it, isSc);
   if (isSc) openSidecarPanel(it);
@@ -2334,6 +2680,16 @@ function renderSidecarPanel() {
 // works the same on every platform.
 let dragState = null;
 
+// Hit-testing for a drag. Wrapped because elementFromPoint is not
+// guaranteed to exist (it does not in jsdom), and a missing hit-test must
+// degrade to "no target" rather than throwing mid-gesture and leaving a
+// ghost stuck to the cursor.
+function dropTargetAt(x, y) {
+  if (typeof document.elementFromPoint !== "function") return null;
+  const under = document.elementFromPoint(x, y);
+  return (under && under.closest) ? under.closest("[data-drop-collection]") : null;
+}
+
 function startEntryDrag(ev, { ref, label, from }) {
   if (ev.button !== 0) return;
   const startX = ev.clientX, startY = ev.clientY;
@@ -2355,8 +2711,7 @@ function startEntryDrag(ev, { ref, label, from }) {
     dragState.ghost.style.top = `${e.clientY + 12}px`;
 
     document.querySelectorAll(".drop-target").forEach((n) => n.classList.remove("drop-target"));
-    const under = document.elementFromPoint(e.clientX, e.clientY);
-    const target = under && under.closest("[data-drop-collection]");
+    const target = dropTargetAt(e.clientX, e.clientY);
     dragState.target = target ? target.getAttribute("data-drop-collection") : null;
     if (target && dragState.target !== dragState.from) target.classList.add("drop-target");
   };
@@ -2388,15 +2743,123 @@ function startEntryDrag(ev, { ref, label, from }) {
   document.addEventListener("pointerup", up);
 }
 
+// Dragging files out of the list and onto a collection -- in the rail tree,
+// in the collection view, or in another window. Same pointer-based approach
+// as the collection entries use: Tauri's own file-drop handler swallows
+// HTML5 drag events, so this never uses them.
+function startItemDrag(ev) {
+  const refs = selectedRefs();
+  if (!refs.length) return;
+  const startX = ev.clientX, startY = ev.clientY;
+  const label = picked.length === 1
+    ? (selected.display_name || selected.name) : `${picked.length} files`;
+  let state = { active: false, target: null, refs, label };
+
+  const move = (e) => {
+    if (!state.active) {
+      if (Math.hypot(e.clientX - startX, e.clientY - startY) < 5) return;
+      state.active = true;
+      const ghost = document.createElement("div");
+      ghost.className = "drag-ghost";
+      ghost.textContent = label;
+      document.body.appendChild(ghost);
+      state.ghost = ghost;
+      document.body.classList.add("dragging-entry");
+    }
+    state.ghost.style.left = `${e.clientX + 12}px`;
+    state.ghost.style.top = `${e.clientY + 12}px`;
+    document.querySelectorAll(".drop-target").forEach((n) => n.classList.remove("drop-target"));
+    const target = dropTargetAt(e.clientX, e.clientY);
+    state.target = target ? target.getAttribute("data-drop-collection") : null;
+    if (target) target.classList.add("drop-target");
+  };
+
+  const up = async (e) => {
+    document.removeEventListener("pointermove", move);
+    document.removeEventListener("pointerup", up);
+    document.querySelectorAll(".drop-target").forEach((n) => n.classList.remove("drop-target"));
+    document.body.classList.remove("dragging-entry");
+    if (state.ghost) state.ghost.remove();
+    if (!state.active) return;
+    if (state.target) { await addRefsToCollection(state.target, state.refs, state.label); return; }
+    // Dropped outside this window: hand it to whichever window is there.
+    await dropOnOtherWindow(e, { kind: "refs", refs: state.refs, label: state.label });
+  };
+
+  document.addEventListener("pointermove", move);
+  document.addEventListener("pointerup", up);
+}
+
+async function addRefsToCollection(name, refs, label) {
+  try {
+    await call("collection_add", { archive, name, refs, create: false, note: "" });
+    noteRecentCollection(name);
+    toast(`Added ${label || `${refs.length} item(s)`} to ${name}`);
+    await loadCollections();
+    if (openCollection) await showCollection(openCollection, { push: false });
+  } catch (e) {
+    toast(`${e}`);
+  }
+}
+
+// ---- recently used collections -----------------------------------------
+// The whole point of the right-click shortcuts: filing many files into one
+// collection should not mean re-picking it from a dialog every time.
+const RECENT_MAX = 5;
+let recentColls = [];
+
+function noteRecentCollection(name) {
+  if (!name) return;
+  recentColls = [name].concat(recentColls.filter((n) => n !== name)).slice(0, RECENT_MAX);
+  LS.set("nebula.recentColls", recentColls);
+}
+
+// The two shortcuts that make filing many files bearable: the last
+// collection used, by name, plus a submenu of the recent few.
+function collectionShortcuts(getRefs, label) {
+  const recent = knownRecentCollections();
+  if (!recent.length) return [];
+  const out = [{
+    label: `Add to ${recent[0]}`,
+    action: () => addRefsToCollection(recent[0], getRefs(), label),
+  }];
+  if (recent.length > 1) {
+    out.push({
+      label: "Add to",
+      submenu: recent.map((name) => ({
+        label: name,
+        action: () => addRefsToCollection(name, getRefs(), label),
+      })),
+    });
+  }
+  return out;
+}
+
+function knownRecentCollections() {
+  const known = new Set(collections.map((c) => c.name));
+  return recentColls.filter((n) => known.has(n));
+}
+
 // ---- context menus ------------------------------------------------------
 // The webview's own menu is useless here, so right-click gets a real one.
 let fileManagerName = "Finder";
 
 function showMenu(x, y, entries) {
   const el = $("ctxMenu");
-  el.innerHTML = entries.map((e) => {
+  el.innerHTML = entries.map((e, i) => {
     if (e.separator) return `<div class="sep"></div>`;
     if (e.head) return `<div class="head">${escapeHtml(e.head)}</div>`;
+    if (e.submenu) {
+      // Rendered inline as a real nested list rather than a hover-out
+      // flyout: it survives a narrow window, and it is reachable by
+      // keyboard and by a jsdom test.
+      return `<div class="sub ${e.disabled ? "off" : ""}" data-sub="${i}">
+          <button class="sub-h" ${e.disabled ? "disabled" : ""}>${escapeHtml(e.label)}
+            <span class="chev">›</span></button>
+          <div class="sub-items hidden">${e.submenu.map((c, j) =>
+            `<button data-sub-item="${i}.${j}">${escapeHtml(c.label)}</button>`).join("")}</div>
+        </div>`;
+    }
     return `<button ${e.disabled ? "disabled" : ""} class="${e.danger ? "danger" : ""}">`
       + `${escapeHtml(e.label)}</button>`;
   }).join("");
@@ -2407,14 +2870,31 @@ function showMenu(x, y, entries) {
   el.style.left = `${Math.max(4, Math.min(x, window.innerWidth - r.width - 6))}px`;
   el.style.top = `${Math.max(4, Math.min(y, window.innerHeight - r.height - 6))}px`;
 
-  const buttons = [...el.querySelectorAll("button")];
-  const actionable = entries.filter((e) => !e.separator && !e.head);
-  buttons.forEach((btn, i) => {
-    btn.onclick = () => {
-      closeMenu();
-      const entry = actionable[i];
-      if (entry && entry.action) Promise.resolve(entry.action()).catch((err) => toast(`${err}`));
+  const run = (fn) => {
+    closeMenu();
+    if (fn) Promise.resolve(fn()).catch((err) => toast(`${err}`));
+  };
+
+  el.querySelectorAll(".sub-h").forEach((btn) => {
+    btn.onclick = (ev) => {
+      ev.stopPropagation();
+      const wrap = btn.closest(".sub");
+      const items = wrap.querySelector(".sub-items");
+      const opening = items.classList.contains("hidden");
+      el.querySelectorAll(".sub-items").forEach((n) => n.classList.add("hidden"));
+      items.classList.toggle("hidden", !opening);
     };
+  });
+  el.querySelectorAll("[data-sub-item]").forEach((btn) => {
+    const [i, j] = btn.getAttribute("data-sub-item").split(".").map(Number);
+    btn.onclick = (ev) => { ev.stopPropagation(); run(entries[i].submenu[j].action); };
+  });
+
+  // Plain rows only: submenu buttons carry their own handlers above.
+  const plain = [...el.querySelectorAll(":scope > button")];
+  const actionable = entries.filter((e) => !e.separator && !e.head && !e.submenu);
+  plain.forEach((btn, i) => {
+    btn.onclick = () => run((actionable[i] || {}).action);
   });
 }
 
@@ -2428,6 +2908,7 @@ function showItemMenu(x, y) {
     { head: label },
     { label: many ? "Add all to collection…" : "Add to collection…",
       action: () => openCollectionPicker(selectedRefs(), label) },
+    ...collectionShortcuts(() => selectedRefs(), label),
     { label: "Export as a fragment…", disabled: !selectedRefs().length,
       action: () => exportSelection({ refs: selectedRefs(), label }) },
     { label: "Show relations", disabled: many || !it,
@@ -2602,12 +3083,20 @@ async function openCollectionPicker(refs, label) {
   } catch (e) {
     collections = [];
   }
-  $("collPick").innerHTML = collections
-    .map((c) => `<option value="${escapeHtml(c.name)}">${escapeHtml(c.name)}` +
-                `${c.title ? "   " + escapeHtml(c.title) : ""}</option>`).join("");
+  // A tree, not a dropdown: collections nest, and a flat list of names
+  // cannot show that "figures" is inside "paper-2026".
+  try {
+    const ov = await call("collections_overview", { archive });
+    collTree = { roots: ov.roots, byName: {} };
+    for (const c of ov.collections) collTree.byName[c.name] = c;
+  } catch (e) { /* fall back to whatever the tree already holds */ }
   const none = collections.length === 0;
+  pickChoice = none ? null : (knownRecentCollections()[0] || collTree.roots[0] || null);
+  pickExpanded = Object.assign({}, collExpanded);
+  for (const name of pickPathTo(pickChoice)) pickExpanded[name] = true;
+  renderPickTree();
   $("collNew").checked = none;             // nothing to add to yet
-  $("collPick").disabled = none;
+  $("collPick").classList.toggle("off", none);
   $("collNewFields").style.display = none ? "flex" : "none";
   $("collNewName").value = "";
   $("collNote").value = "";
@@ -2615,23 +3104,88 @@ async function openCollectionPicker(refs, label) {
 }
 
 let pendingCollRef = null;
+let pickChoice = null, pickExpanded = {};
+
+function pickPathTo(name) {
+  // Ancestors of a collection, so the picker opens with it revealed.
+  const path = [];
+  const walk = (node, trail) => {
+    if (node === name) { path.push(...trail); return true; }
+    for (const kid of (collTree.byName[node] || {}).children || []) {
+      if (walk(kid, trail.concat([node]))) return true;
+    }
+    return false;
+  };
+  for (const root of collTree.roots || []) if (walk(root, [])) break;
+  return path;
+}
+
+function pickRowsHTML(name, depth, seen) {
+  const c = collTree.byName[name];
+  if (!c || seen.includes(name)) return "";
+  const kids = c.children || [];
+  const open = !!pickExpanded[name];
+  const recent = knownRecentCollections().includes(name);
+  const twisty = kids.length
+    ? `<span class="tw" data-pick-toggle="${escapeHtml(name)}">`
+      + `<svg viewBox="0 0 16 16" width="12" height="12" aria-hidden="true"><path d="${
+          open ? "M3.5 6 L8 10.5 L12.5 6" : "M6 3.5 L10.5 8 L6 12.5"}" fill="none"
+          stroke="currentColor" stroke-width="2" stroke-linecap="round"
+          stroke-linejoin="round"/></svg></span>`
+    : `<span class="tw empty"></span>`;
+  let html = `<div class="pick-row ${name === pickChoice ? "on" : ""}"
+        data-pick="${escapeHtml(name)}" role="option"
+        style="padding-left:${8 + depth * 14}px">
+      ${twisty}<span class="pname">${escapeHtml(name)}</span>
+      ${recent ? `<span class="recent">recent</span>` : ""}
+    </div>`;
+  if (open) for (const kid of kids) html += pickRowsHTML(kid, depth + 1, seen.concat([name]));
+  return html;
+}
+
+function renderPickTree() {
+  const el = $("collPick");
+  if (!(collTree.roots || []).length) {
+    el.innerHTML = `<div class="pick-empty">No collections yet — create one below.</div>`;
+    return;
+  }
+  el.innerHTML = (collTree.roots || []).map((n) => pickRowsHTML(n, 0, [])).join("");
+  el.querySelectorAll("[data-pick-toggle]").forEach((n) => {
+    n.onclick = (ev) => {
+      ev.stopPropagation();
+      const name = n.getAttribute("data-pick-toggle");
+      pickExpanded[name] = !pickExpanded[name];
+      renderPickTree();
+    };
+  });
+  el.querySelectorAll("[data-pick]").forEach((n) => {
+    n.onclick = () => {
+      pickChoice = n.getAttribute("data-pick");
+      $("collNew").checked = false;
+      syncCollMode();
+      renderPickTree();
+    };
+    n.ondblclick = () => { pickChoice = n.getAttribute("data-pick"); doAddToCollection(); };
+  });
+}
 
 function syncCollMode() {
   const makeNew = $("collNew").checked;
-  $("collPick").disabled = makeNew;
+  $("collPick").classList.toggle("off", makeNew);
   $("collNewFields").style.display = makeNew ? "flex" : "none";
 }
 
 async function doAddToCollection() {
   if (!pendingCollRef) return;
   const makeNew = $("collNew").checked;
-  const name = makeNew ? $("collNewName").value.trim() : $("collPick").value;
-  if (!name) { toast("Name the collection first."); return; }
+  const name = makeNew ? $("collNewName").value.trim() : pickChoice;
+  if (!name) { toast(makeNew ? "Name the collection first." : "Pick a collection."); return; }
   try {
     await call("collection_add", {
       archive, name, refs: pendingCollRef.refs, create: makeNew,
       note: $("collNote").value.trim(),
     });
+    noteRecentCollection(name);
     $("collScrim").classList.remove("show");
     toast(`Added ${pendingCollRef.label} to ${name}`);
     await loadCollections();
@@ -3701,6 +4255,7 @@ function addSelectionToCollection() {
 const MENU_ACTIONS = {
   metadata: toggleMetadataPanel,
   "new-tab": () => addTab("browse"),
+  "new-window": openNewWindow,
   "close-tab": () => closeTab(activeTab),
   "duplicate-tab": duplicateTab,
   "next-tab": () => cycleTab(1),
@@ -3730,9 +4285,14 @@ function initShortcuts() {
   // action here instead.
   tauriEvent.listen("menu://action", (e) => runAction(e.payload))
     .catch((e) => console.error("menu listener failed", e));
+  tauriEvent.listen("nebula://accept", (e) => acceptFromWindow(e.payload))
+    .catch((e) => console.error("window hand-off listener failed", e));
 
   document.addEventListener("keydown", (e) => {
     if (e.key === "Escape") { closePops(null); return; }
+    // Selection keys first: Cmd-A here means "select every file", not
+    // "select the window's text", and the arrows walk the list.
+    if (handleListKey(e)) { e.preventDefault(); return; }
     // Ctrl-Tab cycles tabs on every platform (it is not a Cmd shortcut even
     // on macOS), so it is checked before the command-modifier gate.
     if (e.ctrlKey && e.key === "Tab") {
@@ -3755,6 +4315,7 @@ function initShortcuts() {
     else if (k === "2" && !shift) name = "tab-collections";
     else if (k === "3" && !shift) name = "tab-searches";
     else if (k === "t" && !shift) name = "new-tab";
+    else if (k === "n" && !shift) name = "new-window";
     else if (k === "w" && !shift) name = "close-tab";
     else if (k === "d" && !shift) name = "duplicate-tab";
     else if (k === "]" && shift) name = "next-tab";
@@ -3925,6 +4486,7 @@ async function boot() {
   updateDock();
   renderSessionPanel();
 
+  recentColls = LS.get("nebula.recentColls", []);
   showCal = LS.get("nebula.showCal", false);
   setRailTab(LS.get("nebula.railTab", "sessions"));
   restoreTabs();

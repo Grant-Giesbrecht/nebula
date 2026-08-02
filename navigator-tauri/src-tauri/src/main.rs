@@ -397,7 +397,13 @@ fn install_menu(app: &tauri::App) -> tauri::Result<()> {
         .item(&import)
         .build()?;
 
+    let new_window_item = MenuItemBuilder::with_id("menu:new-window", "New Window")
+        .accelerator("CmdOrCtrl+N")
+        .build(app)?;
+
     let window_menu = SubmenuBuilder::new(app, "Window")
+        .item(&new_window_item)
+        .separator()
         .item(&new_tab)
         .item(&dup_tab)
         .item(&close_tab)
@@ -419,6 +425,73 @@ fn install_menu(app: &tauri::App) -> tauri::Result<()> {
     Ok(())
 }
 
+/// Open another window onto the same archive.
+///
+/// One process, one Python bridge: `bridge` is an app-wide command, so a
+/// second webview shares the sidecar rather than spawning another. Each
+/// window keeps its own tabs (keyed by window label in localStorage).
+#[tauri::command]
+fn new_window(app: tauri::AppHandle) -> Result<String, String> {
+    use tauri::{WebviewUrl, WebviewWindowBuilder};
+
+    let label = format!("nav-{}", std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis())
+        .unwrap_or(0));
+    WebviewWindowBuilder::new(&app, &label, WebviewUrl::App("index.html".into()))
+        .title("Nebula Navigator")
+        .inner_size(1180.0, 780.0)
+        .build()
+        .map_err(|e| e.to_string())?;
+    Ok(label)
+}
+
+/// Which window is under the pointer right now, in screen coordinates.
+///
+/// This is what makes a tab (or a selection of files) draggable *between*
+/// windows: a webview cannot see a pointer that left it, so at drop time
+/// the front-end asks the OS side which window the cursor is over, and the
+/// payload is handed to that window as an event.
+#[tauri::command]
+fn window_at_cursor(app: tauri::AppHandle) -> Result<Option<String>, String> {
+    use tauri::Manager;
+
+    let cursor = app.cursor_position().map_err(|e| e.to_string())?;
+    let mut best: Option<(String, i32)> = None;
+    for (label, window) in app.webview_windows() {
+        let (Ok(pos), Ok(size)) = (window.outer_position(), window.outer_size()) else {
+            continue;
+        };
+        let (x, y) = (cursor.x as i32, cursor.y as i32);
+        let inside = x >= pos.x && y >= pos.y
+            && x < pos.x + size.width as i32
+            && y < pos.y + size.height as i32;
+        if !inside {
+            continue;
+        }
+        // Prefer the focused window when they overlap: that is the one the
+        // user is looking at, and the one a drop visually landed on.
+        let score = if window.is_focused().unwrap_or(false) { 1 } else { 0 };
+        if best.as_ref().map_or(true, |(_, s)| score >= *s) {
+            best = Some((label, score));
+        }
+    }
+    Ok(best.map(|(label, _)| label))
+}
+
+/// Hand a payload (a tab, or a set of refs) to another window.
+#[tauri::command]
+fn send_to_window(app: tauri::AppHandle, label: String,
+                  payload: serde_json::Value) -> Result<(), String> {
+    use tauri::{Emitter, Manager};
+
+    let window = app.get_webview_window(&label)
+        .ok_or_else(|| format!("no window {label}"))?;
+    window.emit("nebula://accept", payload).map_err(|e| e.to_string())?;
+    let _ = window.set_focus();
+    Ok(())
+}
+
 fn main() {
     // Not named `bridge`: that would shadow the #[tauri::command] fn of the
     // same name, which `generate_handler!` needs to resolve in this scope.
@@ -433,7 +506,9 @@ fn main() {
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .manage(BridgeState(Mutex::new(slot)))
-        .invoke_handler(tauri::generate_handler![bridge])
+        .invoke_handler(tauri::generate_handler![
+            bridge, new_window, window_at_cursor, send_to_window
+        ])
         .setup(|_app| {
             #[cfg(target_os = "macos")]
             install_menu(_app)?;
