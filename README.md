@@ -686,6 +686,9 @@ and scanning all of them by default would be expensive and surprising.
 - [docs/relational-data-roadmap.md](docs/relational-data-roadmap.md) —
   parked design work on surfacing relationships (`derived_from`,
   `related_runs`, transitive lineage) and a calendar/timeline view.
+- [docs/navigator-install-and-build.md](docs/navigator-install-and-build.md) —
+  installing Rust, Node/npm and Tauri's system deps, and building the
+  Navigator from source.
 
 ## Status
 
