@@ -173,18 +173,45 @@ def op_identity(args: Dict[str, Any]) -> Dict[str, Any]:
     from nebula import identity
 
     user = identity.get_user()
-    return {"user": user or "", "set": bool(user),
-            "path": str(identity.identity_path())}
+    out = {"user": user or "", "set": bool(user),
+           "path": str(identity.identity_path())}
+    # The badge shows verification status, so it needs the same breakdown
+    # the CLI prints rather than re-deriving one in JavaScript.
+    if user:
+        out.update(identity.describe_identity(user))
+    return out
 
 
 def op_set_identity(args: Dict[str, Any]) -> Dict[str, Any]:
     from nebula import identity
 
     try:
+        warnings = identity.validate_identity(args["user"])
         path = identity.set_user(args["user"])
     except identity.IdentityError as e:
         return {"ok": False, "error": str(e)}
-    return {"ok": True, "user": identity.get_user(), "path": str(path)}
+    user = identity.get_user()
+    return {"ok": True, "user": user, "path": str(path),
+            "warnings": warnings,
+            "identity": identity.describe_identity(user or "")}
+
+
+def op_check_identity(args: Dict[str, Any]) -> Dict[str, Any]:
+    """Validate a candidate identity without storing it.
+
+    Lets the identity dialog show the ORCID check-digit failure as the user
+    types, rather than only after committing to it.
+    """
+    from nebula import identity
+
+    candidate = args.get("user") or ""
+    try:
+        warnings = identity.validate_identity(candidate)
+    except identity.IdentityError as e:
+        return {"ok": False, "error": str(e),
+                "identity": identity.describe_identity(candidate)}
+    return {"ok": True, "warnings": warnings,
+            "identity": identity.describe_identity(candidate)}
 
 
 def op_create_archive(args: Dict[str, Any]) -> Dict[str, Any]:
@@ -887,6 +914,7 @@ OPS = {
     "archive_kind": op_archive_kind,
     "identity": op_identity,
     "set_identity": op_set_identity,
+    "check_identity": op_check_identity,
     "create_archive": op_create_archive,
     "create_intake": op_create_intake,
     "receive_fragment": op_receive_fragment,

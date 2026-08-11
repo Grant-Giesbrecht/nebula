@@ -935,3 +935,46 @@ body.panel-window .p-follow { -webkit-app-region:no-drag; }
 }
 .user-badge:hover { border-color:var(--accent); }
 .user-badge svg { opacity:.85; flex:0 0 auto; }
+
+/* A name with no authority is unique to this machine and nothing more, so
+   it must not wear the same confident accent as a namespaced one. Muted
+   rather than alarming: it is a perfectly valid way to work alone. */
+.user-badge.unqualified { background:var(--warn-bg); color:var(--warn); }
+.user-badge.unqualified:hover { border-color:var(--warn); }
+.user-badge.unqualified::after {
+  content:"local"; font-weight:600; font-size:9px; opacity:.75;
+  letter-spacing:.04em; text-transform:uppercase;
+}
+
+/* ---- identity dialog ---------------------------------------------------- */
+.id-tiers { margin:10px 0 2px; display:flex; flex-direction:column; gap:4px; }
+.id-tiers-head { font-size:11px; color:var(--text-dim); margin-bottom:3px; }
+.id-tier {
+  display:flex; flex-direction:column; gap:1px; text-align:left;
+  padding:5px 8px; border-radius:7px; cursor:pointer;
+  background:var(--panel-2); border:1px solid var(--border);
+  color:inherit; font:inherit;
+}
+.id-tier:hover { border-color:var(--accent); background:var(--accent-soft); }
+.id-tier .mono { font-size:11px; }
+.id-tier em { font-style:normal; font-size:10.5px; color:var(--text-dim); }
+
+/* An owner that arrived with an archive is a claim, not a checked fact.
+   Muted rather than alarming -- it is almost always true, just unverified. */
+.claim-chip {
+  display:inline-block; font-size:9px; font-weight:700; letter-spacing:.05em;
+  text-transform:uppercase; padding:1px 5px; border-radius:4px;
+  background:var(--warn-bg); color:var(--warn); vertical-align:middle;
+}
+.xfer-owner {
+  display:flex; align-items:center; gap:7px; flex-wrap:wrap;
+  margin-top:9px; padding:6px 9px; border-radius:7px;
+  background:var(--warn-bg); font-size:12px;
+}
+.xfer-owner .mono { font-size:12px; color:var(--text); }
+.xfer-owner-note { color:var(--text-dim); font-size:11.5px; flex:1 1 220px; }
+
+.id-status { margin-top:9px; font-size:11.5px; line-height:1.45; min-height:1em; }
+.id-status.good { color:var(--text-dim); }
+.id-status.warn { color:var(--warn); }
+.id-status.bad  { color:var(--err); }

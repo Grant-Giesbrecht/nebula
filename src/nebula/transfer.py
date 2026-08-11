@@ -126,6 +126,11 @@ class TransferPlan:
     dangling: List[dict] = field(default_factory=list)
     skipped: List[dict] = field(default_factory=list)
     warnings: List[str] = field(default_factory=list)
+    #: How the source archive describes its own owner, per
+    #: identity.describe_owner. Carried on the plan so the moment a user
+    #: decides to take someone's data in is also the moment they are told
+    #: that the name attached to it is unverified.
+    source_owner: dict = field(default_factory=dict)
 
     @property
     def bytes(self) -> int:
@@ -151,6 +156,7 @@ class TransferPlan:
             "dangling": list(self.dangling),
             "skipped": list(self.skipped),
             "warnings": list(self.warnings),
+            "source_owner": dict(self.source_owner),
             "n_sessions": len(self.sessions),
             "n_files": sum(len(s.files) for s in self.sessions),
             "bytes": self.bytes,
@@ -158,6 +164,23 @@ class TransferPlan:
             "renames": {s.run_id: s.new_run_id for s in self.sessions
                         if s.run_id != s.new_run_id},
         }
+
+
+def _source_owner(ident: dict) -> dict:
+    """The owner fields of an incoming archive, for the plan.
+
+    Only the presentation fields: the plan is serialised to the Navigator
+    and printed by the CLI, and both need to say the same thing about a
+    name that nothing has checked.
+    """
+    return {
+        "user": ident.get("user") or "",
+        "display": ident.get("user_display") or "",
+        "claimed": bool(ident.get("user_claimed")),
+        "note": ident.get("user_note") or "",
+        "kind": ident.get("kind") or "standard",
+        "archive": ident.get("name") or "",
+    }
 
 
 # ---------------------------------------------------------------------
@@ -568,7 +591,8 @@ def plan_merge(source, dest) -> TransferPlan:
         raise TransferError("source and destination are the same archive")
 
     plan = TransferPlan(op="merge", source=src_ident["name"], source_root=src_root,
-                        dest=dst_ident["name"], dest_root=dst_root)
+                        dest=dst_ident["name"], dest_root=dst_root,
+                        source_owner=_source_owner(src_ident))
     if src_ident["locked"]:
         plan.warnings.append(
             f"{src_ident['name']} was already merged into {src_ident['merged_to']} "
@@ -886,7 +910,8 @@ def plan_adopt(source, dest, *, sessions=None) -> TransferPlan:
             f"{dst_ident['kind']} archive")
 
     plan = TransferPlan(op="adopt", source=src_ident["name"], source_root=src_root,
-                        dest=dst_ident["name"], dest_root=dst_root)
+                        dest=dst_ident["name"], dest_root=dst_root,
+                        source_owner=_source_owner(src_ident))
     from nebula.index import _iter_session_dirs
 
     taken: Dict[int, Set[int]] = {}

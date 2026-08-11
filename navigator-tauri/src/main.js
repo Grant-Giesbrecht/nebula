@@ -1219,21 +1219,62 @@ async function loadIdentity() {
   // than buried in a dialog nobody reopens.
   $("userBadge").classList.toggle("hidden", !identity.set);
   $("userBadgeName").textContent = identity.user || "";
+  // Honest labelling: a name with no authority is unique to this machine
+  // and nothing more, so the badge says so rather than looking like an
+  // account. Nothing is verified yet, and the tooltip never implies it is.
+  const local = !!identity.set && (identity.local || !identity.explicit);
+  $("userBadge").classList.toggle("unqualified", local);
+  $("userBadge").title = !identity.set ? ""
+    : local
+      ? `${identity.qualified} — a local name, unique to this machine only. `
+        + "Click to add an authority (ORCID, GitHub, your institution)."
+      : `${identity.user} — ${identity.authority_label}, self-asserted and `
+        + "not verified. Click to change.";
 }
 
 function openIdentityDialog(reason) {
   $("idUser").value = identity.user || "";
   $("idNote").textContent = reason || (identity.path
     ? `Stored on this machine only, in ${identity.path}.` : "");
+  syncIdentity();
   showDialog("idScrim");
-  setTimeout(() => $("idUser").focus(), 30);
+  setTimeout(() => $("idUser").focus({ preventScroll: true }), 30);
 }
+
+// Validate as the user types, so an ORCID check-digit failure surfaces
+// while they are still looking at the number rather than after committing
+// to it. The check is offline; see nebula.identity.
+const syncIdentity = debounce(async () => {
+  const el = $("idStatus");
+  const user = $("idUser").value.trim();
+  if (!user) { el.textContent = ""; el.className = "id-status"; return; }
+  let res;
+  try { res = await call("check_identity", { user }); }
+  catch (e) { el.textContent = ""; return; }
+  const info = res.identity || {};
+  if (!res.ok) {
+    el.className = "id-status bad";
+    el.textContent = res.error || "that name cannot be used";
+  } else if ((res.warnings || []).length) {
+    el.className = "id-status warn";
+    el.textContent = res.warnings[0];
+  } else {
+    el.className = "id-status good";
+    el.textContent = `Reads as ${info.qualified} — ${info.authority_label}. `
+      + "Not verified; nebula does not check this yet.";
+  }
+  $("idOk").disabled = !res.ok;
+}, 180);
 
 async function saveIdentity() {
   const user = $("idUser").value.trim();
   if (!user) { toast("Type a name first."); return; }
   const res = await call("set_identity", { user });
-  if (!res.ok) { $("idNote").textContent = res.error || "that name cannot be used"; return; }
+  if (!res.ok) {
+    $("idStatus").className = "id-status bad";
+    $("idStatus").textContent = res.error || "that name cannot be used";
+    return;
+  }
   $("idScrim").classList.remove("show");
   await loadIdentity();
   toast(`You are ${res.user}`);
@@ -1417,6 +1458,16 @@ function xferPlanHTML(plan, op) {
       ${renamed ? `<span>${renamed} renamed</span>` : ""}
       ${plan.foreign_bytes ? `<span>${_human(plan.foreign_bytes)} from other archives</span>` : ""}
     </div>`;
+  // Whose data this is, said before the session list rather than after:
+  // it is context for the decision, and the list can be long. The owner
+  // travelled inside the archive and nothing checked it, so it is shown
+  // as a claim.
+  const owner = plan.source_owner || {};
+  const from = owner.claimed
+    ? `<div class="xfer-owner"><span class="claim-chip">claimed</span>`
+      + `<span class="mono">${escapeHtml(owner.user)}</span>`
+      + `<span class="xfer-owner-note">${escapeHtml(owner.note)}</span></div>`
+    : "";
   const list = plan.sessions.length
     ? `<div class="xfer-list">${xferRowsHTML(plan)}</div>`
     : noteBox("info", "Nothing to transfer.");
@@ -1434,7 +1485,8 @@ function xferPlanHTML(plan, op) {
            ? " (renamed where the name was already taken, so nothing curated here "
              + "silently gains entries)" : "")) : "";
   const warn = (plan.warnings || []).map((w) => noteBox("err", w)).join("");
-  return head + list + skipped + dangling + colls + warn + noteBox("info", notes[0]);
+  return head + from + list + skipped + dangling + colls + warn
+    + noteBox("info", notes[0]);
 }
 
 async function openTransfer(op, args, { title }) {
@@ -4058,7 +4110,13 @@ function renderArchivePanel() {
   const transfers = `<div class="mg"><div class="mg-h">Archives &amp; transfers`
     + `<span class="issue-w">${escapeHtml(ident.kind || "standard")}</span></div>`
     + row("This archive", `${escapeHtml(ident.name || a.label)}`
-        + (ident.user ? ` — ${escapeHtml(ident.user)}` : ""))
+        + (ident.user ? ` — ${escapeHtml(ident.user)}` : "")
+        // An owner that is not this machine's user came in with the
+        // archive. Nothing checked it, so it is labelled rather than
+        // printed as fact.
+        + (ident.user_claimed
+            ? ` <span class="claim-chip" title="${escapeHtml(ident.user_note)}">claimed</span>`
+            : ""), { html: true })
     + (ident.locked
         ? noteBox("info", `Merged into ${escapeHtml(ident.merged_to || "another archive")} `
             + `on ${escapeHtml(fmtCreated(ident.merged_at))}. Writing is refused until it `
@@ -5280,6 +5338,21 @@ $("noUserWarn").onclick = () => openIdentityDialog(
 $("idClose").onclick = () => $("idScrim").classList.remove("show");
 $("idCancel").onclick = () => $("idScrim").classList.remove("show");
 $("idOk").onclick = saveIdentity;
+$("idUser").oninput = () => { $("idOk").disabled = false; syncIdentity(); };
+// The tier buttons append an authority to whatever handle is already typed,
+// rather than replacing it: the value is the user's, only the authority is
+// being suggested.
+document.querySelectorAll(".id-tier").forEach(b => {
+  b.onclick = () => {
+    const el = $("idUser");
+    const value = el.value.split("@")[0].trim();
+    el.value = value + b.dataset.fill;
+    el.focus({ preventScroll: true });
+    // Land the caret after the '@' so an institution domain can just be typed.
+    el.setSelectionRange(el.value.length, el.value.length);
+    syncIdentity();
+  };
+});
 $("newArcClose").onclick = () => $("newArcScrim").classList.remove("show");
 $("newArcCancel").onclick = () => $("newArcScrim").classList.remove("show");
 $("newArcOk").onclick = doCreateArchive;

@@ -981,18 +981,39 @@ def cmd_whoami(args):
 
     if args.set_user:
         try:
+            warnings = identity.validate_identity(args.set_user)
             path = identity.set_user(args.set_user)
         except identity.IdentityError as e:
             print(str(e), file=sys.stderr)
             sys.exit(1)
         print(f"wrote {path}")
+        # Advisory, so it goes to stderr and does not fail the command --
+        # but it is shown every time, because a name chosen now is the one
+        # baked into every URI written afterwards. Flush first: stdout block
+        # -buffers when piped and stderr does not, so without this the two
+        # streams interleave backwards.
+        sys.stdout.flush()
+        for warning in warnings:
+            print(f"warning: {warning}", file=sys.stderr)
 
     user = identity.get_user()
-    if user:
-        print(user)
-    else:
+    if not user:
         print("(no user name set -- 'nebula whoami --set <name>' to pick one)")
         print(f"would be stored in {identity.identity_path()}", file=sys.stderr)
+        return
+
+    info = identity.describe_identity(user)
+    print(info["user"])
+    sys.stdout.flush()
+    # Detail goes to stderr so that `nebula whoami` in a script still yields
+    # exactly the name, as it always has, while a human at a terminal sees
+    # what it is worth. Never claim more than is true: nothing is verified,
+    # and an authority is a namespace, not a vouching.
+    where = ("none -- reads as " + info["qualified"] if not info["explicit"]
+             else info["authority_label"])
+    print(f"  authority: {where}", file=sys.stderr)
+    print(f"  status:    {info['status']} (nebula does not check this yet)",
+          file=sys.stderr)
 
 
 def cmd_register(args):
@@ -1012,8 +1033,10 @@ def cmd_register(args):
     ident = archive_identity(root)
     cfg = reg.register_archive(root, git_org=args.git_org, key=args.name or None)
     kind = f" ({ident['kind']})" if ident["kind"] != "standard" else ""
-    owner = f" owned by {ident['user']}" if ident["user"] else ""
+    owner = f" owned by {ident['user_display']}" if ident["user"] else ""
     print(f"registered {cfg.name!r}{kind}{owner} -> {cfg.root}")
+    if ident["user_note"]:
+        print(f"  note: {ident['user_note']}")
     if not ident["declared"]:
         print(f"  note: {root/'archive.yaml'} does not name this archive, so its "
               f"folder name was used. 'nebula init' records one.")
@@ -1084,6 +1107,11 @@ def _print_plan(plan, *, verb: str) -> None:
     d = plan.to_dict()
     print(f"{verb}: {d['n_sessions']} session(s), {d['n_files']} file(s), "
           f"{_human_bytes(d['bytes'])}")
+    owner = d.get("source_owner") or {}
+    if owner.get("claimed"):
+        # Said before the file list, not after: this is context for the
+        # decision, and nobody reads past a long list of session ids.
+        print(f"  from {owner['display']} — {owner['note']}")
     if d["foreign_bytes"]:
         print(f"  including {_human_bytes(d['foreign_bytes'])} belonging to other "
               f"archives")
@@ -1614,7 +1642,9 @@ def main(argv=None):
 
     p = sub.add_parser("whoami", help="show or set your nebula user name (used in URIs)")
     p.add_argument("--set", dest="set_user", metavar="NAME",
-                   help="set the local user name (an email or handle)")
+                   help="set the local user name, as value@authority "
+                        "(0000-0003-2885-4801@orcid.org, you@github.com, "
+                        "you@your-institution.edu)")
     p.set_defaults(func=cmd_whoami)
 
     args = parser.parse_args(argv)

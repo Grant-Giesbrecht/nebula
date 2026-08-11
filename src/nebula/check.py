@@ -268,7 +268,46 @@ def check(
     issues.extend(_check_assets(archive_root, label))
     issues.extend(_check_collections(archive_root, label))
     issues.extend(_check_year_seals(archive_root, label))
+    issues.extend(_check_owner(archive_root, label))
     return issues
+
+
+def _check_owner(archive_root: Path, label: str) -> List[CheckIssue]:
+    """An owner that names no authority, and so is not globally unique.
+
+    Info, never an error: a bare name is a perfectly good way to work
+    alone, and every archive created before the value@authority convention
+    has one. What it cannot do is survive leaving this machine -- two
+    people can both be "grant", and a ref into either archive is then
+    ambiguous. See docs/identity-trust-roadmap.md.
+
+    Deliberately says nothing about *verification*: a qualified owner is
+    not checked either, and reporting only the unqualified ones would
+    imply the rest had been.
+    """
+    from nebula import identity
+    from nebula.config import archive_identity
+
+    owner = (archive_identity(archive_root) or {}).get("user") or ""
+    if not owner:
+        return [CheckIssue(
+            "no_owner", None, None,
+            "this archive declares no owner, so a nebula:// ref into it "
+            "cannot name whose archive it is",
+            fix=f"nebula whoami --set <you@authority>, then nebula config {label}",
+            severity="info")]
+
+    ident = identity.parse_identity(owner)
+    if ident.explicit and not ident.is_local:
+        return []
+
+    return [CheckIssue(
+        "unqualified_owner", None, None,
+        f"owner {owner!r} names no authority, so it is unique to this "
+        f"machine only -- it reads as {ident.qualified}",
+        fix=f"nebula whoami --set {ident.value}@your-institution.edu "
+            f"(or @orcid.org, @github.com), then nebula config {label}",
+        severity="info")]
 
 
 def _check_year_seals(archive_root: Path, label: str) -> List[CheckIssue]:

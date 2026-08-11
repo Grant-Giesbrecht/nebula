@@ -99,8 +99,22 @@
             leaves this machine.</div>
           <div class="field">
             <label>Name</label>
-            <input id="idUser" placeholder="grant, or grant@ncsu.edu" spellcheck="false" />
+            <input id="idUser" placeholder="you@your-institution.edu" spellcheck="false" />
           </div>
+          <div class="id-tiers">
+            <div class="id-tiers-head">Written as <span class="mono">who@where</span>. The
+              part after <span class="mono">@</span> is the authority that issued it:</div>
+            <button class="id-tier" data-fill="@orcid.org">
+              <span class="mono">0000-0003-2885-4801@orcid.org</span>
+              <em>ORCID — best for anything you will cite</em></button>
+            <button class="id-tier" data-fill="@github.com">
+              <span class="mono">you@github.com</span>
+              <em>GitHub — survives changing institution</em></button>
+            <button class="id-tier" data-fill="@">
+              <span class="mono">you@your-institution.edu</span>
+              <em>Your institution — but it breaks if you move</em></button>
+          </div>
+          <div class="id-status" id="idStatus"></div>
           <div class="note" id="idNote"></div>
         </div>
         <div class="dlg-actions">

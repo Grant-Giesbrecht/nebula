@@ -262,9 +262,20 @@ def archive_identity(archive_root) -> Dict[str, Any]:
 
     root = Path(archive_root)
     settings = read_settings(root, apply_env=False)
+    user = settings.user or identity.get_user() or ""
+    # An owner that travelled with the archive is a claim by whoever wrote
+    # it, not a checked fact. Described here so every caller -- CLI,
+    # Navigator, transfer -- says the same thing about it.
+    owner = identity.describe_owner(
+        user, local_user=identity.get_user(), declared=bool(settings.user))
     return {
         "name": settings.name or root.name,
-        "user": settings.user or identity.get_user() or "",
+        "user": user,
+        "user_declared": owner["declared"],
+        "user_claimed": owner["claimed"],
+        "user_display": owner["display"],
+        "user_note": owner["note"],
+        "user_local": owner["local"],
         "kind": settings.kind,
         "created": settings.created,
         "declared": bool(settings.name),
