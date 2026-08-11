@@ -517,12 +517,41 @@ class Session:
             extra=extra,
         )
         for ref in derived_from or []:
-            meta.add_derived_from(self._redirect_ref(ref))
+            self._add_derived_from(meta, ref)
         self._attach_code(meta, caller_file)
         return write_sidecar(self.artifact_path(artifact_filename), meta)
 
     def _note_write(self, requested: str, actual: str) -> None:
         self._written[requested] = actual
+
+    def _add_derived_from(self, meta: SidecarMeta, ref: "str | Ref") -> None:
+        """Record one derived_from entry, pinning it first if it names an
+        asset.
+
+        An asset is mutable, so storing "derives from AF-26-0017" alone
+        would name a file whose bytes are free to change afterwards --
+        exactly the lineage-points-at-the-wrong-data failure that
+        _redirect_ref exists to prevent, one level up. Pinning happens
+        here, at write time, because that is the only moment the bytes the
+        session actually saw are still identifiable.
+
+        A failure to pin must not fail the artifact write: the measurement
+        is the thing that cannot be recreated. Fall back to recording the
+        plain ref, which check reports as unpinned.
+        """
+        from nebula.refs import Ref as _Ref, parse_ref
+
+        parsed = ref if isinstance(ref, _Ref) else parse_ref(ref)
+        if isinstance(parsed, _Ref) and parsed.asset and parsed.archive is None:
+            from nebula import assets
+
+            try:
+                meta.derived_from.append(
+                    assets.reference(self.archive_root, parsed.asset))
+                return
+            except Exception:
+                pass
+        meta.add_derived_from(self._redirect_ref(ref))
 
     def _redirect_ref(self, ref: "str | Ref") -> "str | Ref":
         """Point a same-session reference at the file this session actually
@@ -693,7 +722,7 @@ class _ArtifactWriter:
             extra=self._extra,
         )
         for ref in self._derived_from:
-            meta.add_derived_from(self._session._redirect_ref(ref))
+            self._session._add_derived_from(meta, ref)
         self._session._attach_code(meta, self._caller_file)
         write_sidecar(self.path, meta)
         return None

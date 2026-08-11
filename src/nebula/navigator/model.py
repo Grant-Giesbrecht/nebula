@@ -1339,3 +1339,381 @@ def _human_size(n: int) -> str:
             return f"{size:.0f} {unit}" if unit == "B" else f"{size:.1f} {unit}"
         size /= 1024
     return f"{n} B"
+
+
+# ---------------------------------------------------------------------
+# Assets
+# ---------------------------------------------------------------------
+
+#: Extensions the asset browser will render inline. Kept small and
+#: format-explicit rather than sniffing bytes: a thumbnail grid is the
+#: main way a figure library gets navigated, so what previews and what
+#: does not should be predictable.
+PREVIEWABLE = {".svg": "image/svg+xml", ".png": "image/png",
+               ".jpg": "image/jpeg", ".jpeg": "image/jpeg",
+               ".gif": "image/gif", ".webp": "image/webp"}
+
+#: Ceiling on an inlined preview. The sidecar protocol is line-delimited
+#: JSON over a pipe, so a large base64 payload would stall every other
+#: request queued behind it.
+MAX_PREVIEW_BYTES = 2 << 20
+
+
+def _asset_to_dict(archive_root: Path, meta, settings) -> dict:
+    from nebula import assets as assets_mod
+
+    live = assets_mod.live_file(archive_root, meta.id)
+    retained = [s for s in meta.snapshots if not s.pending_gc]
+    ext = Path(meta.name or "").suffix.lower()
+    return {
+        "id": meta.id,
+        "name": meta.name,
+        "path": str(live) if live else None,
+        "missing": live is None,
+        "size": meta.size,
+        "size_human": _human_size(meta.size or 0),
+        "sha256": meta.sha256,
+        "created": meta.created,
+        "scanned_at": meta.scanned_at,
+        "origin": meta.origin,
+        "imported_by": meta.imported_by,
+        # Both, always: the GUI shows the declared value in the policy
+        # control and the resolved one as the effect, so "auto" is never
+        # mistaken for a policy that does nothing.
+        "policy": meta.policy or "auto",
+        "policy_resolved": meta.effective_policy(settings),
+        "period_days": meta.effective_period_days(settings),
+        "max_snapshots": meta.max_snapshots,
+        "max_snapshot_bytes": meta.max_snapshot_bytes,
+        "derived_from": list(meta.derived_from),
+        "n_snapshots": len(retained),
+        "n_snapshots_total": len(meta.snapshots),
+        "renames": list(meta.renames),
+        "previewable": ext in PREVIEWABLE and (meta.size or 0) <= MAX_PREVIEW_BYTES,
+    }
+
+
+def list_assets(archive, *, policy: str = "", sort: str = "recent",
+                query: str = "") -> List[dict]:
+    """Every asset, newest-touched first by default.
+
+    Recency leads because assets are re-used rather than discovered: the
+    twenty figures you keep coming back to are the ones you touched last,
+    and no taxonomy beats that for the common case.
+    """
+    from nebula import assets as assets_mod
+    from nebula.config import read_settings
+
+    root, _ = resolve(archive)
+    settings = read_settings(root, apply_env=False)
+    out: List[dict] = []
+    needle = (query or "").strip().lower()
+    for asset_id in assets_mod.list_assets(root):
+        try:
+            meta = assets_mod.read_asset(root, asset_id)
+        except assets_mod.AssetError:
+            continue
+        row = _asset_to_dict(root, meta, settings)
+        if policy and row["policy_resolved"] != policy:
+            continue
+        if needle and needle not in f"{row['id']} {row['name'] or ''}".lower():
+            continue
+        out.append(row)
+
+    if sort == "name":
+        out.sort(key=lambda r: (r["name"] or "").lower())
+    elif sort == "size":
+        out.sort(key=lambda r: r["size"] or 0, reverse=True)
+    elif sort == "created":
+        out.sort(key=lambda r: r["created"] or "", reverse=True)
+    else:
+        out.sort(key=lambda r: r["scanned_at"] or r["created"] or "", reverse=True)
+    return out
+
+
+def asset_info(archive, asset_id: str) -> dict:
+    """One asset in full, including its version history and the sessions
+    that used it."""
+    from nebula import assets as assets_mod
+    from nebula import assetstore
+    from nebula.config import read_settings
+
+    root, label = resolve(archive)
+    settings = read_settings(root, apply_env=False)
+    meta = assets_mod.read_asset(root, asset_id)
+    info = _asset_to_dict(root, meta, settings)
+    info["archive"] = label
+    info["snapshots"] = [
+        {
+            "sha256": s.sha256,
+            "at": s.at,
+            "by": s.by,
+            "bytes": s.bytes,
+            "bytes_human": _human_size(s.bytes or 0),
+            "note": s.note,
+            "trigger": s.trigger,
+            "pending_gc": s.pending_gc,
+            # An evicted record makes no claim its bytes survive, so the
+            # GUI must not offer to restore one that is gone.
+            "recoverable": assetstore.blob_path(root, s.sha256).is_file(),
+        }
+        for s in reversed(meta.snapshots)
+    ]
+    info["used_by"] = asset_downstream(root, asset_id)
+    return info
+
+
+def asset_downstream(archive, asset_id: str) -> List[dict]:
+    """Which session artifacts derive from this asset, and at what
+    fidelity. Read from the index -- this is the reverse edge, and
+    scanning every sidecar for it would make opening an asset slow."""
+    from nebula import index as index_mod
+
+    root, _ = resolve(archive)
+    try:
+        conn = index_mod.open_fresh(root)
+    except Exception:
+        return []
+    try:
+        rows = conn.execute(
+            "SELECT run_id, filename, ref_sha256, ref_fidelity FROM derived_from "
+            "WHERE ref_asset = ? ORDER BY run_id, filename", (asset_id,)
+        ).fetchall()
+        return [{"run_id": r["run_id"], "filename": r["filename"],
+                 "sha256": r["ref_sha256"], "fidelity": r["ref_fidelity"]}
+                for r in rows]
+    finally:
+        conn.close()
+
+
+def asset_preview(archive, asset_id: str) -> dict:
+    """A data: URI for the asset's current bytes, or a reason it has none.
+
+    Inlined rather than served as a file:// URL because the webview's
+    origin rules block local files, and because this keeps the front-end
+    from needing filesystem access at all.
+    """
+    import base64
+
+    from nebula import assets as assets_mod
+
+    root, _ = resolve(archive)
+    path = assets_mod.live_file(root, asset_id)
+    if path is None:
+        return {"uri": None, "reason": "file missing"}
+    ext = path.suffix.lower()
+    mime = PREVIEWABLE.get(ext)
+    if mime is None:
+        return {"uri": None, "reason": f"no preview for {ext or 'this type'}"}
+    size = path.stat().st_size
+    if size > MAX_PREVIEW_BYTES:
+        return {"uri": None,
+                "reason": f"too large to preview ({_human_size(size)})"}
+    data = base64.b64encode(path.read_bytes()).decode("ascii")
+    return {"uri": f"data:{mime};base64,{data}", "reason": None}
+
+
+def asset_import_defaults(archive, paths: List[str]) -> dict:
+    """What the import dialog should pre-fill for these files.
+
+    The policy is pre-selected from size *and the reason is returned with
+    it*, so the size ladder is something the user learns rather than
+    something that silently happens to them.
+    """
+    from nebula import assets as assets_mod
+    from nebula.config import read_settings
+
+    root, _ = resolve(archive)
+    settings = read_settings(root, apply_env=False)
+    files = []
+    for p in paths or []:
+        path = Path(p)
+        try:
+            size = path.stat().st_size
+        except OSError:
+            continue
+        policy = assets_mod.default_policy_for_size(size, settings)
+        files.append({
+            "path": str(path),
+            "name": path.name,
+            "size": size,
+            "size_human": _human_size(size),
+            "policy": policy,
+            "reason": _policy_reason(policy, size, settings),
+            "previewable": path.suffix.lower() in PREVIEWABLE,
+        })
+    return {
+        "files": files,
+        "settings": asset_settings(root),
+    }
+
+
+def _policy_reason(policy: str, size: int, settings) -> str:
+    if policy == "manual":
+        return (f"{_human_size(size)} is over the "
+                f"{_human_size(settings.asset_manual_above)} manual threshold")
+    if policy == "periodic":
+        return (f"{_human_size(size)} is over the "
+                f"{_human_size(settings.asset_periodic_above)} periodic threshold")
+    return f"{_human_size(size)} is below the size thresholds"
+
+
+def asset_settings(archive) -> dict:
+    """The archive-level asset defaults, for the settings panel."""
+    from nebula.config import ASSET_CAP_ACTIONS, ASSET_POLICIES, read_settings
+
+    root, _ = resolve(archive)
+    s = read_settings(root, apply_env=False)
+    return {
+        "policy": s.asset_policy,
+        "periodic_above": s.asset_periodic_above,
+        "periodic_above_human": _human_size(s.asset_periodic_above),
+        "manual_above": s.asset_manual_above,
+        "manual_above_human": _human_size(s.asset_manual_above),
+        "period_days": s.asset_period_days,
+        "max_snapshots": s.asset_max_snapshots,
+        "max_snapshot_bytes": s.asset_max_snapshot_bytes,
+        "cap_action": s.asset_cap_action,
+        "policies": list(ASSET_POLICIES),
+        "cap_actions": list(ASSET_CAP_ACTIONS),
+    }
+
+
+#: Settings key -> ArchiveSettings field. One table, used by both the
+#: writer and the preview, so the two cannot disagree about what is
+#: settable.
+_ASSET_SETTING_FIELDS = {
+    "policy": "asset_policy",
+    "periodic_above": "asset_periodic_above",
+    "manual_above": "asset_manual_above",
+    "period_days": "asset_period_days",
+    "max_snapshots": "asset_max_snapshots",
+    "max_snapshot_bytes": "asset_max_snapshot_bytes",
+    "cap_action": "asset_cap_action",
+}
+
+_ASSET_INT_KEYS = ("periodic_above", "manual_above", "period_days",
+                   "max_snapshots", "max_snapshot_bytes")
+
+
+class AssetSettingsError(ValueError):
+    """Proposed asset defaults that would not mean what they say."""
+
+
+def _coerced_asset_settings(settings, changes: dict):
+    """Apply `changes` onto a copy of `settings`, validating as we go.
+
+    Validation lives here rather than in the form because the form is not
+    the only caller and can be stale. The ladder check is the important
+    one: with `periodic_above` at or above `manual_above` the periodic rung
+    is unreachable, so the setting would be accepted and then silently do
+    nothing -- exactly the quiet failure this project is trying not to have.
+    """
+    from nebula.config import (ASSET_CAP_ACTIONS, ASSET_POLICIES,
+                               AUTO_ASSET_POLICY)
+    import copy
+
+    got = copy.copy(settings)
+    changes = changes or {}
+
+    for key in _ASSET_INT_KEYS:
+        if key not in changes:
+            continue
+        raw = changes[key]
+        try:
+            value = int(raw)
+        except (TypeError, ValueError):
+            raise AssetSettingsError(f"{key} must be a whole number, got {raw!r}")
+        if value < 0:
+            raise AssetSettingsError(f"{key} cannot be negative, got {value}")
+        setattr(got, _ASSET_SETTING_FIELDS[key], value)
+
+    if "policy" in changes:
+        policy = changes["policy"]
+        if policy == AUTO_ASSET_POLICY:
+            # "auto" resolves against the ladder whose bottom rung this is,
+            # so allowing it here would make the default define itself.
+            raise AssetSettingsError(
+                "'auto' is not a valid archive-wide default: it is resolved "
+                "from this setting, so it cannot also be this setting")
+        if policy not in ASSET_POLICIES:
+            raise AssetSettingsError(f"unknown asset policy {policy!r}")
+        got.asset_policy = policy
+
+    if "cap_action" in changes:
+        action = changes["cap_action"]
+        if action not in ASSET_CAP_ACTIONS:
+            raise AssetSettingsError(f"unknown cap action {action!r}")
+        got.asset_cap_action = action
+
+    if got.asset_periodic_above >= got.asset_manual_above:
+        raise AssetSettingsError(
+            f"the size thresholds are a ladder: 'periodic above' "
+            f"({_human_size(got.asset_periodic_above)}) must be below "
+            f"'manual above' ({_human_size(got.asset_manual_above)}), or no "
+            "asset ever gets the periodic policy")
+
+    if got.asset_period_days < 1:
+        raise AssetSettingsError("period_days must be at least 1")
+
+    return got
+
+
+def asset_settings_preview(archive, changes: dict) -> dict:
+    """Which assets would change policy if `changes` were saved.
+
+    Assets whose own policy is "auto" re-resolve against the ladder on
+    every read, so moving a threshold silently rewrites their behaviour.
+    That is intended, but it is a far bigger blast radius than a settings
+    form usually has, so it is shown before saving rather than discovered
+    afterwards.
+    """
+    from nebula.assets import AssetError, list_assets, read_asset
+    from nebula.config import read_settings
+
+    root, _ = resolve(archive)
+    current = read_settings(root, apply_env=False)
+    try:
+        proposed = _coerced_asset_settings(current, changes)
+    except AssetSettingsError as e:
+        return {"ok": False, "error": str(e)}
+
+    moved, auto_total = [], 0
+    for asset_id in list_assets(root):
+        try:
+            meta = read_asset(root, asset_id)
+        except AssetError:
+            # An unreadable record is `check`'s problem to report, not a
+            # reason to refuse a settings preview.
+            continue
+        if (meta.policy or "auto") != "auto":
+            continue
+        auto_total += 1
+        was = meta.effective_policy(current)
+        now = meta.effective_policy(proposed)
+        if was != now:
+            moved.append({
+                "id": meta.id,
+                "name": meta.name,
+                "bytes": meta.size or 0,
+                "size_human": _human_size(meta.size or 0),
+                "from": was,
+                "to": now,
+            })
+    moved.sort(key=lambda m: -m["bytes"])
+    return {"ok": True, "auto_assets": auto_total, "changed": len(moved),
+            "moved": moved}
+
+
+def set_asset_settings(archive, changes: dict) -> dict:
+    """Update the archive's asset defaults.
+
+    Only known keys are applied and every one is validated, so a stale
+    front-end cannot write nonsense into archive.yaml.
+    """
+    from nebula.config import read_settings, write_settings
+
+    root, _ = resolve(archive)
+    settings = read_settings(root, apply_env=False)
+    write_settings(root, _coerced_asset_settings(settings, changes))
+    return asset_settings(root)

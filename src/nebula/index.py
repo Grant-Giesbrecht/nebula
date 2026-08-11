@@ -54,7 +54,7 @@ INDEX_FILE = "index.db"
 
 #: Bumped whenever the schema changes shape. A mismatch triggers a full
 #: rebuild rather than a subtly-wrong query against old columns.
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 
 #: Written into data/<year>/ by seal_year().
 SEAL_FILE = ".year-seal.yaml"
@@ -107,6 +107,35 @@ CREATE TABLE IF NOT EXISTS derived_from (
     filename TEXT NOT NULL,
     ref_archive TEXT,
     ref_session TEXT,
+    ref_file TEXT,
+    ref_asset TEXT,             -- AF-... when this edge points at an asset
+    ref_sha256 TEXT,            -- the asset bytes seen at reference time
+    ref_fidelity TEXT           -- "pinned" (blob stored) or "observed"
+);
+
+-- Assets are mutable by design, so unlike artifacts they carry no sealed
+-- checksum to verify. What is indexed is their identity, current label
+-- and policy -- enough to browse and filter without walking the tree.
+CREATE TABLE IF NOT EXISTS assets (
+    asset_id TEXT PRIMARY KEY,
+    rel_path TEXT NOT NULL,
+    name TEXT,                  -- current filename: a label, not identity
+    created TEXT,
+    scanned_at TEXT,
+    size INTEGER,
+    sha256 TEXT,
+    policy TEXT,                -- as declared ("auto", "manual", ...)
+    policy_resolved TEXT,       -- what "auto" currently resolves to
+    origin TEXT,
+    snapshots INTEGER,          -- retained (not pending_gc)
+    snapshots_total INTEGER,
+    sig TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS asset_derived_from (
+    asset_id TEXT NOT NULL,
+    ref_archive TEXT,
+    ref_session TEXT,
     ref_file TEXT
 );
 
@@ -124,6 +153,10 @@ CREATE INDEX IF NOT EXISTS idx_derived_from_run ON derived_from(run_id, filename
 -- since nothing records back-links. Without this it is a full table scan
 -- per hop of a downstream traversal.
 CREATE INDEX IF NOT EXISTS idx_derived_from_ref ON derived_from(ref_file, ref_session);
+-- "which sessions used this asset?" is the asset-side downstream query,
+-- and it is the reason an asset's history is worth keeping at all.
+CREATE INDEX IF NOT EXISTS idx_derived_from_asset ON derived_from(ref_asset);
+CREATE INDEX IF NOT EXISTS idx_assets_scanned ON assets(scanned_at);
 """
 
 
@@ -195,6 +228,30 @@ def session_signature(session_dir) -> str:
         return ""
     parts.sort()
     return hashlib.blake2b("\n".join(parts).encode(), digest_size=16).hexdigest()
+
+
+def asset_signature(asset_dir) -> str:
+    """A cheap fingerprint of one asset directory, covering ``asset.json``
+    and *nothing else*.
+
+    The asset's own bytes are deliberately excluded. Assets exist to be
+    edited constantly, and every field the index holds about one comes
+    from the record, not the file -- so signing the bytes would re-index
+    an asset every time somebody nudged an SVG, for no gain. This is the
+    same trade session_signature makes when it skips artifact data files,
+    and it matters much more here.
+
+    A rename or an edit still reaches the index: both go through
+    assets.scan(), which rewrites asset.json (atomically, so the stat
+    signature necessarily moves).
+    """
+    from nebula.assets import ASSET_FILE
+
+    try:
+        st = (Path(asset_dir) / ASSET_FILE).stat()
+    except OSError:
+        return ""
+    return f"{ASSET_FILE}:{st.st_size}:{st.st_mtime_ns}"
 
 
 def _file_signature(path: Path) -> str:
@@ -275,6 +332,11 @@ def rebuild(archive: "str | Path", index_path: Optional[Path] = None) -> Path:
                 _index_session(conn, archive_root, session_dir)
             _record_seal(conn, archive_root, year_dir.name)
             conn.commit()          # one commit per year: bounded WAL growth
+        # Assets live outside data/<year>/ entirely, so they are swept once
+        # after the year walk rather than inside it.
+        _sweep_assets(conn, archive_root,
+                      {"added": 0, "updated": 0, "removed": 0})
+        conn.commit()
         _set_meta(conn, "built", _now())
         conn.commit()
     finally:
@@ -368,14 +430,89 @@ def _index_session(conn: sqlite3.Connection, archive_root: Path, session_dir: Pa
         )
         for r in data.get("derived_from", []):
             conn.execute(
-                "INSERT INTO derived_from VALUES (?, ?, ?, ?, ?)",
-                (run_id, filename, r.get("archive"), r.get("session"), r.get("file")),
+                "INSERT INTO derived_from VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                (run_id, filename, r.get("archive"), r.get("session"),
+                 r.get("file"), r.get("asset"), r.get("sha256"),
+                 r.get("fidelity")),
             )
 
 
 def _forget_session(conn: sqlite3.Connection, run_id: str) -> None:
     for table in ("sessions", "related_runs", "artifacts", "derived_from"):
         conn.execute(f"DELETE FROM {table} WHERE run_id = ?", (run_id,))
+
+
+def _index_asset(conn: sqlite3.Connection, archive_root: Path,
+                 asset_id: str, settings) -> None:
+    """(Re-)index one asset from its record. Never reads the asset's own
+    bytes: everything indexed lives in asset.json."""
+    from nebula import assets as assets_mod
+
+    try:
+        meta = assets_mod.read_asset(archive_root, asset_id)
+    except assets_mod.AssetError:
+        return          # unreadable record: check reports it, index skips it
+
+    retained = sum(1 for s in meta.snapshots if not s.pending_gc)
+    conn.execute(
+        "INSERT OR REPLACE INTO assets VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        (
+            meta.id,
+            _rel(archive_root, assets_mod.asset_dir(archive_root, meta.id)),
+            meta.name,
+            meta.created,
+            meta.scanned_at,
+            meta.size,
+            meta.sha256,
+            meta.policy,
+            meta.effective_policy(settings),
+            meta.origin,
+            retained,
+            len(meta.snapshots),
+            asset_signature(assets_mod.asset_dir(archive_root, meta.id)),
+        ),
+    )
+    conn.execute("DELETE FROM asset_derived_from WHERE asset_id = ?", (meta.id,))
+    for r in meta.derived_from:
+        conn.execute(
+            "INSERT INTO asset_derived_from VALUES (?, ?, ?, ?)",
+            (meta.id, r.get("archive"), r.get("session"), r.get("file")),
+        )
+
+
+def _forget_asset(conn: sqlite3.Connection, asset_id: str) -> None:
+    for table in ("assets", "asset_derived_from"):
+        conn.execute(f"DELETE FROM {table} WHERE asset_id = ?", (asset_id,))
+
+
+def _sweep_assets(conn: sqlite3.Connection, archive_root: Path,
+                  summary: Dict) -> None:
+    """Bring the assets table into line with the tree, by signature.
+
+    Assets are not year-sealed: unlike a session, an asset is never
+    finished, so there is nothing to seal and every one is checked. That
+    is affordable because the check is one stat per asset.
+    """
+    from nebula import assets as assets_mod
+    from nebula import config as config_mod
+
+    settings = config_mod.read_settings(archive_root, apply_env=False)
+    known = {row["asset_id"]: row["sig"]
+             for row in conn.execute("SELECT asset_id, sig FROM assets").fetchall()}
+    seen = set()
+    for asset_id in assets_mod.list_assets(archive_root):
+        seen.add(asset_id)
+        sig = asset_signature(assets_mod.asset_dir(archive_root, asset_id))
+        if not sig:
+            continue                       # no record: an orphan dir, check's job
+        if known.get(asset_id) == sig:
+            continue
+        _index_asset(conn, archive_root, asset_id, settings)
+        summary["added" if asset_id not in known else "updated"] += 1
+
+    for asset_id in set(known) - seen:
+        _forget_asset(conn, asset_id)
+        summary["removed"] += 1
 
 
 def update_session(archive: "str | Path", session_dir, *,
@@ -661,6 +798,9 @@ def ensure_fresh(archive: "str | Path", *, index_path: Optional[Path] = None,
             _sweep_year(conn, archive_root, year_dir, summary)
             _record_seal(conn, archive_root, year)
             conn.commit()
+
+        _sweep_assets(conn, archive_root, summary)
+        conn.commit()
 
         # A whole year directory can disappear (moved away, or an archive
         # trimmed); its sessions must not linger in the index.

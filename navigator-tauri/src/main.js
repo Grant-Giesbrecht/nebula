@@ -299,7 +299,10 @@ function newTabId() { return `t${tabSeq++}`; }
 
 function browseState() {
   return {
-    railTab, searchMode,
+    // Never persist "assets": it is a different tab kind, so restoring it
+    // here would send a browse tab back to the asset browser on open.
+    railTab: railTab === "assets" ? "sessions" : railTab,
+    searchMode,
     sessionRun: curSession ? curSession.run_id : null,
     sessionPath: curSession ? curSession.path : null,
     collection: openCollection, collPath: collPath.slice(),
@@ -317,6 +320,7 @@ function activeTabObj() { return tabs.find((t) => t.id === activeTab) || null; }
 
 function tabTitle(tab) {
   if (tab.kind === "index") return "Index";
+  if (tab.kind === "assets") return "Assets";
   if (tab.kind === "tree") {
     const st = tab.state || {};
     return st.filename ? st.filename : (st.run_id ? `${st.run_id} relations` : "Relations");
@@ -332,6 +336,7 @@ const TAB_ICONS = {
   browse: `<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/></svg>`,
   tree: `<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><circle cx="6" cy="6" r="2.5"/><circle cx="18" cy="12" r="2.5"/><circle cx="6" cy="18" r="2.5"/><path d="M8.5 6H13a2 2 0 0 1 2 2v1.5"/><path d="M8.5 18H13a2 2 0 0 0 2-2v-1.5"/></svg>`,
   index: `<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="16" rx="2"/><line x1="3" y1="9" x2="21" y2="9"/><line x1="9" y1="9" x2="9" y2="20"/></svg>`,
+  assets: `<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="18" height="18" rx="2"/><circle cx="8.5" cy="8.5" r="1.5"/><polyline points="21 15 16 10 5 21"/></svg>`,
 };
 
 function renderTabs() {
@@ -377,16 +382,23 @@ function applyTabChrome() {
   // with it rather than sitting there inert.
   const kind = (activeTabObj() || {}).kind || "browse";
   const tree = kind === "tree", idx = kind === "index", browse = kind === "browse";
+  const asset = kind === "assets";
   $("treeArea").classList.toggle("hidden", !tree);
   $("treeTools").classList.toggle("hidden", !tree);
   $("idxArea").classList.toggle("hidden", !idx);
   $("idxTools").classList.toggle("hidden", !idx);
+  $("assetArea").classList.toggle("hidden", !asset);
+  $("assetTools").classList.toggle("hidden", !asset);
   $("itemArea").classList.toggle("hidden", !browse);
   document.querySelector(".main .search-row.wide").classList.toggle("hidden", !browse);
   document.querySelector(".main .toolbar:not(.tree-tools):not(.idx-tools)")
     .classList.toggle("hidden", !browse);
-  $("rail").classList.toggle("hidden", !browse);
-  document.getElementById("splitRail").classList.toggle("hidden", !browse);
+  // The rail stays for assets: Assets is one of its tabs, so hiding it
+  // left no way back to Sessions -- the tab strip was the only exit and
+  // the rail button that got you here had vanished.
+  const wantRail = browse || asset;
+  $("rail").classList.toggle("hidden", !wantRail);
+  document.getElementById("splitRail").classList.toggle("hidden", !wantRail);
 }
 
 async function selectTab(id) {
@@ -400,6 +412,7 @@ async function selectTab(id) {
   if (!tab) return;
   if (tab.kind === "tree") { await renderTreeTab(tab); return; }
   if (tab.kind === "index") { await renderIndexTab(tab); return; }
+  if (tab.kind === "assets") { await renderAssetTab(tab); return; }
   await restoreBrowse(tab.state || {});
 }
 
@@ -1201,6 +1214,11 @@ let identity = { user: "", set: false, path: "" };
 async function loadIdentity() {
   try { identity = await call("identity", {}); } catch (e) { identity = { user: "", set: false }; }
   $("noUserWarn").classList.toggle("hidden", !!identity.set);
+  // Show who you are whenever it is set. This string ends up in every
+  // nebula:// ref that leaves the machine, so it should be visible rather
+  // than buried in a dialog nobody reopens.
+  $("userBadge").classList.toggle("hidden", !identity.set);
+  $("userBadgeName").textContent = identity.user || "";
 }
 
 function openIdentityDialog(reason) {
@@ -2013,13 +2031,14 @@ async function selectSession(s) {
 function setRailTab(tab, { keepLocation = false } = {}) {
   railTab = tab;
   for (const [id, name] of [["tabSessions", "sessions"], ["tabCollections", "collections"],
-                            ["tabViews", "views"]]) {
+                            ["tabAssets", "assets"], ["tabViews", "views"]]) {
     $(id).classList.toggle("on", name === tab);
   }
   $("sessHead").classList.toggle("hidden", tab !== "sessions");
   $("sessionList").classList.toggle("hidden", tab !== "sessions");
   document.querySelector(".rail .search-row").classList.toggle("hidden", tab !== "sessions");
   $("collPane").classList.toggle("hidden", tab !== "collections");
+  $("assetPane").classList.toggle("hidden", tab !== "assets");
   $("viewPane").classList.toggle("hidden", tab !== "views");
   LS.set("nebula.railTab", tab);
   // Leaving the collections tab means leaving its contents: the item area
@@ -2032,7 +2051,15 @@ function setRailTab(tab, { keepLocation = false } = {}) {
     else renderItemArea();
   }
   if (tab === "collections") loadCollections();
+  if (tab === "assets" && !keepLocation) openAssetsFromRail();
   if (tab === "views") loadViews();
+  // Leaving Assets has to take the main area with it, otherwise the rail
+  // says "Sessions" while the asset grid is still on screen and the click
+  // reads as broken.
+  if (tab !== "assets") {
+    const cur = activeTabObj();
+    if (cur && cur.kind === "assets") returnToBrowseTab();
+  }
 }
 
 async function loadCollections() {
@@ -3955,11 +3982,17 @@ function closeConfirm(result) {
 
 // ---- archive management -------------------------------------------------
 let arcStats = null, checkResult = null, gcPreview = null;
+// Saved asset defaults as the archive last reported them, and the edits
+// made in the form since. Kept apart so "what changed" is answerable
+// without diffing the DOM, which is what drives both the preview and
+// whether Save is worth offering.
+let assetCfg = null, assetEdits = {};
 
 async function openArchivePanel() {
   if (!archive) { toast("Open an archive first."); return; }
   showDialog("arcScrim");
   $("arcBody").innerHTML = `<div class="mg-note">Reading the archive…</div>`;
+  assetCfg = null; assetEdits = {};
   await refreshArchiveStats();
 }
 
@@ -3970,6 +4003,8 @@ async function refreshArchiveStats() {
     $("arcBody").innerHTML = noteBox("err", `Could not read the archive: ${e}`);
     return;
   }
+  try { assetCfg = await call("asset_settings", { archive }); }
+  catch (e) { assetCfg = null; }
   renderArchivePanel();
 }
 
@@ -4066,8 +4101,10 @@ function renderArchivePanel() {
       + `Change them with <span class="mono">nebula config</span>.</div>`) + `</div>`;
 
   const body = $("arcBody");
-  body.innerHTML = staleWarn + overview + index + transfers + integrity + gc + settings;
+  body.innerHTML = staleWarn + overview + index + transfers + integrity + gc
+    + assetDefaultsHTML() + settings;
   wirePaths(body);
+  wireAssetDefaults();
   $("arcRebuild").onclick = rebuildIndex;
   $("arcInspect").onclick = () => {
     $("arcScrim").classList.remove("show");
@@ -4091,6 +4128,197 @@ function _human(n) {
   let size = n, i = 0;
   while (size >= 1024 && i < units.length - 1) { size /= 1024; i++; }
   return i === 0 ? `${size} B` : `${size.toFixed(1)} ${units[i]}`;
+}
+
+// ---- asset defaults -----------------------------------------------------
+// These seven settings decide how much history a mutable asset keeps. The
+// backend validates all of them (model._coerced_asset_settings); the form
+// exists to make the *consequences* visible before saving, which the CLI
+// cannot do.
+
+const ASSET_UNITS = [["B", 1], ["MB", 1 << 20], ["GB", 1 << 30]];
+
+function assetVal(key) {
+  return key in assetEdits ? assetEdits[key] : (assetCfg || {})[key];
+}
+
+function assetDirty() { return Object.keys(assetEdits).length > 0; }
+
+/** Split bytes into the largest unit that divides evenly, so a value the
+ *  user entered as "256 MB" comes back as "256 MB" and not "0.25 GB". */
+function splitSize(bytes) {
+  const n = Number(bytes) || 0;
+  for (let i = ASSET_UNITS.length - 1; i > 0; i--) {
+    const [label, mult] = ASSET_UNITS[i];
+    if (n && n % mult === 0) return [n / mult, label];
+  }
+  return [n, "B"];
+}
+
+function sizeField(key, label, hint) {
+  const [value, unit] = splitSize(assetVal(key));
+  const units = ASSET_UNITS.map(([u]) =>
+    `<option value="${u}"${u === unit ? " selected" : ""}>${u}</option>`).join("");
+  return `<div class="as-row"><label for="as_${key}">${escapeHtml(label)}</label>
+    <span class="as-size">
+      <input type="number" min="0" step="1" id="as_${key}" data-akey="${key}" value="${value}" />
+      <select id="as_${key}_u" data-aunit="${key}">${units}</select>
+    </span>
+    <span class="as-hint">${escapeHtml(hint)}</span></div>`;
+}
+
+function numField(key, label, hint, min) {
+  return `<div class="as-row"><label for="as_${key}">${escapeHtml(label)}</label>
+    <input type="number" min="${min}" step="1" id="as_${key}" data-akey="${key}"
+           value="${Number(assetVal(key)) || 0}" />
+    <span class="as-hint">${escapeHtml(hint)}</span></div>`;
+}
+
+function assetDefaultsHTML() {
+  if (!assetCfg) {
+    return `<div class="mg"><div class="mg-h">Asset defaults</div>`
+      + noteBox("info", "Could not read the asset settings for this archive.")
+      + `</div>`;
+  }
+  // "auto" is excluded deliberately: it resolves *from* this setting, so
+  // offering it here would make the default define itself. The backend
+  // rejects it too; this just avoids showing a choice that cannot work.
+  const policies = (assetCfg.policies || [])
+    .filter((p) => p !== "auto")
+    .map((p) => `<option value="${p}"${p === assetVal("policy") ? " selected" : ""}>`
+      + `${p.replace(/_/g, " ")} — ${ASSET_POLICY_HELP[p] || ""}</option>`).join("");
+  const caps = (assetCfg.cap_actions || []).map((c) =>
+    `<option value="${c}"${c === assetVal("cap_action") ? " selected" : ""}>`
+    + `${c === "mark" ? "mark for gc — keep the record" : "drop — discard the record"}`
+    + `</option>`).join("");
+
+  return `<div class="mg" id="assetDefaults"><div class="mg-h">Asset defaults`
+    + `<span class="issue-w">mutable files</span></div>`
+    + `<div class="mg-note">How much history an asset keeps, unless the asset `
+    + `overrides it. Files at or above a threshold take the higher rung.</div>`
+    + `<div class="as-grid">`
+    + `<div class="as-row"><label for="as_policy">Default policy</label>`
+    + `<select id="as_policy" data-akey="policy">${policies}</select>`
+    + `<span class="as-hint">for files below the first threshold</span></div>`
+    + sizeField("periodic_above", "Periodic above", "size at which the default becomes periodic")
+    + sizeField("manual_above", "Manual above", "…and above which an automatic snapshot is only observed")
+    + numField("period_days", "Period (days)", "smallest gap between periodic snapshots", 1)
+    + numField("max_snapshots", "Keep at most", "snapshots per asset — 0 means uncapped", 0)
+    + sizeField("max_snapshot_bytes", "Keep at most", "of snapshots per asset — 0 means uncapped")
+    + `<div class="as-row"><label for="as_cap_action">Over the cap</label>`
+    + `<select id="as_cap_action" data-akey="cap_action">${caps}</select>`
+    + `<span class="as-hint">what happens to the oldest snapshot</span></div>`
+    + `</div>`
+    + `<div id="assetWarn"></div>`
+    + `<div id="assetPreview"></div>`
+    + `<div class="mg-actions">`
+    + `<button class="dbtn ghost" id="assetReset"${assetDirty() ? "" : " disabled"}>Revert</button>`
+    + `<button class="btn-primary" id="assetSave"${assetDirty() ? "" : " disabled"}>Save defaults</button>`
+    + `</div></div>`;
+}
+
+function readAssetField(key) {
+  const el = $(`as_${key}`);
+  if (!el) return undefined;
+  if (el.tagName === "SELECT") return el.value;
+  const unitEl = $(`as_${key}_u`);
+  const n = Number(el.value);
+  if (!Number.isFinite(n)) return NaN;
+  if (!unitEl) return Math.round(n);
+  const mult = (ASSET_UNITS.find(([u]) => u === unitEl.value) || ["B", 1])[1];
+  return Math.round(n * mult);
+}
+
+function wireAssetDefaults() {
+  if (!$("assetDefaults")) return;
+  const keys = ["policy", "periodic_above", "manual_above", "period_days",
+                "max_snapshots", "max_snapshot_bytes", "cap_action"];
+  const onEdit = () => {
+    for (const key of keys) {
+      const value = readAssetField(key);
+      if (value === undefined) continue;
+      // Compare against the saved value so that editing a field and putting
+      // it back leaves nothing dirty, and Save stops offering itself.
+      if (value === assetCfg[key]) delete assetEdits[key];
+      else assetEdits[key] = value;
+    }
+    $("assetSave").disabled = !assetDirty();
+    $("assetReset").disabled = !assetDirty();
+    refreshAssetPreview();
+  };
+  for (const key of keys) {
+    const el = $(`as_${key}`), unitEl = $(`as_${key}_u`);
+    if (el) { el.oninput = onEdit; el.onchange = onEdit; }
+    if (unitEl) unitEl.onchange = onEdit;
+  }
+  $("assetReset").onclick = () => { assetEdits = {}; renderArchivePanel(); };
+  $("assetSave").onclick = saveAssetDefaults;
+  refreshAssetPreview();
+}
+
+// Changing a threshold moves every asset whose own policy is "auto",
+// because "auto" re-resolves on read. That is intended, but it is a much
+// bigger blast radius than a settings form usually has -- so it is shown
+// before saving rather than discovered afterwards.
+const refreshAssetPreview = debounce(async () => {
+  const warn = $("assetWarn"), out = $("assetPreview");
+  if (!warn || !out) return;
+  if (!assetDirty()) { warn.innerHTML = ""; out.innerHTML = ""; return; }
+
+  let res;
+  try { res = await call("asset_settings_preview", { archive, changes: assetEdits }); }
+  catch (e) { warn.innerHTML = noteBox("err", `Could not preview: ${e}`); return; }
+
+  if (!res.ok) {
+    warn.innerHTML = noteBox("err", res.error || "these settings cannot be saved");
+    out.innerHTML = "";
+    $("assetSave").disabled = true;
+    return;
+  }
+  warn.innerHTML = assetEdits.cap_action === "drop"
+    ? noteBox("err", "Dropping discards the snapshot record itself, not just the "
+        + "blob. That cannot be undone, and the asset loses any evidence that "
+        + "the version existed.")
+    : "";
+  $("assetSave").disabled = !assetDirty();
+
+  if (!res.changed) {
+    out.innerHTML = noteBox("info", res.auto_assets
+      ? `No change for the ${res.auto_assets} asset(s) on the automatic policy.`
+      : "No assets are on the automatic policy, so nothing moves.");
+    return;
+  }
+  const rows = res.moved.slice(0, 12).map((m) => `
+    <div class="issue info"><div><span class="issue-k">${escapeHtml(m.id)}</span>
+      <span class="issue-w">${escapeHtml(m.name)} — ${escapeHtml(m.size_human)}</span></div>
+      <div class="issue-d">${escapeHtml(m.from)} → ${escapeHtml(m.to)}</div></div>`).join("");
+  out.innerHTML = noteBox("info",
+      `${res.changed} of ${res.auto_assets} automatic asset(s) would change policy.`)
+    + rows
+    + (res.moved.length > 12
+        ? `<div class="mg-note">…and ${res.moved.length - 12} more.</div>` : "");
+}, 200);
+
+async function saveAssetDefaults() {
+  // A bare dropdown is not enough for this one: it discards the record that
+  // a version existed, which nothing can put back.
+  if (assetEdits.cap_action === "drop"
+      && !(await confirmAction({
+        body: `<b>Discard snapshot records over the cap?</b><div class="mg-note">`
+          + `Dropping removes the record that a version ever existed, not just `
+          + `its bytes, and cannot be undone. “Mark for gc” keeps the record `
+          + `and frees the blob instead.</div>`,
+        confirmLabel: "Use drop" }))) return;
+
+  const res = await call("set_asset_settings", { archive, changes: assetEdits });
+  if (!res.ok) {
+    $("assetWarn").innerHTML = noteBox("err", res.error || "could not save");
+    return;
+  }
+  assetCfg = res.settings;
+  assetEdits = {};
+  renderArchivePanel();
+  toast("Asset defaults saved");
 }
 
 function checkIssuesHTML(res) {
@@ -4650,7 +4878,11 @@ async function doImport() {
 // available through the plain event API under withGlobalTauri.
 function initDragDrop() {
   const over = () => {
-    $("dzSub").textContent = archive ? `into ${activeLabel()}` : "open an archive first";
+    const dzT = $("dzTitle");
+    if (dzT) dzT.textContent = droppingAsAssets()
+      ? "Drop files to add as assets" : "Drop files to import";
+    $("dzSub").textContent = !archive ? "open an archive first"
+      : droppingAsAssets() ? `as assets in ${activeLabel()}` : `into ${activeLabel()}`;
     $("dropZone").classList.toggle("blocked", !archive);
     $("dropZone").classList.add("show");
   };
@@ -4669,9 +4901,18 @@ function initDragDrop() {
   });
 }
 
+function droppingAsAssets() {
+  const cur = activeTabObj();
+  return railTab === "assets" || !!(cur && cur.kind === "assets");
+}
+
 async function onDropPaths(paths) {
   if (!paths.length) return;
   if (!archive) { toast("Open an archive before dropping files."); return; }
+  // Route by what the user is looking at. Dropping onto the asset browser
+  // and getting a session-import dialog is the wrong answer to an
+  // unambiguous gesture.
+  if (droppingAsAssets()) { await openAssetImport(paths); return; }
   pendingPaths = paths;
   await showImportDialog();
 }
@@ -4883,6 +5124,7 @@ const MENU_ACTIONS = {
   collect: addSelectionToCollection,
   "tab-sessions": () => setRailTab("sessions"),
   "tab-collections": () => setRailTab("collections"),
+  "tab-assets": () => setRailTab("assets"),
   "tab-searches": () => setRailTab("views"),
   session: toggleSessionPanel,
   archive: openArchivePanel,
@@ -4949,7 +5191,8 @@ function initShortcuts() {
     else if (k === "c" && shift) name = "collect";
     else if (k === "1" && !shift) name = "tab-sessions";
     else if (k === "2" && !shift) name = "tab-collections";
-    else if (k === "3" && !shift) name = "tab-searches";
+    else if (k === "3" && !shift) name = "tab-assets";
+    else if (k === "4" && !shift) name = "tab-searches";
     else if (k === "t" && !shift) name = "new-tab";
     else if (k === "n" && !shift) name = "new-window";
     else if (k === "n" && shift) name = "new-archive";
@@ -5028,6 +5271,9 @@ $("importBtn2").onclick = (ev) => {
   const r = ev.currentTarget.getBoundingClientRect();
   openImportMenu(r.left, r.bottom + 4);
 };
+$("userBadge").onclick = () => openIdentityDialog(
+  "This name is the owner segment of every nebula:// ref you hand out. " +
+  "Changing it does not rewrite refs already written.");
 $("noUserWarn").onclick = () => openIdentityDialog(
   "Nothing else needs this, but a fragment of your archive does: without a name, "
   + "a reference to it is ambiguous on anyone else's machine.");
@@ -5215,3 +5461,556 @@ async function boot() {
 }
 
 boot();
+
+// ---- assets --------------------------------------------------------------
+// Assets are the mutable half of the archive: files you keep editing, which
+// sessions may derive from. Nothing here checks them for drift -- being
+// edited is what they are for -- so the browser is built around finding a
+// file again (recency, thumbnails, search) rather than around integrity.
+
+const ASSET_POLICY_LABEL = {
+  auto: "Auto",
+  every_change: "Every change",
+  on_reference: "On reference",
+  periodic: "Periodic",
+  manual: "Manual only",
+};
+
+const ASSET_POLICY_HELP = {
+  auto: "Follow the archive's size rule, re-checked as the file grows.",
+  every_change: "Save a version whenever Nebula sees the bytes change.",
+  on_reference: "Save a version when a session records deriving from it.",
+  periodic: "As “on reference”, but at most once per period.",
+  manual: "Never automatically — you save versions yourself.",
+};
+
+let assetList = [];
+let assetSel = null;
+let assetPolicyFilter = "";
+let assetQuery = "";
+let assetSort = "recent";
+let assetPreviewCache = {};
+let assetImpFiles = [];
+let assetCommitTarget = null;
+
+function openAssetsTab() { addTab("assets", {}); }
+
+async function renderAssetTab(tab) {
+  const st = tab.state || {};
+  assetPolicyFilter = st.policy || "";
+  assetQuery = st.query || "";
+  assetSort = st.sort || "recent";
+  $("assetSearch").value = assetQuery;
+  $("assetSort").value = assetSort;
+  await loadAssets();
+}
+
+function saveAssetTabState() {
+  const tab = activeTabObj();
+  if (tab && tab.kind === "assets") {
+    tab.state = { policy: assetPolicyFilter, query: assetQuery, sort: assetSort };
+    scheduleTabSave();
+  }
+}
+
+async function loadAssets() {
+  if (!archive) {
+    $("assetGrid").innerHTML = `<div class="empty">Open an archive to begin.</div>`;
+    $("assetDetail").innerHTML = "";
+    return;
+  }
+  try {
+    assetList = await call("list_assets", {
+      archive, policy: assetPolicyFilter, sort: assetSort, query: assetQuery,
+    });
+  } catch (e) {
+    assetList = [];
+    // A bundled sidecar older than the front-end reports every asset op as
+    // unknown. That is a build state, not a mystery, so say which one it is
+    // instead of pasting the bridge's entire op list into the panel.
+    const stale = /unknown op/.test(String(e));
+    $("assetGrid").innerHTML = stale
+      ? `<div class="empty">This build's Python sidecar predates assets.<br />
+           Rebuild it with <span class="mono">./build-sidecar.sh</span>, then restart.</div>`
+      : `<div class="empty">Couldn't read assets: ${escapeHtml(String(e))}</div>`;
+    return;
+  }
+  renderAssetChips();
+  renderAssetGrid();
+  if (assetSel && !assetList.some((a) => a.id === assetSel)) assetSel = null;
+  if (!assetSel && assetList.length) assetSel = assetList[0].id;
+  await renderAssetDetail();
+  if (railTab === "assets") await renderAssetRail();
+}
+
+function renderAssetChips() {
+  const counts = {};
+  for (const a of assetList) {
+    counts[a.policy_resolved] = (counts[a.policy_resolved] || 0) + 1;
+  }
+  // Chips are built from the *unfiltered* policy set plus whatever is
+  // currently selected, so choosing one never makes the others vanish.
+  const keys = ["every_change", "on_reference", "periodic", "manual"];
+  const chips = [`<button class="chip ${assetPolicyFilter ? "" : "on"}"
+      data-pol="">All</button>`];
+  for (const k of keys) {
+    const on = assetPolicyFilter === k ? "on" : "";
+    chips.push(`<button class="chip ${on}" data-pol="${k}"
+        title="${escapeHtml(ASSET_POLICY_HELP[k])}">${escapeHtml(ASSET_POLICY_LABEL[k])}</button>`);
+  }
+  $("assetPolicyChips").innerHTML = chips.join("");
+  $("assetPolicyChips").querySelectorAll(".chip").forEach((el) => {
+    el.onclick = async () => {
+      assetPolicyFilter = el.getAttribute("data-pol");
+      saveAssetTabState();
+      await loadAssets();
+    };
+  });
+  $("assetCount").textContent =
+    assetList.length ? `${assetList.length} asset${assetList.length === 1 ? "" : "s"}` : "";
+}
+
+function renderAssetGrid() {
+  if (!assetList.length) {
+    $("assetGrid").innerHTML = `<div class="empty">No assets yet.
+      Use <b>Add assets…</b> to bring a figure, drawing or template under management.</div>`;
+    return;
+  }
+  $("assetGrid").classList.toggle("as-list", assetListView);
+  $("assetGrid").innerHTML = assetList.map((a) => {
+    const sel = a.id === assetSel ? "sel" : "";
+    const miss = a.missing ? `<span class="a-warn">file missing</span>` : "";
+    const pol = a.policy === "auto"
+      ? `${ASSET_POLICY_LABEL[a.policy_resolved]} <span class="a-auto">auto</span>`
+      : ASSET_POLICY_LABEL[a.policy_resolved] || a.policy_resolved;
+    return `<div class="acard ${sel}" data-id="${escapeHtml(a.id)}" tabindex="0">
+      <div class="athumb" data-thumb="${escapeHtml(a.id)}">${
+        a.previewable ? `<span class="a-spin"></span>` : `<span class="a-ext">${
+          escapeHtml((a.name || "").split(".").pop().toUpperCase() || "?")}</span>`}</div>
+      <div class="aname" title="${escapeHtml(a.name || "")}">${escapeHtml(a.name || "?")}</div>
+      <div class="ameta">${escapeHtml(a.size_human)} · ${pol}${
+        a.n_snapshots ? ` · ${a.n_snapshots} saved` : ""}</div>
+      ${miss}
+    </div>`;
+  }).join("");
+
+  $("assetGrid").querySelectorAll(".acard").forEach((el) => {
+    const id = el.getAttribute("data-id");
+    el.onclick = async () => { assetSel = id; renderAssetGrid(); await renderAssetDetail(); };
+    el.ondblclick = () => call("asset_open", { archive, asset_id: id });
+    el.oncontextmenu = (ev) => {
+      ev.preventDefault();
+      assetSel = id; renderAssetGrid(); renderAssetDetail();
+      assetContextMenu(ev.clientX, ev.clientY, id);
+    };
+  });
+  loadAssetThumbs();
+}
+
+// Thumbnails are fetched one at a time and cached: the bridge is a single
+// line-delimited pipe, so firing off a hundred base64 payloads at once
+// would stall every other request behind them.
+async function loadAssetThumbs() {
+  for (const a of assetList) {
+    if (!a.previewable) continue;
+    const box = $("assetGrid").querySelector(`[data-thumb="${CSS.escape(a.id)}"]`);
+    if (!box) continue;
+    let uri = assetPreviewCache[`${a.id}:${a.sha256}`];
+    if (uri === undefined) {
+      try {
+        const res = await call("asset_preview", { archive, asset_id: a.id });
+        uri = res.uri || null;
+      } catch (e) { uri = null; }
+      assetPreviewCache[`${a.id}:${a.sha256}`] = uri;
+    }
+    if (!box.isConnected) continue;
+    box.innerHTML = uri
+      ? `<img src="${uri}" alt="" />`
+      : `<span class="a-ext">${escapeHtml((a.name || "").split(".").pop().toUpperCase())}</span>`;
+  }
+}
+
+async function renderAssetDetail() {
+  if (!assetSel) {
+    $("assetDetail").innerHTML =
+      `<div class="ad-empty">Select an asset to see its versions and provenance.</div>`;
+    return;
+  }
+  let info;
+  try {
+    info = await call("asset_info", { archive, asset_id: assetSel });
+  } catch (e) {
+    $("assetDetail").innerHTML = `<div class="ad-empty">${escapeHtml(String(e))}</div>`;
+    return;
+  }
+
+  const polSel = ["auto", "every_change", "on_reference", "periodic", "manual"]
+    .map((k) => `<option value="${k}" ${info.policy === k ? "selected" : ""}>${
+      escapeHtml(ASSET_POLICY_LABEL[k])}</option>`).join("");
+
+  const derived = (info.derived_from || []).map((r) => {
+    const s = r.session ? `${r.session}/` : "";
+    return `<div class="ad-ref">← ${escapeHtml((r.archive ? r.archive + "|" : "") + s + (r.file || ""))}</div>`;
+  }).join("") || `<div class="ad-none">Nothing recorded.</div>`;
+
+  const used = (info.used_by || []).map((u) => {
+    const fid = u.fidelity === "pinned"
+      ? `<span class="pin ok" title="The exact bytes are stored">pinned</span>`
+      : `<span class="pin weak" title="The checksum was recorded but the bytes were not stored">observed</span>`;
+    return `<div class="ad-ref go" data-run="${escapeHtml(u.run_id)}"
+        data-file="${escapeHtml(u.filename)}">→ ${escapeHtml(u.run_id)}/${
+        escapeHtml(u.filename)} ${fid}</div>`;
+  }).join("") || `<div class="ad-none">No session derives from this yet.</div>`;
+
+  const snaps = (info.snapshots || []).map((s) => {
+    const gone = s.pending_gc
+      ? `<span class="pin weak" title="Evicted by a storage cap; kept as a record only">evicted</span>`
+      : "";
+    const note = s.note ? `<span class="ad-note">${escapeHtml(s.note)}</span>` : "";
+    return `<div class="ad-snap">
+      <span class="mono ad-sha" data-sha="${escapeHtml(s.sha256)}"
+            title="Click to copy the full checksum">${escapeHtml(s.sha256.slice(0, 12))}</span>
+      <span class="ad-when">${escapeHtml(s.at || "")}</span>
+      <span class="ad-size">${escapeHtml(s.bytes_human || "")}</span>
+      <span class="ad-trig">${escapeHtml(s.trigger || "")}</span>${gone}${note}
+    </div>`;
+  }).join("") || `<div class="ad-none">No versions saved yet.</div>`;
+
+  $("assetDetail").innerHTML = `
+    <div class="ad-head">
+      <div class="ad-title">${escapeHtml(info.name || "?")}</div>
+      <div class="ad-id mono">${escapeHtml(info.id)}</div>
+    </div>
+    <div class="ad-actions">
+      <button class="lbtn" id="adOpen">Open</button>
+      <button class="lbtn" id="adReveal">Show in ${escapeHtml(fileManagerName)}</button>
+      <button class="lbtn" id="adCommit">Save version…</button>
+    </div>
+    <div class="ad-row"><span>Size</span><b>${escapeHtml(info.size_human)}</b></div>
+    <div class="ad-row"><span>Policy</span>
+      <select id="adPolicy">${polSel}</select>
+      ${info.policy === "auto"
+        ? `<span class="a-auto" title="Resolved from the file's size">→ ${
+            escapeHtml(ASSET_POLICY_LABEL[info.policy_resolved])}</span>` : ""}
+    </div>
+    <div class="ad-help">${escapeHtml(ASSET_POLICY_HELP[info.policy] || "")}</div>
+    ${info.renames && info.renames.length
+      ? `<div class="ad-row"><span>Renamed</span><b>${info.renames.length}×</b>
+           <span class="ad-none">its id, and its history, followed the file</span></div>` : ""}
+    <div class="ad-sec">Derived from</div>${derived}
+    <div class="ad-sec">Used by</div>${used}
+    <div class="ad-sec">Saved versions</div>${snaps}
+  `;
+
+  $("adOpen").onclick = () => call("asset_open", { archive, asset_id: info.id });
+  $("adReveal").onclick = () => call("asset_reveal", { archive, asset_id: info.id });
+  $("adCommit").onclick = () => openAssetCommit(info);
+  $("adPolicy").onchange = async (ev) => {
+    try {
+      await call("asset_set_policy", {
+        archive, asset_id: info.id, policy: ev.target.value,
+      });
+      toast(`Policy set to ${ASSET_POLICY_LABEL[ev.target.value]}`);
+      await loadAssets();
+    } catch (e) { toast(String(e)); }
+  };
+  $("assetDetail").querySelectorAll(".ad-sha").forEach((el) => {
+    el.onclick = async () => {
+      try {
+        await navigator.clipboard.writeText(el.getAttribute("data-sha"));
+        toast("Checksum copied");
+      } catch (e) { /* clipboard unavailable: not worth an error */ }
+    };
+  });
+  $("assetDetail").querySelectorAll(".ad-ref.go").forEach((el) => {
+    el.onclick = () => openRelationsTab(el.getAttribute("data-run"), el.getAttribute("data-file"));
+  });
+}
+
+function assetContextMenu(x, y, id) {
+  const a = assetList.find((r) => r.id === id);
+  if (!a) return;
+  showMenu(x, y, [
+    { head: a.name || id },
+    { label: "Open", action: () => call("asset_open", { archive, asset_id: id }) },
+    { label: `Show in ${fileManagerName}`,
+      action: () => call("asset_reveal", { archive, asset_id: id }) },
+    { separator: true },
+    { label: "Save version…", action: () => openAssetCommit(a) },
+    { label: "Copy reference", action: async () => {
+        try {
+          await navigator.clipboard.writeText(`assets/${id}`);
+          toast("Reference copied");
+        } catch (e) { /* ignore */ }
+      } },
+  ]);
+}
+
+// ---- asset import dialog -------------------------------------------------
+
+async function openAssetImport(paths) {
+  if (!archive) { toast("Open an archive first"); return; }
+  if (!paths || !paths.length) return;
+  let defaults;
+  try {
+    defaults = await call("asset_import_defaults", { archive, paths });
+  } catch (e) {
+    toast(/unknown op/.test(String(e))
+      ? "This build's Python sidecar predates assets — rebuild it with ./build-sidecar.sh"
+      : String(e));
+    return;
+  }
+  assetImpFiles = defaults.files;
+  if (!assetImpFiles.length) { toast("Nothing to import"); return; }
+
+  $("assetImpArchive").textContent = archive;
+  $("assetImpFiles").innerHTML = assetImpFiles.map((f) =>
+    `<div class="fl-row"><span class="fl-n">${escapeHtml(f.name)}</span>
+       <span class="fl-s">${escapeHtml(f.size_human)}</span></div>`).join("");
+
+  // Pre-select from size, and say *why*, so the rule is learnable rather
+  // than something that silently happens to the user.
+  const suggested = assetImpFiles[0].policy;
+  const mixed = assetImpFiles.some((f) => f.policy !== suggested);
+  $("assetImpPolicy").innerHTML =
+    ["auto", "every_change", "on_reference", "periodic", "manual"].map((k) =>
+      `<label class="check"><input type="radio" name="assetpol" value="${k}"
+        ${k === "auto" ? "checked" : ""} /> ${escapeHtml(ASSET_POLICY_LABEL[k])}
+        <span class="hint">${escapeHtml(ASSET_POLICY_HELP[k])}</span></label>`).join("");
+  $("assetImpPolicyNote").textContent = mixed
+    ? "These files would default to different policies; “Auto” keeps each one on its own."
+    : `Auto resolves to “${ASSET_POLICY_LABEL[suggested]}” — ${assetImpFiles[0].reason}.`;
+
+  $("assetImpDerived").value = "";
+  $("assetImpOrigin").value = "";
+  $("assetImpMove").checked = false;
+  await fillAssetImportCollections();
+  await fillDerivedDatalist("assetImpDerivedList");
+  $("assetImpScrim").classList.add("show");
+  // Focus scrolls its container to reveal the target, which pushed the
+  // file list off the top of the dialog. Focus without scrolling, then
+  // make sure we are at the top.
+  $("assetImpDerived").focus({ preventScroll: true });
+  const body = $("assetImpScrim").querySelector(".dlg-body");
+  if (body) body.scrollTop = 0;
+}
+
+async function fillAssetImportCollections() {
+  const sel = $("assetImpColl");
+  sel.innerHTML = `<option value="">— none —</option>`;
+  try {
+    const names = await call("list_collections", { archive });
+    for (const c of names) {
+      const name = typeof c === "string" ? c : c.name;
+      sel.innerHTML += `<option value="${escapeHtml(name)}">${escapeHtml(name)}</option>`;
+    }
+  } catch (e) { /* a missing collections dir is not an error here */ }
+}
+
+async function fillDerivedDatalist(listId) {
+  const dl = $(listId);
+  if (!dl) return;
+  try {
+    const sessions = await call("list_sessions", { archive });
+    dl.innerHTML = sessions.slice(0, 200)
+      .map((s) => `<option value="${escapeHtml(s.run_id)}">`).join("");
+  } catch (e) { dl.innerHTML = ""; }
+}
+
+function closeAssetImport() { $("assetImpScrim").classList.remove("show"); }
+
+async function doAssetImport() {
+  const policy = (document.querySelector('input[name="assetpol"]:checked') || {}).value || "auto";
+  const derived = $("assetImpDerived").value.split(",")
+    .map((s) => s.trim()).filter(Boolean);
+  const coll = $("assetImpColl").value;
+  const args = {
+    archive,
+    paths: assetImpFiles.map((f) => f.path),
+    // "auto" is the absence of a choice, and import_asset takes None for
+    // that -- sending the string would pin the asset to a literal policy.
+    policy: policy === "auto" ? "" : policy,
+    derived_from: derived,
+    origin: $("assetImpOrigin").value.trim(),
+    move: $("assetImpMove").checked,
+    collections: coll ? [coll] : [],
+  };
+  let res;
+  try {
+    res = await call("asset_import", args);
+  } catch (e) {
+    toast(/unknown op/.test(String(e))
+      ? "This build's Python sidecar predates assets — rebuild it with ./build-sidecar.sh"
+      : String(e));
+    return;
+  }
+  closeAssetImport();
+  if (res.errors && res.errors.length) {
+    toast(`Added ${res.imported.length}, ${res.errors.length} failed: ${res.errors[0].error}`);
+  } else {
+    toast(`Added ${res.imported.length} asset${res.imported.length === 1 ? "" : "s"}`);
+  }
+  const tab = activeTabObj();
+  if (!tab || tab.kind !== "assets") openAssetsTab();
+  else await loadAssets();
+}
+
+// ---- save-version dialog -------------------------------------------------
+
+function openAssetCommit(info) {
+  assetCommitTarget = info.id;
+  $("assetCommitName").textContent = info.name || info.id;
+  $("assetCommitNote").value = "";
+  $("assetCommitScrim").classList.add("show");
+  $("assetCommitNote").focus();
+}
+
+async function doAssetCommit() {
+  if (!assetCommitTarget) return;
+  try {
+    const res = await call("asset_commit", {
+      archive, asset_id: assetCommitTarget, note: $("assetCommitNote").value.trim(),
+    });
+    $("assetCommitScrim").classList.remove("show");
+    toast(res.committed ? `Saved ${res.sha256.slice(0, 12)}…` : res.reason);
+    if (res.committed) {
+      assetPreviewCache = {};
+      await loadAssets();
+    }
+  } catch (e) { toast(String(e)); }
+}
+
+async function doAssetScan() {
+  try {
+    const res = await call("asset_scan", { archive });
+    const n = res.changed.length;
+    toast(n ? `${n} asset${n === 1 ? "" : "s"} changed on disk` : "Everything up to date");
+    if (n) { assetPreviewCache = {}; await loadAssets(); }
+  } catch (e) { toast(String(e)); }
+}
+
+// Debounce: the asset search re-queries the whole archive, so typing must
+// not fire one call per keystroke.
+function debounce(fn, ms) {
+  let timer = null;
+  return (...args) => {
+    clearTimeout(timer);
+    timer = setTimeout(() => fn(...args), ms);
+  };
+}
+
+async function pickFilesForAssets() {
+  try {
+    const picked = await dialogOpen({
+      multiple: true, title: "Choose files to manage as assets",
+    });
+    if (!picked) return [];
+    return Array.isArray(picked) ? picked : [picked];
+  } catch (e) { return []; }
+}
+
+// ---- wiring --------------------------------------------------------------
+
+$("tabAssets").onclick = () => setRailTab("assets");
+$("railAssetAdd").onclick = async (ev) => {
+  ev.stopPropagation();
+  const paths = await pickFilesForAssets();
+  if (paths && paths.length) await openAssetImport(paths);
+};
+$("assetImportBtn").onclick = async () => {
+  const paths = await pickFilesForAssets();
+  if (paths && paths.length) await openAssetImport(paths);
+};
+$("assetScanBtn").onclick = () => doAssetScan();
+$("assetViewList").onclick = () => setAssetView(true);
+$("assetViewGrid").onclick = () => setAssetView(false);
+$("assetImpClose").onclick = closeAssetImport;
+$("assetImpCancel").onclick = closeAssetImport;
+$("assetImpOk").onclick = () => doAssetImport();
+$("assetCommitCancel").onclick = () => $("assetCommitScrim").classList.remove("show");
+$("assetCommitOk").onclick = () => doAssetCommit();
+
+$("assetSort").onchange = async (ev) => {
+  assetSort = ev.target.value; saveAssetTabState(); await loadAssets();
+};
+$("assetSearch").oninput = debounce(async () => {
+  assetQuery = $("assetSearch").value.trim(); saveAssetTabState(); await loadAssets();
+}, 200);
+
+// ⌘/Ctrl-Enter commits the import dialog, which is what makes a pre-filled
+// dialog cheap: open it, glance at the defaults, confirm.
+$("assetImpScrim").addEventListener("keydown", (ev) => {
+  if (ev.key === "Enter" && (ev.metaKey || ev.ctrlKey)) { ev.preventDefault(); doAssetImport(); }
+  if (ev.key === "Escape") closeAssetImport();
+});
+$("assetCommitScrim").addEventListener("keydown", (ev) => {
+  if (ev.key === "Enter") { ev.preventDefault(); doAssetCommit(); }
+  if (ev.key === "Escape") $("assetCommitScrim").classList.remove("show");
+});
+
+// Choosing the Assets rail tab puts the asset browser in the main area.
+// Reusing the tab already open, rather than stacking a new one on every
+// click, keeps the rail behaving like the Collections tab beside it.
+async function openAssetsFromRail() {
+  const cur = activeTabObj();
+  if (!cur || cur.kind !== "assets") {
+    const existing = tabs.find((t) => t.kind === "assets");
+    if (existing) await selectTab(existing.id);
+    else { addTab("assets", {}); return; }
+  } else {
+    await loadAssets();
+  }
+  await renderAssetRail();
+}
+
+// The rail lists the same assets as the grid, so the sidebar answers
+// "what have I got?" without the main area having to be on that tab.
+async function renderAssetRail() {
+  const list = $("assetRailList");
+  if (!list) return;
+  if (!archive) { list.innerHTML = `<div class="rail-empty">No archive open.</div>`; return; }
+  if (!assetList.length) {
+    list.innerHTML = `<div class="rail-empty">No assets yet.</div>`;
+    return;
+  }
+  list.innerHTML = assetList.map((a) => `
+    <div class="citem arow ${a.id === assetSel ? "on" : ""}" data-id="${escapeHtml(a.id)}">
+      <span class="cname">${escapeHtml(a.name || a.id)}</span>
+      <span class="ctitle">${escapeHtml(a.size_human)}</span>
+    </div>`).join("");
+  list.querySelectorAll(".arow").forEach((el) => {
+    el.onclick = async () => {
+      assetSel = el.getAttribute("data-id");
+      const cur = activeTabObj();
+      if (!cur || cur.kind !== "assets") { addTab("assets", {}); return; }
+      renderAssetGrid();
+      await renderAssetDetail();
+      await renderAssetRail();
+    };
+  });
+}
+
+
+// Getting back out of the asset browser. Reuse an existing browse tab
+// rather than minting one, so flipping between rail tabs does not breed
+// tabs the user then has to close.
+async function returnToBrowseTab() {
+  const existing = tabs.find((t) => t.kind === "browse");
+  if (existing) await selectTab(existing.id);
+  else addTab("browse", {});
+}
+
+// Grid or list. The thumbnail grid is the better default for a figure
+// library, but it is the wrong shape for CAD files and long names, so the
+// choice is the user's and it persists.
+let assetListView = LS.get("nebula.assetListView", false);
+
+function setAssetView(list) {
+  assetListView = !!list;
+  LS.set("nebula.assetListView", assetListView);
+  $("assetViewList").classList.toggle("on", assetListView);
+  $("assetViewGrid").classList.toggle("on", !assetListView);
+  $("assetGrid").classList.toggle("as-list", assetListView);
+  renderAssetGrid();
+  renderAssetRail();
+}

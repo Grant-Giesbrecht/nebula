@@ -30,6 +30,7 @@ from nebula.session import DATA_DIR, HOLD_FOREVER, _ID_RE, orphan_artifacts_in
 from nebula.sidecar import (
     SESSION_FILE,
     SIDECAR_SUFFIX,
+    _ref_from_dict,
     read_session_yaml,
     read_sidecar,
     sha256_file,
@@ -225,9 +226,19 @@ def check(
                         f"sha256 {actual[:12]}... != recorded {meta.sha256[:12]}...",
                         fix=(f"if the edit was intentional: 'nebula reseal {label} {run_id} "
                              f"{artifact}'; otherwise restore the original bytes")))
-            for ref in meta.derived_from_refs():
+            # Iterate the raw entries, not derived_from_refs(): an asset
+            # edge carries the sha and fidelity it was pinned at, which a
+            # Ref cannot hold, and it must not reach _check_ref -- that
+            # would read the asset's *label* as a same-session filename
+            # and report a dangling ref for a perfectly good link.
+            for entry in meta.derived_from:
+                if entry.get("asset"):
+                    issues.extend(_check_asset_ref(
+                        archive_root, entry, run_id, artifact, label))
+                    continue
                 issues.extend(_check_ref(
-                    ref, kind="derived_from", run_id=run_id, file=artifact,
+                    _ref_from_dict(entry), kind="derived_from", run_id=run_id,
+                    file=artifact,
                     existing_sessions=existing_sessions, existing_files=existing_files,
                     registry=registry, label=label))
             issues.extend(_check_code_ref(
@@ -254,6 +265,7 @@ def check(
                     existing_sessions=existing_sessions, existing_files=existing_files,
                     registry=registry, label=label))
 
+    issues.extend(_check_assets(archive_root, label))
     issues.extend(_check_collections(archive_root, label))
     issues.extend(_check_year_seals(archive_root, label))
     return issues
@@ -345,6 +357,115 @@ def _check_code_ref(archive_root: Path, code: Optional[str], run_id: str,
             fix="restore the .code store from a backup; 'nebula gc' may have been "
                 "run with a sidecar temporarily absent")]
     return []
+
+
+def _check_asset_ref(archive_root: Path, entry: dict, run_id: str,
+                     artifact: str, label: str) -> List[CheckIssue]:
+    """Verify one derived_from edge that points at an asset.
+
+    Note what is deliberately *not* checked: whether the asset's bytes
+    still match the sha recorded here. They usually will not, and that is
+    the entire point -- the asset has been edited since. What matters is
+    that the version this artifact was built from is still identifiable,
+    and recoverable if it claimed to be.
+    """
+    from nebula import assets, assetstore
+
+    asset_id = entry.get("asset")
+    out: List[CheckIssue] = []
+    try:
+        meta = assets.read_asset(archive_root, asset_id)
+    except assets.AssetError:
+        return [CheckIssue(
+            "dangling_asset_ref", run_id, artifact,
+            f"derived_from points at asset {asset_id}, which is not in this archive",
+            fix=f"restore the asset, or drop the ref from "
+                f"{run_id}/{artifact}{SIDECAR_SUFFIX}")]
+
+    sha = entry.get("sha256")
+    if entry.get("fidelity") == "pinned" and sha:
+        if not assetstore.blob_path(archive_root, sha).is_file():
+            out.append(CheckIssue(
+                "missing_asset_blob", run_id, artifact,
+                f"derived_from claims asset {asset_id} @ {sha[:12]}... is pinned, "
+                f"but its bytes are not in the store",
+                fix="restore the blob store from a backup, or re-pin with "
+                    f"'nebula asset commit {label} {asset_id}' if the bytes "
+                    f"still exist elsewhere"))
+    elif not sha:
+        # An unpinned, unhashed edge names an asset but no version of it.
+        # Not corruption -- and the user may have chosen it -- but it is
+        # the one case where the link says less than it appears to.
+        out.append(CheckIssue(
+            "unpinned_asset_ref", run_id, artifact,
+            f"derived_from names asset {asset_id} without recording which "
+            f"version was used",
+            fix=f"nebula asset commit {label} {asset_id}  (pins future refs)",
+            severity="info"))
+    return out
+
+
+def _check_assets(archive_root: Path, label: str) -> List[CheckIssue]:
+    """Check the asset tree.
+
+    Drift is never reported here. An asset whose bytes no longer match its
+    recorded sha256 is an asset someone edited, which is what assets are
+    for -- reporting it would recreate exactly the nagging that sessions'
+    reseal loop imposes and that assets exist to escape.
+    """
+    from nebula import assets, assetstore
+
+    out: List[CheckIssue] = []
+    root = assets.assets_root(archive_root)
+    if not root.is_dir():
+        return out
+
+    for asset_id in assets.list_assets(archive_root):
+        adir = assets.asset_dir(archive_root, asset_id)
+        if not (adir / assets.ASSET_FILE).is_file():
+            out.append(CheckIssue(
+                "orphan_asset_dir", None, asset_id,
+                f"asset directory has no {assets.ASSET_FILE}",
+                fix=f"restore the record, or move {adir} out of the archive"))
+            continue
+        try:
+            meta = assets.read_asset(archive_root, asset_id)
+        except assets.AssetError as e:
+            out.append(CheckIssue(
+                "unreadable_asset", None, asset_id, str(e),
+                fix=f"fix the JSON in {adir / assets.ASSET_FILE}"))
+            continue
+
+        if assets.live_file(archive_root, asset_id) is None:
+            out.append(CheckIssue(
+                "missing_asset_file", None, asset_id,
+                f"asset record exists but its file is gone (last known: "
+                f"{meta.name or '?'})",
+                fix=f"restore the file into {adir}, or remove the asset"))
+
+        # A retained snapshot claims its bytes are recoverable. An evicted
+        # one does not, so a missing blob there is expected, not a fault.
+        for snap in meta.snapshots:
+            if snap.pending_gc:
+                continue
+            if not assetstore.blob_path(archive_root, snap.sha256).is_file():
+                out.append(CheckIssue(
+                    "missing_asset_blob", None, asset_id,
+                    f"snapshot {snap.sha256[:12]}... ({snap.at}) is retained but "
+                    f"its bytes are not in the store",
+                    fix="restore the blob store from a backup"))
+
+        # A file whose name has drifted from the record is not an error --
+        # the id still identifies it -- but until a scan the index and any
+        # display are showing a stale label.
+        live = assets.live_file(archive_root, asset_id)
+        if live is not None and meta.name and live.name != meta.name:
+            out.append(CheckIssue(
+                "unscanned_asset_rename", None, asset_id,
+                f"file is named {live.name!r} but the record says {meta.name!r}",
+                fix=f"nebula asset scan {label} {asset_id}",
+                severity="info"))
+    return out
 
 
 def _check_session_meta(run_id, smeta, label) -> List[CheckIssue]:

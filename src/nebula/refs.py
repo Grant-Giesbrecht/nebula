@@ -53,7 +53,20 @@ SESSION_PREFIX = "S-"
 #: never look like this, so the two namespaces can share a URI space.
 COLLECTIONS_SEGMENT = "collections"
 
+#: Likewise for assets -- mutable files that live outside any session.
+#: An asset ref names the asset's opaque id (AF-26-0017), not its
+#: filename, because the filename is a label the user may change at any
+#: time. The readable name rides alongside in the stored ref dict; see
+#: nebula.assets on why identity and name are kept apart.
+ASSETS_SEGMENT = "assets"
+
+#: Kept in sync with assets.ASSET_PREFIX. Not imported from there: assets
+#: reaches this module through sidecar, and a shared two-character
+#: constant is not worth a cycle.
+ASSET_PREFIX = "AF-"
+
 _SESSION_RE = re.compile(rf"^{re.escape(SESSION_PREFIX)}\d{{2}}-\d+$")
+_ASSET_RE = re.compile(rf"^{re.escape(ASSET_PREFIX)}\d{{2}}-\d+$")
 
 
 @dataclass(frozen=True)
@@ -67,6 +80,9 @@ class Ref:
     user:       who owns that archive, or None to mean "me" (see identity).
     collection: a collection name, or None. Mutually exclusive with
                 session/file -- a collection is a sibling namespace.
+    asset:      an asset id (AF-26-0017), or None. Also a sibling
+                namespace, and likewise mutually exclusive with
+                session/file.
     """
 
     file: Optional[str] = None
@@ -74,6 +90,7 @@ class Ref:
     archive: Optional[str] = None
     user: Optional[str] = None
     collection: Optional[str] = None
+    asset: Optional[str] = None
 
     def is_cross_archive(self) -> bool:
         return self.archive is not None
@@ -82,13 +99,16 @@ class Ref:
         return self.user is not None
 
     def is_same_session(self) -> bool:
-        return self.session is None and self.collection is None
+        return (self.session is None and self.collection is None
+                and self.asset is None)
 
     @property
     def kind(self) -> str:
-        """What this ref points at: file | session | collection | archive."""
+        """What this points at: file | session | collection | asset | archive."""
         if self.collection:
             return "collection"
+        if self.asset:
+            return "asset"
         if self.file:
             return "file"
         if self.session:
@@ -99,12 +119,14 @@ class Ref:
                  user: Optional[str] = None) -> "Ref":
         """A copy with archive/session/user filled in from context wherever
         this ref left them implicit."""
+        sibling = self.collection is not None or self.asset is not None
         return Ref(
             file=self.file,
-            session=self.session or (session if self.collection is None else None),
+            session=self.session or (None if sibling else session),
             archive=self.archive or archive,
             user=self.user or user,
             collection=self.collection,
+            asset=self.asset,
         )
 
 
@@ -122,6 +144,7 @@ def parse_uri(text: str) -> Ref:
 
         nebula://<user>/<archive>[/<session>[/<file>]]
         nebula://<user>/<archive>/collections/<name>
+        nebula://<user>/<archive>/assets/<asset-id>
     """
     body = text[len(URI_SCHEME):]
     parts = [p for p in body.split(REF_PATH_SEP)]
@@ -142,6 +165,12 @@ def parse_uri(text: str) -> Ref:
                              f".../{COLLECTIONS_SEGMENT}/<name>")
         return Ref(user=user, archive=archive,
                    collection=_check_segment(rest[1], "collection", text))
+    if rest[0] == ASSETS_SEGMENT:
+        if len(rest) != 2:
+            raise ValueError(f"malformed asset URI: {text!r}; expected "
+                             f".../{ASSETS_SEGMENT}/<asset-id>")
+        return Ref(user=user, archive=archive,
+                   asset=_check_segment(rest[1], "asset", text))
     if len(rest) > 2:
         raise ValueError(f"malformed nebula URI (too many segments): {text!r}")
 
@@ -182,6 +211,9 @@ def parse_ref(text: str) -> Ref:
         if head == COLLECTIONS_SEGMENT:
             return Ref(archive=archive,
                        collection=_check_segment(tail, "collection", text))
+        if head == ASSETS_SEGMENT:
+            return Ref(archive=archive,
+                       asset=_check_segment(tail, "asset", text))
         if REF_PATH_SEP in tail:
             raise ValueError(f"malformed ref (too many '/'): {text!r}")
         return Ref(session=head, file=tail, archive=archive)
@@ -190,6 +222,10 @@ def parse_ref(text: str) -> Ref:
     # S-<yy>-<nnnn>; anything else is a filename in this same session.
     if _SESSION_RE.match(text):
         return Ref(session=text, archive=archive)
+    # An asset id is as recognisable as a session id and can never collide
+    # with a filename, so a bare one resolves without the segment.
+    if _ASSET_RE.match(text):
+        return Ref(asset=text, archive=archive)
     return Ref(file=text, archive=archive)
 
 
@@ -204,6 +240,10 @@ def format_ref(ref: Ref) -> str:
 
     if ref.collection:
         body = f"{COLLECTIONS_SEGMENT}{REF_PATH_SEP}{ref.collection}"
+    elif ref.asset:
+        # The id alone, not the filename riding alongside it: the name is
+        # a label that may already be stale, the id never is.
+        body = f"{ASSETS_SEGMENT}{REF_PATH_SEP}{ref.asset}"
     elif ref.file and ref.session:
         body = f"{ref.session}{REF_PATH_SEP}{ref.file}"
     elif ref.file:
@@ -213,7 +253,8 @@ def format_ref(ref: Ref) -> str:
     elif ref.archive:
         return ref.archive
     else:
-        raise ValueError("Ref must name at least a session, file or collection")
+        raise ValueError(
+            "Ref must name at least a session, file, collection or asset")
 
     if ref.archive:
         return f"{ref.archive}{REF_ARCHIVE_SEP}{body}"
@@ -235,6 +276,8 @@ def format_uri(ref: Ref, *, user: Optional[str] = None,
     parts = [owner, arc]
     if ref.collection:
         parts += [COLLECTIONS_SEGMENT, ref.collection]
+    elif ref.asset:
+        parts += [ASSETS_SEGMENT, ref.asset]
     else:
         if ref.session:
             parts.append(ref.session)

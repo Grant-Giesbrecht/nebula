@@ -58,6 +58,52 @@ OVERWRITE_POLICIES = ("duplicate", "overwrite", "cancel")
 DEFAULT_OVERWRITE_POLICY = "duplicate"
 
 
+#: How an asset gets snapshotted into the blob store without being asked.
+#:
+#:   auto         -- resolve from the archive's size ladder at the moment
+#:                   the question is asked. A named policy rather than an
+#:                   absent one: "what is this asset set to?" must always
+#:                   have an answer the user can read back, and a file
+#:                   that grows past a threshold should move policy on its
+#:                   own rather than staying on whatever its size was at
+#:                   import.
+#:   every_change -- snapshot whenever nebula *observes* the bytes change.
+#:                   Not "every save": nebula is not a daemon, so several
+#:                   edits between two scans collapse into one snapshot.
+#:   on_reference -- snapshot when a session records deriving from it.
+#:   periodic     -- as on_reference, but at most once per asset_period_days.
+#:   manual       -- never automatically.
+#:
+#: Every policy still accepts an explicit `nebula asset commit`: a policy
+#: governs what happens *unasked*, and must never block a deliberate save.
+ASSET_POLICIES = ("auto", "every_change", "on_reference", "periodic", "manual")
+AUTO_ASSET_POLICY = "auto"
+DEFAULT_ASSET_POLICY = "on_reference"
+
+#: What a storage cap does to the snapshots it evicts.
+#:
+#:   mark -- flag them for `nebula gc` and keep the record. A snapshot
+#:           record is a few hundred bytes; the blob is the expensive
+#:           part. Keeping the record means the asset's history stays
+#:           readable ("there was a version at this sha on this date")
+#:           even once the bytes are gone.
+#:   drop -- forget the record too.
+#:
+#: Either way the cap bounds what *this asset* holds onto, not the
+#: archive's total bytes: a blob a session pinned stays, because that
+#: pin is a stronger claim than this asset's cap.
+ASSET_CAP_ACTIONS = ("mark", "drop")
+DEFAULT_ASSET_CAP_ACTION = "mark"
+
+#: Size ladder deciding a newly imported asset's default policy. Size is
+#: overwhelmingly what predicts the answer -- a 100 GB video wants `manual`
+#: because it is enormous, not because of what it contains -- so the
+#: default is derived from it and the user overrides the exceptions.
+DEFAULT_ASSET_PERIODIC_ABOVE = 256 << 20      # 256 MiB -> periodic
+DEFAULT_ASSET_MANUAL_ABOVE = 8 << 30         # 8 GiB   -> manual
+DEFAULT_ASSET_PERIOD_DAYS = 7
+
+
 class ConfigError(ValueError):
     """An archive.yaml that cannot be trusted to describe the archive."""
 
@@ -78,6 +124,24 @@ class ArchiveSettings:
     #: change either way); worth turning off only if the index lives on
     #: storage slow enough that closing a session should not touch it.
     auto_index: bool = True
+
+    # ---- assets: archive-wide defaults, overridable per asset -----------
+    #: Default snapshot policy for an asset whose size falls below
+    #: asset_periodic_above. The two thresholds form a ladder; see the
+    #: module constants for why size is the right predictor.
+    asset_policy: str = DEFAULT_ASSET_POLICY
+    asset_periodic_above: int = DEFAULT_ASSET_PERIODIC_ABOVE
+    asset_manual_above: int = DEFAULT_ASSET_MANUAL_ABOVE
+    #: Minimum gap between automatic snapshots under the periodic policy.
+    asset_period_days: int = DEFAULT_ASSET_PERIOD_DAYS
+    #: Per-asset storage caps, evicting oldest snapshots first. 0 = no cap.
+    #: These bound the archive's growth directly, which is what the user
+    #: actually fears -- frequency only proxies for it.
+    asset_max_snapshots: int = 0
+    asset_max_snapshot_bytes: int = 0
+    #: Whether hitting a cap forgets the snapshot record or only flags its
+    #: blob for collection. See ASSET_CAP_ACTIONS.
+    asset_cap_action: str = DEFAULT_ASSET_CAP_ACTION
 
     # ---- identity: travels with the archive, unlike the registry --------
     #: What this archive calls itself. This is the name in a nebula URI, so
@@ -111,6 +175,17 @@ class ArchiveSettings:
         # to the safe policy rather than trusting it.
         if got.on_overwrite not in OVERWRITE_POLICIES:
             got.on_overwrite = DEFAULT_OVERWRITE_POLICY
+        # Same reasoning for the asset default: a typo must not silently
+        # change how much history gets kept. Fall back to the safe value
+        # (the one that snapshots more), rather than the one that loses
+        # bytes nobody asked to lose.
+        # "auto" is meaningless here and would recurse: the ladder's own
+        # bottom rung *is* this setting.
+        if (got.asset_policy not in ASSET_POLICIES
+                or got.asset_policy == AUTO_ASSET_POLICY):
+            got.asset_policy = DEFAULT_ASSET_POLICY
+        if got.asset_cap_action not in ASSET_CAP_ACTIONS:
+            got.asset_cap_action = DEFAULT_ASSET_CAP_ACTION
         # An unknown kind must not silently become "standard": that would
         # hand a fragment permission to mint ids. Fail loudly instead.
         if got.kind not in KINDS:

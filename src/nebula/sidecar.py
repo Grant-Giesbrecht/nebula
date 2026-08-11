@@ -38,12 +38,21 @@ def _ref_to_dict(ref: Ref) -> Dict[str, Any]:
                            "file": ref.file}
     if ref.user:
         out["user"] = ref.user
+    # Sibling namespaces, written only when used, for the same reason as
+    # `user`: an ordinary session ref keeps exactly the shape it has
+    # always had on disk. An asset ref keeps `file` alongside the id --
+    # the id is what resolves, the name is what a human reads.
+    if ref.collection:
+        out["collection"] = ref.collection
+    if ref.asset:
+        out["asset"] = ref.asset
     return out
 
 
 def _ref_from_dict(d: Dict[str, Any]) -> Ref:
     return Ref(file=d.get("file"), session=d.get("session"),
-               archive=d.get("archive"), user=d.get("user"))
+               archive=d.get("archive"), user=d.get("user"),
+               collection=d.get("collection"), asset=d.get("asset"))
 
 
 def _now_iso() -> str:

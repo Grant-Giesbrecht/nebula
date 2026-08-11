@@ -95,6 +95,41 @@ def store_blob(archive_root, data: bytes) -> str:
     return digest
 
 
+def store_blob_file(archive_root, src: "str | Path", *,
+                    digest: Optional[str] = None, _chunk: int = 1 << 20) -> str:
+    """Store a file's bytes without ever holding them all in memory.
+
+    Copy in chunks via mkstemp + os.replace, so the store never contains a
+    partial blob under a name that claims to be its hash. `digest` skips
+    the hashing pass when the caller already knows it.
+    """
+    src = Path(src)
+    if digest is None:
+        h = hashlib.sha256()
+        with open(src, "rb") as f:
+            for block in iter(lambda: f.read(_chunk), b""):
+                h.update(block)
+        digest = h.hexdigest()
+
+    path = blob_path(archive_root, digest)
+    if path.exists():
+        return digest          # name is the hash; present means identical
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp = tempfile.mkstemp(dir=path.parent, prefix=".tmp.")
+    try:
+        with os.fdopen(fd, "wb") as out, open(src, "rb") as f:
+            for block in iter(lambda: f.read(_chunk), b""):
+                out.write(block)
+        os.replace(tmp, path)
+    except BaseException:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
+    return digest
+
+
 def canonical_manifest(entry: Optional[str], files: Dict[str, str]) -> bytes:
     """The exact bytes a manifest hashes over. Content only -- see module
     docstring on why nothing volatile may go in here."""
@@ -488,10 +523,15 @@ def _iter_stored(archive_root: Path, kind: str):
 
 
 def gc(archive_root, *, dry_run: bool = True, include_trash: bool = True) -> dict:
-    """Delete manifests and blobs no sidecar can reach (mark and sweep).
+    """Delete manifests and blobs nothing can reach (mark and sweep).
 
     Dry run by default: it reports what *would* go. Nothing outside
     .code/ is ever touched.
+
+    Only captured source lives here. Asset snapshots have their own store
+    (see nebula.assetstore) precisely so this sweep cannot reach them: when
+    the two shared one store, this function's liveness walk did not know
+    about assets and deleted bytes a session had pinned.
     """
     archive_root = Path(archive_root)
     live_manifests = set(referenced_manifests(archive_root, include_trash=include_trash))

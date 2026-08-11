@@ -150,6 +150,11 @@
       <div class="spacer"></div>
       <span class="app-arc" id="appArcLabel"></span>
       <span class="kind-badge hidden" id="kindBadge"></span>
+      <span class="user-badge hidden" id="userBadge"
+            title="You, in nebula:// refs — click to change">
+        <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="8" r="3.4"/><path d="M4.5 20a7.5 7.5 0 0 1 15 0"/></svg>
+        <span id="userBadgeName"></span>
+      </span>
       <span class="no-user hidden" id="noUserWarn" title="Click to set your name">no user set</span>
       <button class="theme-toggle" id="themeBtn">◐ Theme</button>
       <span class="wtitle-sr" id="wtitle"></span>
@@ -170,6 +175,7 @@
         <div class="rail-tabs">
           <button class="rtab on" id="tabSessions">Sessions</button>
           <button class="rtab" id="tabCollections">Collections</button>
+          <button class="rtab" id="tabAssets">Assets</button>
           <button class="rtab" id="tabViews">Searches</button>
         </div>
         <div class="rail-head" id="sessHead">
@@ -218,6 +224,16 @@
             <span class="open-link" id="newCollBtn" title="New collection">+ new</span>
           </div>
           <div class="rail-list" id="collList"></div>
+        </div>
+
+        <div class="rail-pane hidden" id="assetPane">
+          <div class="rail-head">
+            <span>Assets</span>
+            <span class="open-link" id="railAssetAdd" title="Bring files under management">+ add</span>
+          </div>
+          <div class="rail-note">Files you keep editing. Nebula records which
+            version each session used, and never flags them as modified.</div>
+          <div class="rail-list" id="assetRailList"></div>
         </div>
 
         <div class="rail-pane hidden" id="viewPane">
@@ -299,6 +315,44 @@
           <button class="tbtn" id="treeReload" title="Recompute">↻</button>
         </div>
 
+        <div class="toolbar asset-tools hidden" id="assetTools">
+          <span class="s-ico">
+            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><circle cx="11" cy="11" r="7"/><line x1="16.5" y1="16.5" x2="21" y2="21"/></svg>
+          </span>
+          <input id="assetSearch" class="idx-search" placeholder="Find an asset…" spellcheck="false" />
+          <div class="vdiv"></div>
+          <div class="seg">
+            <button class="tbtn" id="assetViewList" title="List view">
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><line x1="8" y1="6" x2="21" y2="6"/><line x1="8" y1="12" x2="21" y2="12"/><line x1="8" y1="18" x2="21" y2="18"/><line x1="3" y1="6" x2="3.01" y2="6"/><line x1="3" y1="12" x2="3.01" y2="12"/><line x1="3" y1="18" x2="3.01" y2="18"/></svg>
+            </button>
+            <button class="tbtn on" id="assetViewGrid" title="Grid view">
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/><rect x="14" y="14" width="7" height="7" rx="1"/></svg>
+            </button>
+          </div>
+          <div class="vdiv"></div>
+          <span class="check">Sort
+            <select id="assetSort">
+              <option value="recent" selected>Recently touched</option>
+              <option value="created">Recently added</option>
+              <option value="name">Name</option>
+              <option value="size">Size</option>
+            </select>
+          </span>
+          <div class="vdiv"></div>
+          <!-- Policy is a filter, not a place: you look for "the diode figure",
+               never for "my weekly-snapshot files". -->
+          <div class="chips" id="assetPolicyChips"></div>
+          <div class="spacer"></div>
+          <span class="asset-count" id="assetCount"></span>
+          <button class="tbtn" id="assetScanBtn" title="Rescan — pick up files renamed or edited outside Nebula">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12a9 9 0 1 1-2.64-6.36"/><path d="M21 4v5h-5"/></svg>
+          </button>
+          <button class="btn-primary" id="assetImportBtn" title="Bring files under management as assets">
+            <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>
+            Add assets…
+          </button>
+        </div>
+
         <div class="toolbar idx-tools hidden" id="idxTools">
           <div class="seg" id="idxTabs"></div>
           <div class="vdiv"></div>
@@ -345,6 +399,11 @@
         <div class="tree-area hidden" id="treeArea"></div>
 
         <div class="idx-area hidden" id="idxArea"></div>
+
+        <div class="asset-area hidden" id="assetArea">
+          <div class="asset-grid" id="assetGrid"></div>
+          <div class="asset-detail" id="assetDetail"></div>
+        </div>
 
         <div class="details">
           <div class="det-actions">
@@ -461,6 +520,71 @@
       <div class="dlg-actions">
         <button class="dbtn ghost" id="dlgCancel">Cancel</button>
         <button class="dbtn fill" id="dlgImport">Import</button>
+      </div>
+    </div>
+  </div>
+
+  <div class="scrim" id="assetImpScrim">
+    <div class="dialog wide" role="dialog" aria-modal="true" aria-labelledby="assetImpHead">
+      <div class="dlg-head row" id="assetImpHead"><span>Add assets</span>
+        <button class="p-btn" id="assetImpClose" title="Close">✕</button></div>
+      <div class="dlg-body scroll">
+        <div class="dlg-arc">into <b id="assetImpArchive"></b> — assets are files you keep
+          editing. Nebula never flags them as modified; it records which version each
+          session used.</div>
+        <div class="filelist" id="assetImpFiles"></div>
+
+        <!-- First and prominent: a figure's source data is knowable only now.
+             Tags and collections can be fixed next month; this cannot. -->
+        <div class="field emph">
+          <label>Derived from <span class="lbl-hint">what data is this built from?</span></label>
+          <input id="assetImpDerived" list="assetImpDerivedList" spellcheck="false"
+                 placeholder="S-0152/raw.csv,  postdoc|S-0152/raw.csv" />
+          <datalist id="assetImpDerivedList"></datalist>
+          <div class="note">Recorded permanently on the asset. This is the one field here
+            that cannot be reconstructed later.</div>
+        </div>
+
+        <div class="field">
+          <label>Snapshot policy</label>
+          <div id="assetImpPolicy"></div>
+          <div class="note" id="assetImpPolicyNote"></div>
+        </div>
+
+        <div class="field">
+          <label>Collection <span class="lbl-hint">optional</span></label>
+          <select id="assetImpColl"></select>
+        </div>
+        <div class="field">
+          <label>Origin <span class="lbl-hint">optional</span></label>
+          <input id="assetImpOrigin" placeholder="where did this come from? e.g. drawn by Jane" />
+        </div>
+        <label class="check"><input type="checkbox" id="assetImpMove" /> Move the files instead of copying them</label>
+      </div>
+      <div class="dlg-actions">
+        <div class="spacer"></div>
+        <button class="dbtn ghost" id="assetImpCancel">Cancel</button>
+        <button class="btn-primary" id="assetImpOk" title="⌘/Ctrl-Enter">Add assets</button>
+      </div>
+    </div>
+  </div>
+
+  <div class="scrim" id="assetCommitScrim">
+    <div class="dialog" role="dialog" aria-modal="true" aria-labelledby="assetCommitHead">
+      <div class="dlg-head" id="assetCommitHead">Save this version</div>
+      <div class="dlg-body">
+        <div class="dlg-arc">saving the current bytes of <b id="assetCommitName"></b></div>
+        <div class="field">
+          <label>Why is this version worth keeping? <span class="lbl-hint">optional</span></label>
+          <input id="assetCommitNote" placeholder="e.g. figure as submitted to APL" />
+        </div>
+        <div class="note">A saved version can be recovered later, and its checksum can be
+          quoted in your notes.</div>
+      </div>
+      <div class="dlg-actions">
+        <div class="spacer"></div>
+        <button class="dbtn ghost" id="assetCommitCancel">Cancel</button>
+        <button class="btn-primary" id="assetCommitOk">Save version</button>
       </div>
     </div>
   </div>

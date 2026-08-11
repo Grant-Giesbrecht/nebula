@@ -405,11 +405,17 @@ def op_check(args: Dict[str, Any]) -> Dict[str, Any]:
 def op_gc(args: Dict[str, Any]) -> Dict[str, Any]:
     """Sweep unreferenced captured source. Dry run unless told otherwise --
     the caller is expected to show the dry run first."""
-    from nebula import codestore
+    from nebula import assetstore, codestore
 
     root, _ = model.resolve(args["archive"])
-    res = codestore.gc(root, dry_run=not args.get("delete", False),
-                       include_trash=not args.get("ignore_trash", False))
+    dry = not args.get("delete", False)
+    trash = not args.get("ignore_trash", False)
+    res = codestore.gc(root, dry_run=dry, include_trash=trash)
+    # Asset versions are a separate store with separate liveness rules, so
+    # they are reported separately rather than folded into one total the
+    # caller cannot break down.
+    res["assets"] = assetstore.gc(root, dry_run=dry, include_trash=trash)
+    res["assets"]["human"] = model._human_size(res["assets"]["bytes"])
     res["human"] = model._human_size(res["bytes"])
     return res
 
@@ -709,7 +715,163 @@ def op_file_manager_name(args: Dict[str, Any]) -> Dict[str, Any]:
     return {"name": osutil.file_manager_name()}
 
 
+# -- assets ---------------------------------------------------------------
+
+def op_list_assets(args: Dict[str, Any]) -> List[Dict[str, Any]]:
+    return model.list_assets(
+        args["archive"], policy=args.get("policy", ""),
+        sort=args.get("sort", "recent"), query=args.get("query", ""))
+
+
+def op_asset_info(args: Dict[str, Any]) -> Dict[str, Any]:
+    return model.asset_info(args["archive"], args["asset_id"])
+
+
+def op_asset_preview(args: Dict[str, Any]) -> Dict[str, Any]:
+    return model.asset_preview(args["archive"], args["asset_id"])
+
+
+def op_asset_import_defaults(args: Dict[str, Any]) -> Dict[str, Any]:
+    return model.asset_import_defaults(args["archive"], args.get("paths") or [])
+
+
+def op_asset_import(args: Dict[str, Any]) -> Dict[str, Any]:
+    """Import one or more files as assets. Per-file failures are reported
+    rather than aborting the batch: a dialog that drops nine good files
+    because the tenth vanished is worse than one that says so."""
+    from nebula import assets as assets_mod
+
+    root, _ = model.resolve(args["archive"])
+    out, errors = [], []
+    for path in args.get("paths") or []:
+        try:
+            meta = assets_mod.import_asset(
+                root, path,
+                policy=args.get("policy") or None,
+                derived_from=args.get("derived_from") or None,
+                origin=args.get("origin") or None,
+                move=bool(args.get("move")),
+            )
+            out.append(meta.id)
+        except Exception as e:
+            errors.append({"path": path, "error": str(e)})
+
+    # Tags and collections are applied after import, because both are
+    # keyed on the asset id that import is what mints.
+    for asset_id in out:
+        for name in args.get("collections") or []:
+            try:
+                _collection_add_asset(root, name, asset_id)
+            except Exception as e:
+                errors.append({"path": asset_id, "error": str(e)})
+    return {"imported": out, "errors": errors}
+
+
+def _collection_add_asset(root, collection_name: str, asset_id: str) -> None:
+    from nebula import collection as collection_mod
+
+    collection_mod.add(root, collection_name, f"assets/{asset_id}")
+
+
+def op_asset_commit(args: Dict[str, Any]) -> Dict[str, Any]:
+    from nebula import assets as assets_mod
+
+    root, _ = model.resolve(args["archive"])
+    snap = assets_mod.commit(root, args["asset_id"], note=args.get("note"),
+                             force=bool(args.get("force")))
+    if snap is None:
+        return {"committed": False, "reason": "no change since the last snapshot"}
+    return {"committed": True, "sha256": snap.sha256, "at": snap.at}
+
+
+def op_asset_set_policy(args: Dict[str, Any]) -> Dict[str, Any]:
+    from nebula import assets as assets_mod
+
+    root, _ = model.resolve(args["archive"])
+    assets_mod.set_policy(
+        root, args["asset_id"], args.get("policy") or None,
+        period_days=args.get("period_days"),
+        max_snapshots=args.get("max_snapshots"),
+        max_snapshot_bytes=args.get("max_snapshot_bytes"))
+    return model.asset_info(root, args["asset_id"])
+
+
+def op_asset_scan(args: Dict[str, Any]) -> Dict[str, Any]:
+    from nebula import assets as assets_mod
+
+    root, _ = model.resolve(args["archive"])
+    ids = ([args["asset_id"]] if args.get("asset_id")
+           else assets_mod.list_assets(root))
+    changed = []
+    for asset_id in ids:
+        try:
+            state = assets_mod.scan(root, asset_id)
+        except assets_mod.AssetError:
+            continue
+        if state["renamed"] or state["changed"] or state["missing"]:
+            changed.append({"id": asset_id, **{
+                "renamed": list(state["renamed"]) if state["renamed"] else None,
+                "changed": state["changed"], "missing": state["missing"]}})
+    return {"scanned": len(ids), "changed": changed}
+
+
+def op_asset_reveal(args: Dict[str, Any]) -> Dict[str, Any]:
+    """Show the asset in the OS file manager. The storage layout is opaque
+    by design, so this is how a user gets to their file to edit it."""
+    from nebula import assets as assets_mod
+
+    root, _ = model.resolve(args["archive"])
+    path = assets_mod.live_file(root, args["asset_id"])
+    if path is None:
+        return {"ok": False, "reason": "file missing"}
+    return {"ok": osutil.reveal_path(path), "path": str(path)}
+
+
+def op_asset_open(args: Dict[str, Any]) -> Dict[str, Any]:
+    from nebula import assets as assets_mod
+
+    root, _ = model.resolve(args["archive"])
+    path = assets_mod.live_file(root, args["asset_id"])
+    if path is None:
+        return {"ok": False, "reason": "file missing"}
+    return {"ok": osutil.open_path(path), "path": str(path)}
+
+
+def op_asset_settings(args: Dict[str, Any]) -> Dict[str, Any]:
+    return model.asset_settings(args["archive"])
+
+
+def op_set_asset_settings(args: Dict[str, Any]) -> Dict[str, Any]:
+    try:
+        settings = model.set_asset_settings(
+            args["archive"], args.get("changes") or {})
+    except model.AssetSettingsError as e:
+        # A rejected setting is an ordinary outcome the form must explain,
+        # not a bridge failure -- so it comes back as data, not an exception.
+        return {"ok": False, "error": str(e)}
+    return {"ok": True, "settings": settings}
+
+
+def op_asset_settings_preview(args: Dict[str, Any]) -> Dict[str, Any]:
+    """How many `auto` assets would change policy under proposed settings."""
+    return model.asset_settings_preview(
+        args["archive"], args.get("changes") or {})
+
+
 OPS = {
+    "list_assets": op_list_assets,
+    "asset_info": op_asset_info,
+    "asset_preview": op_asset_preview,
+    "asset_import_defaults": op_asset_import_defaults,
+    "asset_import": op_asset_import,
+    "asset_commit": op_asset_commit,
+    "asset_set_policy": op_asset_set_policy,
+    "asset_scan": op_asset_scan,
+    "asset_reveal": op_asset_reveal,
+    "asset_open": op_asset_open,
+    "asset_settings": op_asset_settings,
+    "set_asset_settings": op_set_asset_settings,
+    "asset_settings_preview": op_asset_settings_preview,
     "ping": op_ping,
     "resolve": op_resolve,
     "list_sessions": op_list_sessions,

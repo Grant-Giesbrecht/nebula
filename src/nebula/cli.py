@@ -17,6 +17,10 @@ Usage:
     nebula replace <archive> <run_id> <file> <new_file> [--reason R] [--from NOTE]
     nebula rm-session <archive> <run_id> [--reason R] [--force]
     nebula reseal <archive> <run_id> <file>     # re-record checksum after an intended edit
+    nebula asset import <archive> <file>...     # bring a mutable file under management
+    nebula asset ls|show|path <archive> [id]
+    nebula asset commit <archive> <id> [-m ...] # save the current bytes as a version
+    nebula asset history|policy|scan <archive> <id>
     nebula check <archive> [--no-checksums]     # integrity report (fsck), with fix hints
     nebula hold <archive> <run_id> [DURATION]   # e.g. 2h; omit to hold until Ctrl-C
     nebula release <archive> <run_id>           # (alias: close) clear a hold
@@ -39,9 +43,9 @@ import sys
 import time
 from pathlib import Path
 
-from nebula.config import OVERWRITE_POLICIES
+from nebula.config import ASSET_POLICIES, OVERWRITE_POLICIES
 from nebula import check as check_mod
-from nebula import graph, index, manual
+from nebula import assets, config, graph, index, manual
 from nebula.registry import get_registry
 from nebula.sidecar import read_session_yaml
 # Import from the submodule directly: `nebula.session` the *name* is the
@@ -222,6 +226,231 @@ def cmd_show(args):
             print(f"    - {h.get('at', '?')}  {h.get('action')} {h.get('file') or ''}"
                   f"{by}{note}")
     conn.close()
+
+
+# ---------------------------------------------------------------------
+# Assets
+# ---------------------------------------------------------------------
+
+def _fmt_bytes(n) -> str:
+    if n is None:
+        return "-"
+    for unit in ("B", "KB", "MB", "GB", "TB"):
+        if n < 1024 or unit == "TB":
+            return f"{n:.0f}{unit}" if unit == "B" else f"{n:.1f}{unit}"
+        n /= 1024.0
+    return str(n)
+
+
+def _asset_id_arg(text: str) -> str:
+    """argparse type for asset ids. Accepts a bare number for the current
+    year, mirroring `nebula show arc 12` for sessions -- the id is opaque
+    but its shape is not, and typing the whole thing is friction the
+    session commands already decided not to impose."""
+    raw = (text or "").strip()
+    if assets.is_asset_id(raw):
+        return raw
+    if raw.isdigit():
+        year2 = datetime.datetime.now().year % 100
+        return assets.format_asset_id(year2, int(raw))
+    raise argparse.ArgumentTypeError(
+        f"not an asset id: {text!r} (expected AF-26-0017, or 0017 for the "
+        f"current year)")
+
+
+def cmd_asset_import(args):
+    root, _ = _resolve_archive_cli(args.archive)
+    settings = config.read_settings(root, apply_env=False)
+    try:
+        for f in args.files:
+            size = Path(f).stat().st_size
+            meta = assets.import_asset(
+                root, f, name=args.dest_name, policy=args.policy,
+                derived_from=args.derived_from, origin=args.origin,
+                move=args.move,
+            )
+            resolved = meta.effective_policy(settings)
+            # Say which policy it landed on and why, so the size ladder is
+            # something the user learns rather than something that happens
+            # to them.
+            why = f"auto -> {resolved}, {_fmt_bytes(size)}" if args.policy is None \
+                else resolved
+            print(f"{meta.id}  {meta.name}  [{why}]")
+    except (assets.AssetError, OSError, ValueError) as e:
+        print(f"error: {e}", file=sys.stderr)
+        sys.exit(1)
+
+
+def cmd_asset_ls(args):
+    root, _ = _resolve_archive_cli(args.archive)
+    settings = config.read_settings(root, apply_env=False)
+    rows = []
+    for asset_id in assets.list_assets(root):
+        try:
+            meta = assets.read_asset(root, asset_id)
+        except assets.AssetError:
+            continue
+        policy = meta.effective_policy(settings)
+        if args.policy and policy != args.policy:
+            continue
+        rows.append((meta, policy))
+
+    if args.sort == "name":
+        rows.sort(key=lambda r: (r[0].name or "").lower())
+    elif args.sort == "size":
+        rows.sort(key=lambda r: r[0].size or 0, reverse=True)
+    else:
+        # Recency is the default because assets are re-used, not
+        # discovered: what you touched last is usually what you want.
+        rows.sort(key=lambda r: r[0].scanned_at or r[0].created, reverse=True)
+
+    if not rows:
+        print("no assets")
+        return
+    for meta, policy in rows:
+        kept = sum(1 for s in meta.snapshots if not s.pending_gc)
+        marker = "*" if meta.policy == "auto" else ""
+        print(f"{meta.id}  {(meta.name or '?'):40.40} "
+              f"{_fmt_bytes(meta.size):>9}  {policy + marker:14} {kept} snap")
+    print(f"\n{len(rows)} asset(s)   (* = auto, resolved from size)",
+          file=sys.stderr)
+
+
+def cmd_asset_show(args):
+    root, _ = _resolve_archive_cli(args.archive)
+    settings = config.read_settings(root, apply_env=False)
+    try:
+        meta = assets.read_asset(root, args.asset_id)
+    except assets.AssetError as e:
+        print(f"error: {e}", file=sys.stderr)
+        sys.exit(1)
+
+    path = assets.live_file(root, meta.id)
+    print(f"{meta.id}  {meta.name}")
+    print(f"  path:     {path or '(missing on disk)'}")
+    print(f"  size:     {_fmt_bytes(meta.size)}")
+    print(f"  sha256:   {(meta.sha256 or '-')[:16]}...")
+    print(f"  created:  {meta.created}"
+          + (f" by {meta.imported_by}" if meta.imported_by else ""))
+    declared = meta.policy or assets.AUTO_ASSET_POLICY
+    resolved = meta.effective_policy(settings)
+    print(f"  policy:   {declared}"
+          + (f" -> {resolved}" if declared == "auto" else ""))
+    if resolved == "periodic":
+        print(f"  period:   every {meta.effective_period_days(settings)} day(s)")
+    for label, val, dflt in (
+        ("max snaps", meta.max_snapshots, settings.asset_max_snapshots),
+        ("max bytes", meta.max_snapshot_bytes, settings.asset_max_snapshot_bytes),
+    ):
+        shown = val if val is not None else dflt
+        if shown:
+            src = "" if val is not None else " (archive default)"
+            print(f"  {label}: {shown}{src}")
+    if meta.origin:
+        print(f"  origin:   {meta.origin}")
+    for ref in meta.derived_from:
+        print(f"  <- {_fmt_ref_row_dict(ref)}")
+    if meta.renames:
+        print("  renames:")
+        for r in meta.renames:
+            print(f"    - {r.get('at', '?')}  {r.get('from')} -> {r.get('to')}")
+    kept = sum(1 for s in meta.snapshots if not s.pending_gc)
+    print(f"  snapshots: {len(meta.snapshots)} ({kept} retained)")
+
+
+def _fmt_ref_row_dict(d) -> str:
+    archive = d.get("archive") or "(local)"
+    sess = d.get("session") or "(same session)"
+    file = d.get("file") or "(whole session)"
+    return f"{archive}|{sess}/{file}"
+
+
+def cmd_asset_commit(args):
+    root, _ = _resolve_archive_cli(args.archive)
+    try:
+        snap = assets.commit(root, args.asset_id, note=args.note,
+                             force=args.force)
+    except assets.AssetError as e:
+        print(f"error: {e}", file=sys.stderr)
+        sys.exit(1)
+    if snap is None:
+        print("no change since the last snapshot -- nothing committed")
+        return
+    # Print the full sha: the stated use is quoting it in notes alongside
+    # the filename, and a truncated hash is not quotable.
+    print(f"committed {args.asset_id} @ {snap.sha256}")
+
+
+def cmd_asset_history(args):
+    root, _ = _resolve_archive_cli(args.archive)
+    try:
+        snaps = assets.history(root, args.asset_id)
+    except assets.AssetError as e:
+        print(f"error: {e}", file=sys.stderr)
+        sys.exit(1)
+    if not snaps:
+        print("no snapshots")
+        return
+    for s in snaps:
+        flag = " (evicted, pending gc)" if s.pending_gc else ""
+        by = f" by {s.by}" if s.by else ""
+        note = f" -- {s.note}" if s.note else ""
+        print(f"{s.at}  {s.sha256[:12]}  {_fmt_bytes(s.bytes):>9}  "
+              f"{s.trigger}{by}{note}{flag}")
+
+
+def cmd_asset_policy(args):
+    root, _ = _resolve_archive_cli(args.archive)
+    settings = config.read_settings(root, apply_env=False)
+    try:
+        meta = assets.set_policy(
+            root, args.asset_id, args.policy,
+            period_days=args.period_days,
+            max_snapshots=args.max_snapshots,
+            max_snapshot_bytes=args.max_snapshot_bytes,
+        )
+    except assets.AssetError as e:
+        print(f"error: {e}", file=sys.stderr)
+        sys.exit(1)
+    resolved = meta.effective_policy(settings)
+    declared = meta.policy or assets.AUTO_ASSET_POLICY
+    print(f"{meta.id} policy: {declared}"
+          + (f" -> {resolved}" if declared == "auto" else ""))
+
+
+def cmd_asset_scan(args):
+    root, _ = _resolve_archive_cli(args.archive)
+    ids = [args.asset_id] if args.asset_id else assets.list_assets(root)
+    changed = 0
+    for asset_id in ids:
+        try:
+            state = assets.scan(root, asset_id)
+        except assets.AssetError as e:
+            print(f"error: {e}", file=sys.stderr)
+            continue
+        if state["missing"]:
+            print(f"{asset_id}: file missing on disk")
+            changed += 1
+        elif state["renamed"]:
+            old, new = state["renamed"]
+            print(f"{asset_id}: renamed {old} -> {new}")
+            changed += 1
+        elif state["changed"]:
+            print(f"{asset_id}: edited ({state['sha256'][:12]})")
+            changed += 1
+    print(f"scanned {len(ids)} asset(s), {changed} changed", file=sys.stderr)
+
+
+def cmd_asset_path(args):
+    """Print the asset's path and nothing else, so it composes:
+    `open $(nebula asset path arc 17)`. The storage layout is opaque by
+    design, which makes this the supported way to open one by hand."""
+    root, _ = _resolve_archive_cli(args.archive)
+    path = assets.live_file(root, args.asset_id)
+    if path is None:
+        print(f"error: {args.asset_id} has no file on disk", file=sys.stderr)
+        sys.exit(1)
+    print(path)
 
 
 def _fmt_ref_row(row) -> str:
@@ -489,10 +718,15 @@ def cmd_annotate(args):
 
 
 def cmd_gc(args):
-    """Sweep captured source nothing references any more."""
-    from nebula import codestore
+    """Sweep captured source, and asset versions, that nothing references.
+
+    The two stores are swept separately because their liveness rules
+    differ -- see nebula.assetstore on why they are not one store.
+    """
+    from nebula import assetstore, codestore
 
     root, _ = _resolve_archive_cli(args.archive)
+    _gc_assets(root, args)
     res = codestore.gc(root, dry_run=not args.delete,
                        include_trash=not args.ignore_trash)
     n = len(res["manifests"]) + len(res["blobs"])
@@ -506,6 +740,26 @@ def cmd_gc(args):
           f"({kb:.1f} KB)")
     if res["dry_run"]:
         print("(dry run -- pass --delete to actually remove them)")
+
+
+def _gc_assets(root, args) -> None:
+    from nebula import assetstore
+
+    res = assetstore.gc(root, dry_run=not args.delete,
+                        include_trash=not args.ignore_trash)
+    if res["skipped"]:
+        # Never let a partial sweep read as a clean one: the blobs spared
+        # are exactly the ones whose safety could not be established.
+        print(f"warning: asset blob collection skipped -- {res['skipped']}",
+              file=sys.stderr)
+        print(f"    fix: repair the asset record (see 'nebula check "
+              f"{args.archive}'), then re-run", file=sys.stderr)
+        return
+    print(f"assets: {res['live_blobs']} version(s) still referenced")
+    if res["blobs"]:
+        verb = "would delete" if res["dry_run"] else "deleted"
+        print(f"{verb}: {len(res['blobs'])} asset version(s) "
+              f"({res['bytes'] / 1024:.1f} KB)")
 
 
 def cmd_hold(args):
@@ -1290,6 +1544,73 @@ def main(argv=None):
     p.add_argument("--user", help="who owns this archive, for nebula:// URIs "
                                   "(omit for your own archives)")
     p.set_defaults(func=cmd_register)
+
+    # Assets get a nested subparser rather than the flat `asset-commit`
+    # spelling used elsewhere: there are enough verbs that flattening them
+    # would double the top-level command list for one noun.
+    p = sub.add_parser("asset", help="manage mutable assets (files you keep editing)")
+    asub = p.add_subparsers(dest="asset_cmd", required=True)
+
+    def _asset_parser(name, help_text):
+        q = asub.add_parser(name, help=help_text)
+        q.add_argument("archive", help="registered archive name, or a literal path")
+        return q
+
+    q = _asset_parser("import", "bring file(s) under management as assets")
+    q.add_argument("files", nargs="+", help="file(s) to import")
+    q.add_argument("--as", dest="dest_name", help="store under a different name")
+    q.add_argument("--policy", choices=ASSET_POLICIES,
+                   help="snapshot policy (default: auto, from the size ladder)")
+    q.add_argument("--from", dest="origin", help="free-text note on where it came from")
+    q.add_argument("--derived-from", nargs="*", dest="derived_from",
+                   help="ref(s) this asset was derived from -- capture this now, "
+                        "it cannot be reconstructed later")
+    q.add_argument("--move", action="store_true", help="move instead of copy")
+    q.set_defaults(func=cmd_asset_import)
+
+    q = _asset_parser("ls", "list assets")
+    q.add_argument("--policy", choices=ASSET_POLICIES,
+                   help="only assets whose effective policy is this")
+    q.add_argument("--sort", choices=("recent", "name", "size"), default="recent")
+    q.set_defaults(func=cmd_asset_ls)
+
+    q = _asset_parser("show", "show one asset in full")
+    q.add_argument("asset_id", type=_asset_id_arg,
+                   help="asset id -- AF-26-0017, or 0017 for the current year")
+    q.set_defaults(func=cmd_asset_show)
+
+    q = _asset_parser("path", "print an asset's path on disk (for opening it)")
+    q.add_argument("asset_id", type=_asset_id_arg)
+    q.set_defaults(func=cmd_asset_path)
+
+    q = _asset_parser("commit", "save the asset's current bytes as a snapshot")
+    q.add_argument("asset_id", type=_asset_id_arg)
+    q.add_argument("-m", "--message", dest="note",
+                   help="why this version is worth keeping")
+    q.add_argument("--force", action="store_true",
+                   help="snapshot even past the size ceiling, or re-store "
+                        "bytes already stored")
+    q.set_defaults(func=cmd_asset_commit)
+
+    q = _asset_parser("history", "list an asset's stored versions")
+    q.add_argument("asset_id", type=_asset_id_arg)
+    q.set_defaults(func=cmd_asset_history)
+
+    q = _asset_parser("policy", "show or change one asset's snapshot policy")
+    q.add_argument("asset_id", type=_asset_id_arg)
+    q.add_argument("policy", nargs="?", choices=ASSET_POLICIES)
+    q.add_argument("--period-days", type=int,
+                   help="gap between periodic snapshots (-1 to use the archive default)")
+    q.add_argument("--max-snapshots", type=int,
+                   help="retained snapshot count (-1 to use the archive default)")
+    q.add_argument("--max-snapshot-bytes", type=int,
+                   help="retained snapshot bytes (-1 to use the archive default)")
+    q.set_defaults(func=cmd_asset_policy)
+
+    q = _asset_parser("scan", "reconcile assets with what is on disk")
+    q.add_argument("asset_id", nargs="?", type=_asset_id_arg,
+                   help="limit to one asset (default: all)")
+    q.set_defaults(func=cmd_asset_scan)
 
     p = sub.add_parser("whoami", help="show or set your nebula user name (used in URIs)")
     p.add_argument("--set", dest="set_user", metavar="NAME",
