@@ -26,3 +26,24 @@ def isolated_identity(tmp_path_factory, monkeypatch):
     monkeypatch.setenv(
         "NEBULA_IDENTITY",
         str(tmp_path_factory.mktemp("identity") / "identity.yaml"))
+
+
+@pytest.fixture(autouse=True)
+def isolated_registry(tmp_path_factory, monkeypatch):
+    """Give each test its own archive registry.
+
+    `registry._default_registry` is a process-wide cache, so without this a
+    test that registers an archive leaks it into every test that runs
+    after -- and the first one to load it would otherwise read the
+    developer's real ~/.nebula/archives.yaml. Several tests already reset
+    the global by hand; doing it here means they no longer have to, and
+    tests that never thought about it stop being order-dependent.
+    """
+    from nebula import registry as registry_mod
+
+    monkeypatch.setenv(
+        "NEBULA_REGISTRY",
+        str(tmp_path_factory.mktemp("registry") / "archives.yaml"))
+    monkeypatch.setattr(registry_mod, "_default_registry", None)
+    yield
+    registry_mod._default_registry = None

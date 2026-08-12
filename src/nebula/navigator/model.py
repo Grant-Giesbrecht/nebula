@@ -853,6 +853,9 @@ def _tree_node(archive_root: Path, label: str, run_id: str, filename: str,
     return {
         "ref": f"{run_id}/{filename}" if filename else run_id,
         "run_id": run_id, "filename": filename, "archive": label,
+        # Where that archive lives, so a walk that crosses into it can open
+        # its index. None when we could not reach it at all.
+        "root": str(archive_root) if resolved else None,
         "session_path": str(session_dir) if session_dir else None,
         "path": str(path) if path else None,
         "exists": bool(path and path.is_file()),
@@ -878,7 +881,20 @@ def provenance_tree(archive, run_id: str, filename: Optional[str] = None, *,
     at least admit to one.
     """
     archive_root, label = resolve(archive)
-    lin = _Lineage(archive_root)
+    # One _Lineage per archive the walk reaches, opened lazily. Upstream
+    # edges may name another archive, and stopping at the boundary would
+    # draw a chain that looks finished when it is not.
+    lineages: Dict[str, _Lineage] = {label: _Lineage(archive_root)}
+    lin = lineages[label]
+
+    def lineage_for(node_label: str, node_root: Path) -> Optional[_Lineage]:
+        if node_label not in lineages:
+            try:
+                lineages[node_label] = _Lineage(node_root)
+            except Exception:   # noqa: BLE001 -- unreadable is "cannot follow"
+                return None
+        return lineages[node_label]
+
     try:
         def walk(node: dict, direction: str, left: int, seen: set) -> None:
             # `seen` is shared across the whole branch, not per path. That
@@ -886,25 +902,45 @@ def provenance_tree(archive, run_id: str, filename: Optional[str] = None, *,
             # indented tree cannot show that two paths reconverge, so the
             # second appearance is marked instead of being expanded again --
             # which additionally stops a wide DAG from blowing up.
-            key = (node["run_id"], node["filename"])
+            # Keyed by archive too: two archives can hold the same session
+            # id, and treating them as one node would silently merge two
+            # people's data into one chain.
+            key = (node["archive"], node["run_id"], node["filename"])
             if key in seen:
                 node["seen"] = True
                 return
             seen.add(key)
+
+            node_root = Path(node["root"]) if node.get("root") else archive_root
+            here = lineage_for(node["archive"], node_root)
+            if here is None:
+                node["truncated"] = True
+                node["note"] = node.get("note") or "archive could not be read"
+                return
+            edge_key = (node["run_id"], node["filename"])
             if left <= 0:
-                edges = (lin.parents(*key) if direction == "up"
-                         else lin.children(*key))
+                edges = (here.parents(*edge_key) if direction == "up"
+                         else here.children(*edge_key))
                 node["truncated"] = bool(edges)
                 return
             if direction == "up":
-                for ref in lin.parents(*key):
-                    child = _parent_node(archive_root, label, node["run_id"], ref)
+                for ref in here.parents(*edge_key):
+                    child = _parent_node(node_root, node["archive"],
+                                         node["run_id"], ref)
                     node["children"].append(child)
-                    if child["resolved"] and child["filename"]:
+                    if child["filename"] and child["resolved"]:
                         walk(child, "up", left - 1, seen)
+                    elif child["filename"]:
+                        # Unreachable archive: say the chain continues and
+                        # that we cannot follow it, rather than drawing a
+                        # leaf that reads as the end of the story.
+                        child["truncated"] = True
             else:
-                for edge in lin.children(*key):
-                    child = _tree_node(archive_root, label,
+                # Downstream is same-archive by construction: nothing
+                # records back-links, so another archive's dependents are
+                # not discoverable from here. See `lineage`.
+                for edge in here.children(*edge_key):
+                    child = _tree_node(node_root, node["archive"],
                                        edge["run_id"], edge["filename"])
                     node["children"].append(child)
                     walk(child, "down", left - 1, seen)
@@ -936,9 +972,13 @@ def provenance_tree(archive, run_id: str, filename: Optional[str] = None, *,
                 branch["item"]["truncated_down"] = down["truncated"]
             out["branches"].append(branch)
         out["session"] = _session_summary(archive_root, run_id)
+        # Which archives the walk actually entered, so a view can say "this
+        # chain crosses into someone else's archive" without re-deriving it.
+        out["archives"] = sorted(lineages)
         return out
     finally:
-        lin.close()
+        for opened in lineages.values():
+            opened.close()
 
 
 def _parent_node(archive_root: Path, label: str, from_run: str, ref: dict) -> dict:

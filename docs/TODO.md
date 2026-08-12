@@ -80,6 +80,36 @@ in `main.js`, around the existing panels) covering the seven settings:
 
 ---
 
+# Quality of life
+
+Not urgent, nothing blocked on them, and none gets harder by waiting.
+
+## Tag vocabulary
+
+**Status: DEFERRED.** Raised 2026-08-01, deferred again 2026-08-12.
+
+`tags.py` already prevents divergence at *entry* time: `input_tag()` lets a
+script's prompt browse, search and TAB-complete the archive's existing tags
+so the user reuses `warmup` instead of inventing `warm-up`. Nothing repairs
+divergence that already happened.
+
+Wanted, roughly in order of value:
+
+- **Canonical tags and aliases** — declare `warmup` canonical and `warm-up`
+  an alias, so old sessions stay findable without rewriting history.
+- **A GUI selector.** The completion is CLI-only, so tags typed in the
+  Navigator bypass the one safeguard that exists. Arguably the most
+  valuable item here, since it stops *new* divergence.
+- **"Never show/use tag X"** — retire a tag without deleting it.
+- **"Replace X with Y"** — the actual repair. The design question is
+  whether it rewrites `session.yaml` files or keeps a mapping resolved at
+  read time; the second is reversible and the first is not.
+
+Deferred because it is a quality-of-life fix on data already recorded, and
+aliases can be applied retroactively — waiting costs nothing.
+
+---
+
 ## Index
 
 Larger questions live in their own documents:

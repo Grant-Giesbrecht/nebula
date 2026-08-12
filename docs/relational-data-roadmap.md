@@ -222,12 +222,21 @@ present.
 
 ## Open questions
 
-- **Cross-archive traversal** — `graph.py` needs an index and the registry.
-  Show unreachable archives as "unresolved" nodes (as `_resolve_ref` already
-  does), or hide them?
-- **Tag vocabulary** (deferred by Grant, 2026-08-01): canonical tags,
-  aliases, a GUI selector, plus "never show/use tag X" and "replace X with
-  Y" rules.
+- ~~**Cross-archive traversal**~~ — **DONE** (2026-08-12). Grant chose
+  *show* over *hide*: a chain that stops at a boundary must not look
+  finished. `graph.py` already did this for the CLI; the gap was the GUI
+  tree, which stopped at the first foreign ref even when that archive was
+  reachable. `provenance_tree` now opens one `_Lineage` per archive it
+  enters, marks an unreachable one `resolved: false` with the reason
+  (unregistered vs unmounted) *and* `truncated: true` so it reads as "the
+  trail continues and you cannot follow it". Downstream stays same-archive
+  by construction — nothing records back-links.
+
+  The subtle part: `seen` is now keyed on (archive, run_id, filename). Two
+  archives routinely mint the same session id, and the old key would have
+  silently merged two people's data into one chain.
+- **Tag vocabulary** — deferred again 2026-08-12; moved to the quality-of-life
+  section of `TODO.md` with the reasoning.
 - **`nebula rename`** — the one organisational fix that requires touching
   refs. Doable in the project's spirit (rewrite same-archive refs, record the
   old name like `original_name` already does for duplicates, log it in
