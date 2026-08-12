@@ -62,6 +62,8 @@ def _item_to_dict(it: "model.Item") -> Dict[str, Any]:
         "has_artifact": it.has_artifact,
         "has_sidecar": it.has_sidecar,
         "source": it.source,
+        "source_recorded": it.source_recorded,
+        "source_facet": model.item_source_facet(it),
         "origin": it.origin,
         "size": it.size,
         "size_human": model._human_size(it.size) if it.size is not None else None,
@@ -150,6 +152,7 @@ def op_search_items(args: Dict[str, Any]) -> Dict[str, Any]:
         fields=args.get("fields") or None,
         date_from=args.get("date_from") or None,
         date_to=args.get("date_to") or None,
+        sources=args.get("sources") or None,
         limit=int(args.get("limit") or 1000),
     )
     return _search_result_to_dict(res)

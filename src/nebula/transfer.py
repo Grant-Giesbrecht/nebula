@@ -131,6 +131,10 @@ class TransferPlan:
     #: decides to take someone's data in is also the moment they are told
     #: that the name attached to it is unverified.
     source_owner: dict = field(default_factory=dict)
+    #: Same-archive refs in the source that name nothing, with suggested
+    #: replacements. Set `chosen` on an entry to have merge apply it. See
+    #: `_plan_repairs`.
+    repairs: List[dict] = field(default_factory=list)
 
     @property
     def bytes(self) -> int:
@@ -157,6 +161,7 @@ class TransferPlan:
             "skipped": list(self.skipped),
             "warnings": list(self.warnings),
             "source_owner": dict(self.source_owner),
+            "repairs": [dict(r) for r in self.repairs],
             "n_sessions": len(self.sessions),
             "n_files": sum(len(s.files) for s in self.sessions),
             "bytes": self.bytes,
@@ -633,7 +638,107 @@ def plan_merge(source, dest) -> TransferPlan:
     plan.manifests = _manifests_for(src_root, {s.run_id: set() for s in plan.sessions})
     _plan_collections(plan, src_root, dst_root)
     _warn_about_strays(plan, src_root)
+    _plan_repairs(plan, src_root)
     return plan
+
+
+def _plan_repairs(plan: TransferPlan, src_root: Path) -> None:
+    """Find same-archive refs that name nothing, and suggest replacements.
+
+    Refs get written by hand while an intake archive is being filled in, so
+    typos are ordinary. Merge is the natural moment to fix them: the
+    archive is being reviewed anyway, and every ref is about to be rewritten
+    for the id reallocation regardless -- so repair costs one extra lookup
+    rather than a second pass over the same files.
+
+    Only refs that fail to resolve are offered. A typo that happens to land
+    on a real session is indistinguishable from an intentional ref and is
+    left alone; that is the argument for check digits on ids, noted in
+    docs/identity-trust-roadmap.md.
+
+    Deliberately merge-only. `adopt` reads a fragment, whose refs are its
+    author's statements about their own archive -- "correcting" those would
+    falsify what they wrote, not fix it.
+    """
+    import difflib
+
+    known: Dict[str, Set[str]] = {}
+    for session_dir in _iter_source_sessions(src_root):
+        try:
+            meta = read_session_yaml(session_dir)
+        except Exception:       # noqa: BLE001
+            continue
+        known[meta.run_id] = set(_session_files(session_dir))
+    if not known:
+        return
+
+    def suggest(ref: Ref, home: str) -> Optional[dict]:
+        session = ref.session or home
+        if session not in known:
+            near = difflib.get_close_matches(session, list(known), n=3, cutoff=0.6)
+            # Keep only candidates that also hold the referenced file, so a
+            # suggestion is never one the user would have to reject anyway.
+            if ref.file:
+                near = [c for c in near if ref.file in known[c]] or near
+            return {"problem": "no such session", "session": session,
+                    "candidates": [format_ref(Ref(session=c, file=ref.file))
+                                   for c in near]}
+        if ref.file and ref.file not in known[session]:
+            near = difflib.get_close_matches(ref.file, list(known[session]),
+                                             n=3, cutoff=0.6)
+            return {"problem": "no such file in that session", "session": session,
+                    "candidates": [format_ref(Ref(
+                        session=None if ref.session is None else session, file=c))
+                        for c in near]}
+        return None
+
+    for sp in plan.sessions:
+        try:
+            meta = read_session_yaml(sp.path)
+        except Exception:       # noqa: BLE001
+            continue
+        for rr in meta.related_run_refs():
+            if rr.archive is not None:
+                continue
+            got = suggest(rr, sp.run_id)
+            if got:
+                plan.repairs.append(dict(
+                    got, run_id=sp.run_id, file=None, field="related_runs",
+                    ref=format_ref(rr), chosen=None))
+        for artifact_name in sp.files:
+            artifact = sp.path / artifact_name
+            try:
+                sc = read_sidecar(artifact)
+            except Exception:   # noqa: BLE001
+                continue
+            for ref in sc.derived_from_refs():
+                if ref.archive is not None or ref.asset:
+                    continue
+                got = suggest(ref, sp.run_id)
+                if got:
+                    plan.repairs.append(dict(
+                        got, run_id=sp.run_id, file=artifact_name,
+                        field="derived_from", ref=format_ref(ref), chosen=None))
+
+
+def _iter_source_sessions(src_root: Path):
+    from nebula.index import _iter_session_dirs
+    return _iter_session_dirs(src_root)
+
+
+def accept_unambiguous_repairs(plan: TransferPlan) -> int:
+    """Choose the only candidate wherever there is exactly one.
+
+    Used by `--repair`. One candidate means the guess is forced, which is
+    the only case safe to take without a human looking: with two, picking
+    the closest string would be nebula deciding what the user meant.
+    """
+    n = 0
+    for entry in plan.repairs:
+        if entry.get("chosen") is None and len(entry.get("candidates") or []) == 1:
+            entry["chosen"] = entry["candidates"][0]
+            n += 1
+    return n
 
 
 def _plan_collections(plan: TransferPlan, src_root: Path, dst_root: Path) -> None:
@@ -724,10 +829,12 @@ def merge(source, dest, *, plan: Optional[TransferPlan] = None,
             raise TransferError(warning)
 
     rename = {s.run_id: s.new_run_id for s in plan.sessions}
+    repairs = _repairs_by_session(plan)
     for sp in plan.sessions:
         target = _copy_session(sp, dst_root, keep_id=False, verify=verify)
         _rewrite_session(target, sp.new_run_id, rename,
-                         source_label=plan.source, dest_label=plan.dest)
+                         source_label=plan.source, dest_label=plan.dest,
+                         repairs=repairs.get(sp.run_id))
         _record_import(target, sp, plan)
         _mark_merged(sp.path, f"{plan.dest}|{sp.new_run_id}")
 
@@ -745,15 +852,27 @@ def merge(source, dest, *, plan: Optional[TransferPlan] = None,
 
 
 def _rewrite_session(session_dir: Path, new_run_id: str, rename: Dict[str, str],
-                     *, source_label: str, dest_label: str) -> None:
+                     *, source_label: str, dest_label: str,
+                     repairs: Optional[Dict[Tuple[Optional[str], str], str]] = None
+                     ) -> None:
     """Point a copied session's references at their new ids.
 
-    Two rewrites happen here. Ids that changed are remapped. And a ref that
-    named the *destination* archive explicitly -- an intake on a lab machine
+    Three rewrites happen here, and the order matters. A repair chosen at
+    plan time is applied *first*, because the user picked a candidate named
+    in source terms (I-26-0009) which still has to go through the rename
+    below. Then ids that changed are remapped. And a ref that named the
+    *destination* archive explicitly -- an intake on a lab machine
     referring back to the main archive -- collapses to a local ref, since
     after the merge it is local.
     """
-    def fix(ref: Ref) -> Ref:
+    repairs = repairs or {}
+
+    def fix(ref: Ref, where: Optional[str]) -> Ref:
+        chosen = repairs.get((where, format_ref(ref)))
+        if chosen:
+            got = parse_ref(chosen)
+            ref = Ref(archive=got.archive, session=got.session, file=got.file,
+                      user=got.user)
         archive = ref.archive
         if archive is not None and archive == dest_label:
             archive = None                      # now the same archive
@@ -765,19 +884,36 @@ def _rewrite_session(session_dir: Path, new_run_id: str, rename: Dict[str, str],
     meta = read_session_yaml(session_dir)
     meta.run_id = new_run_id
     if meta.related_runs:
-        meta.related_runs = [_ref_dict(fix(r)) for r in meta.related_run_refs()]
+        meta.related_runs = [_ref_dict(fix(r, None)) for r in meta.related_run_refs()]
     write_session_yaml(session_dir, meta)
 
     for sidecar in sorted(session_dir.glob(f"*{SIDECAR_SUFFIX}")):
-        artifact = session_dir / sidecar.name[: -len(SIDECAR_SUFFIX)]
+        name = sidecar.name[: -len(SIDECAR_SUFFIX)]
+        artifact = session_dir / name
         try:
             sc = read_sidecar(artifact)
         except Exception:       # noqa: BLE001
             continue
         if not sc.derived_from:
             continue
-        sc.derived_from = [_ref_dict(fix(r)) for r in sc.derived_from_refs()]
+        sc.derived_from = [_ref_dict(fix(r, name)) for r in sc.derived_from_refs()]
         write_sidecar(artifact, sc)
+
+
+def _repairs_by_session(plan: TransferPlan) -> Dict[str, Dict[Tuple, str]]:
+    """Group the plan's accepted repairs for `_rewrite_session`.
+
+    Keyed by (artifact filename or None for related_runs, original ref), so
+    the same mistyped ref in two files can be repaired differently -- they
+    are separate decisions and the plan records them separately.
+    """
+    out: Dict[str, Dict[Tuple, str]] = {}
+    for entry in plan.repairs:
+        if not entry.get("chosen"):
+            continue
+        out.setdefault(entry["run_id"], {})[(entry["file"], entry["ref"])] = \
+            entry["chosen"]
+    return out
 
 
 def _ref_dict(ref: Ref) -> dict:

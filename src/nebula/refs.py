@@ -49,6 +49,13 @@ URI_SCHEME = "nebula://"
 #: token ("S-26-0152" vs "diode.graf") when there's no '/' to split on.
 SESSION_PREFIX = "S-"
 
+#: Every prefix a session id can carry, kept in sync with config.KIND_PREFIX
+#: (not imported, to keep this module free of config). Intake archives mint
+#: I- ids, so a bare "I-26-0001" -- an ordinary thing to write in
+#: related_runs while filling one in -- has to read as a session and not as
+#: a filename in the current one.
+SESSION_PREFIXES = ("S-", "I-")
+
 #: Path segment marking a collection inside an archive. A session id can
 #: never look like this, so the two namespaces can share a URI space.
 COLLECTIONS_SEGMENT = "collections"
@@ -65,7 +72,8 @@ ASSETS_SEGMENT = "assets"
 #: constant is not worth a cycle.
 ASSET_PREFIX = "AF-"
 
-_SESSION_RE = re.compile(rf"^{re.escape(SESSION_PREFIX)}\d{{2}}-\d+$")
+_SESSION_RE = re.compile(
+    "^(?:" + "|".join(re.escape(p) for p in SESSION_PREFIXES) + r")\d{2}-\d+$")
 _ASSET_RE = re.compile(rf"^{re.escape(ASSET_PREFIX)}\d{{2}}-\d+$")
 
 

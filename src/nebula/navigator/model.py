@@ -72,6 +72,12 @@ class Item:
     has_artifact: bool
     has_sidecar: bool
     source: Optional[str] = None       # "script" | "external" | "?" (unreadable)
+    #: Whether the sidecar actually *said* so. A sidecar written before the
+    #: field existed reads as "script" because that is the default, which
+    #: looks like a recorded fact and is not one. Carried on the item so a
+    #: filter can keep the two apart, as the detail panel's "script?" chip
+    #: already does.
+    source_recorded: bool = False
     origin: Optional[str] = None
     size: Optional[int] = None         # bytes, if the artefact is present
     sha256: Optional[str] = None
@@ -191,6 +197,33 @@ def frozen_sessions(archive) -> List[SessionInfo]:
     return [s for s in list_sessions(archive) if not _is_appendable(s)]
 
 
+#: The three answers "how did this file get here?" can have. `unrecorded`
+#: is not a value any sidecar holds -- it means the sidecar predates the
+#: field, so "script" is a default rather than a statement.
+SOURCE_FACETS = ("script", "external", "unrecorded")
+
+
+def _sidecar_states_source(sidecar_path: Path) -> bool:
+    """Whether a sidecar actually records produced_by.source.
+
+    Read from the raw JSON rather than the parsed SidecarMeta, because
+    parsing is exactly what fills the default in and loses the distinction.
+    """
+    try:
+        with open(sidecar_path) as f:
+            raw = json.load(f)
+    except (OSError, ValueError):
+        return False
+    return "source" in ((raw or {}).get("produced_by") or {})
+
+
+def item_source_facet(item: "Item") -> str:
+    """Which SOURCE_FACET an item falls in."""
+    if not item.source_recorded:
+        return "unrecorded"
+    return item.source if item.source in ("script", "external") else "unrecorded"
+
+
 def list_items(session_dir, *, verify_checksums: bool = False) -> List[Item]:
     """One Item per logical artefact in a session (the union of data files
     and sidecars). verify_checksums re-hashes present files to detect drift
@@ -217,6 +250,7 @@ def list_items(session_dir, *, verify_checksums: bool = False) -> List[Item]:
         sc_path = sidecar_path_for(art_path)
 
         source = origin = sha = created = None
+        source_recorded = False
         original_name = None
         duplicate_index = None
         repo = commit = entry_point = None
@@ -226,6 +260,9 @@ def list_items(session_dir, *, verify_checksums: bool = False) -> List[Item]:
             try:
                 meta = read_sidecar(art_path)
                 source = meta.produced_by.source
+                # read_sidecar fills the default in, so ask the raw dict
+                # whether the field was ever written.
+                source_recorded = _sidecar_states_source(sc_path)
                 origin = meta.produced_by.origin
                 repo = meta.produced_by.repo
                 commit = meta.produced_by.commit
@@ -265,7 +302,8 @@ def list_items(session_dir, *, verify_checksums: bool = False) -> List[Item]:
 
         items.append(Item(
             name=name, status=status, has_artifact=has_a, has_sidecar=has_s,
-            source=source, origin=origin, size=size, sha256=sha,
+            source=source, source_recorded=source_recorded,
+            origin=origin, size=size, sha256=sha,
             timestamp=created,
             artifact_path=art_path if has_a else None,
             sidecar_path=sc_path if has_s else None,
@@ -997,6 +1035,7 @@ def search_items(
     fields=None,
     date_from: Optional[str] = None,
     date_to: Optional[str] = None,
+    sources=None,
     limit: int = 1000,
 ) -> dict:
     """Search artefacts across every session in an archive.
@@ -1013,13 +1052,34 @@ def search_items(
     ``date_from``/``date_to`` are inclusive YYYY-MM-DD bounds on the item's
     timestamp (its sidecar 'created', else the file's mtime).
 
-    An empty query with no date bounds matches nothing rather than
-    everything: the caller is asking to search, not to list the archive.
+    ``sources`` restricts to SOURCE_FACETS values -- "show me every
+    hand-imported file" is an audit question with no other answer. It is a
+    *filter*, not a search term, so unlike ``query`` it narrows results on
+    its own: selecting only "external" with an empty query lists every
+    externally-imported artefact in the archive.
+
+    An empty query with no date bounds and no source filter matches nothing
+    rather than everything: the caller is asking to search, not to list the
+    archive.
     """
     fields = set(fields or ITEM_SEARCH_FIELDS)
     terms = [t for t in (query or "").lower().split() if t]
-    if not terms and not date_from and not date_to:
-        return {"items": [], "truncated": False, "n_sessions": 0, "n_scanned": 0}
+    empty = {"items": [], "truncated": False, "n_sessions": 0, "n_scanned": 0}
+    # None means "no source filter"; an explicit empty list means the user
+    # unticked every box, which asks for nothing and must not silently read
+    # as no restriction. Selecting all three is no restriction, so it is
+    # normalised away to keep the hot loop from testing a set that always
+    # answers yes.
+    if sources is None:
+        wanted = set()
+    else:
+        wanted = {s for s in sources if s in SOURCE_FACETS}
+        if not wanted:
+            return empty
+        if wanted == set(SOURCE_FACETS):
+            wanted = set()
+    if not terms and not date_from and not date_to and not wanted:
+        return empty
 
     root, _ = resolve(archive)
     out: List[dict] = []
@@ -1032,6 +1092,8 @@ def search_items(
         for it in list_items(s.path):
             n_scanned += 1
             if not _in_date_range(it.timestamp, date_from, date_to):
+                continue
+            if wanted and item_source_facet(it) not in wanted:
                 continue
             if terms:
                 hay: List[str] = []

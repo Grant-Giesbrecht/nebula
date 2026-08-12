@@ -171,7 +171,7 @@ raw run in March shows as an arc across the archive. This is the payoff of
 items 2–4 together, not a separate feature; only worth it if item 3 lands as
 a node-link diagram whose layout code can be shared.
 
-### 6. `source` as a facet — **IDEA**
+### 6. `source` as a facet — **DONE** (2026-08-11)
 
 "Show me every hand-imported file in this archive" is a natural audit
 question and is currently unanswerable in the GUI. One more checkbox group in
@@ -179,6 +179,19 @@ the ⇅ Sort popover (script / external / unrecorded) and one more field in
 `search_items`. Note that `source_recorded: false` (old sidecars that predate
 the field) must stay distinguishable from a real `script` — the panel already
 does this with the `script?` chip.
+
+Built: `Item.source_recorded` (read from the raw sidecar JSON, since
+parsing is what fills the default in and loses the distinction),
+`model.SOURCE_FACETS`, `item_source_facet`, and a `sources=` filter on
+`search_items`. Three checkboxes under "How it got here" in the advanced
+search popover.
+
+It is a *filter*, not a search term, so it narrows on its own: selecting
+only "Imported by hand" with an empty query lists every externally-imported
+artefact. `sources=None` means no filter and `sources=[]` (every box
+unticked) means nothing matches -- the two must not collapse, or unticking
+everything would quietly read as no restriction whenever a query was also
+present.
 
 ---
 
@@ -217,4 +230,8 @@ does this with the `script?` chip.
    **done** (2026-08-01); the prerequisite for cheap multi-hop traversal.
 4. ~~Transitive lineage with a depth cap (item 2)~~ — **done**
 5. ~~Session provenance view, indented tree (item 3)~~ — **done**
-6. Reassess the timeline canvas and the `source` facet (items 5, 6) — next.
+6. ~~`source` facet (item 6)~~ — **done** (2026-08-11)
+7. Timeline canvas (item 5) — **blocked, needs a decision.** Its own entry
+   makes it conditional on item 3 landing as a node-link diagram whose
+   layout code could be shared. Item 3 shipped as an indented *tree*, so
+   that precondition never held. It needs either a redesign or dropping.

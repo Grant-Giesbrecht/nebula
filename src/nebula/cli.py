@@ -1126,6 +1126,11 @@ def _print_plan(plan, *, verb: str) -> None:
               + (f"  [{'; '.join(extra)}]" if extra else ""))
     for skip in d["skipped"]:
         print(f"  skipped {skip['run_id']}: {skip['note']}")
+    for r in d.get("repairs") or []:
+        where = f"{r['run_id']}/{r['file']}" if r["file"] else r["run_id"]
+        state = (f"-> {r['chosen']}" if r["chosen"]
+                 else "; ".join(r["candidates"]) or "no close match")
+        print(f"  broken ref in {where}: {r['ref']} ({r['problem']}) {state}")
     for item in d["dangling"]:
         print(f"  dangling {item['ref']}: {item['note']}")
     for warning in d["warnings"]:
@@ -1171,6 +1176,10 @@ def cmd_merge(args):
     except transfer.TransferError as e:
         print(str(e), file=sys.stderr)
         sys.exit(1)
+    if args.repair:
+        n = transfer.accept_unambiguous_repairs(plan)
+        if n:
+            print(f"repairing {n} broken ref(s) with their only candidate")
     _print_plan(plan, verb="would merge" if args.dry_run else "merging")
     if args.dry_run:
         return
@@ -1178,7 +1187,10 @@ def cmd_merge(args):
         print("nothing to merge")
         return
     try:
-        transfer.merge(src, dst, verify=not args.no_verify, lock=not args.no_lock)
+        # Pass the plan we printed: without it merge re-plans, and any
+        # repair accepted above would be silently dropped.
+        transfer.merge(src, dst, plan=plan, verify=not args.no_verify,
+                       lock=not args.no_lock)
     except transfer.TransferError as e:
         print(str(e), file=sys.stderr)
         sys.exit(1)
@@ -1532,6 +1544,9 @@ def main(argv=None):
                    help="skip re-hashing each file after copying")
     p.add_argument("--no-lock", action="store_true",
                    help="leave the intake archive writable afterwards")
+    p.add_argument("--repair", action="store_true",
+                   help="fix broken same-archive refs that have exactly one "
+                        "candidate (--dry-run first to see them)")
     p.set_defaults(func=cmd_merge)
 
     p = sub.add_parser("adopt", help="copy sessions out of a fragment into your archive")

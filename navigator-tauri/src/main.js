@@ -68,7 +68,11 @@ let sessCfg = { titles: true, ids: true, tags: true, userTags: true,
 // YYYY/MM/DD; `dates` is the master switch for the whole date filter.
 let itemCfg = { name: true, tags: true, origin: true, session: true,
                 userTags: true, comments: true,
-                dates: false, from: "", to: "" };
+                dates: false, from: "", to: "",
+                // "How it got here". All three on means no restriction;
+                // unchecking any makes this a filter that narrows results
+                // on its own, without a query.
+                srcScript: true, srcExternal: true, srcUnrecorded: true };
 let searchMode = false, searchMeta = null, searchTimer = null;
 
 // rail: sessions | collections | views
@@ -2569,7 +2573,7 @@ function promptName(label, initial) {
 function datesOn() { return !!(itemCfg.dates && (itemCfg.from || itemCfg.to)); }
 
 function itemSearchActive() {
-  return !!($("itemSearch").value.trim() || datesOn());
+  return !!($("itemSearch").value.trim() || datesOn() || sourcesOn());
 }
 
 function scheduleItemSearch() {
@@ -2579,7 +2583,7 @@ function scheduleItemSearch() {
 
 async function runItemSearch() {
   $("itemSearchClear").classList.toggle("hidden", !itemSearchActive());
-  $("itemCfgBtn").classList.toggle("on", datesOn());
+  $("itemCfgBtn").classList.toggle("on", datesOn() || sourcesOn());
   if (!archive) return;
   if (!itemSearchActive()) { await exitSearch(); return; }
 
@@ -2591,6 +2595,7 @@ async function runItemSearch() {
       archive, query: $("itemSearch").value, fields,
       date_from: (itemCfg.dates && itemCfg.from) || null,
       date_to: (itemCfg.dates && itemCfg.to) || null,
+      sources: sourcesOn() ? selectedSources() : null,
     });
     searchMode = true;
     searchMeta = res;
@@ -2624,6 +2629,14 @@ function resetDates() {
   itemCfg.from = ""; itemCfg.to = "";
   $("ifFrom").value = ""; $("ifTo").value = "";
   $("ifFrom").classList.remove("bad"); $("ifTo").classList.remove("bad");
+  // The source boxes go back on too: with all three unticked the panel
+  // shows nothing, which is the state most likely to look broken and send
+  // someone to this button.
+  for (const key of Object.keys(SOURCE_FACETS)) {
+    itemCfg[key] = true;
+    const box = $("if" + key[0].toUpperCase() + key.slice(1));
+    if (box) box.checked = true;
+  }
   saveItemCfg();
 }
 
@@ -5004,7 +5017,20 @@ const SESS_BOXES = { sfTitle: "titles", sfId: "ids", sfTag: "tags",
                      ssClosed: "closed", ssCrashed: "crashed", sqClean: "clean", sqDirty: "dirty" };
 const ITEM_BOXES = { ifName: "name", ifTag: "tags", ifOrigin: "origin",
                      ifSession: "session", ifUserTags: "userTags",
-                     ifComments: "comments" };
+                     ifComments: "comments", ifSrcScript: "srcScript",
+                     ifSrcExternal: "srcExternal",
+                     ifSrcUnrecorded: "srcUnrecorded" };
+
+//: Maps the three checkboxes to model.SOURCE_FACETS.
+const SOURCE_FACETS = { srcScript: "script", srcExternal: "external",
+                        srcUnrecorded: "unrecorded" };
+
+function selectedSources() {
+  return Object.entries(SOURCE_FACETS)
+    .filter(([key]) => itemCfg[key]).map(([, facet]) => facet);
+}
+
+function sourcesOn() { return selectedSources().length < 3; }
 
 function syncCfgUI() {
   for (const [id, key] of Object.entries(SESS_BOXES)) $(id).checked = !!sessCfg[key];

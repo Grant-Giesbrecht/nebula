@@ -221,7 +221,7 @@ becomes an *upgrade* attached when someone publishes, not an entry fee.
 
 ---
 
-## Ref repair on intake import — **WANTED**
+## Ref repair on intake import — **BUILT** 2026-08-11
 
 Raised 2026-08-10. Refs written by hand while fleshing out an intake
 archive will contain typos. Offer to fix them at merge time, when the
@@ -232,9 +232,23 @@ provisional `I-` ids are reallocated to permanent `S-` ids on import.
 Repair must ride that same pass. Two independent things rewriting refs with
 different notions of correctness is how a merge corrupts provenance.
 
-Shape: `check` already emits `dangling_ref` / `dangling_asset_ref`. Merge
-collects those, proposes candidates by edit distance over known ids, and
-asks for confirmation.
+Built as `transfer._plan_repairs`, which fills `TransferPlan.repairs` with
+`{ref, problem, candidates, chosen}`. `accept_unambiguous_repairs` takes a
+candidate only where there is exactly one -- with two, picking the closest
+string would be nebula deciding what the user meant. CLI: `nebula merge
+--repair`, with `--dry-run` to see the proposals first.
+
+The ordering is the correctness point: a chosen repair is applied *before*
+the rename remap, because the candidate is named in source terms
+(`I-26-0009`) and still has to go through the id reallocation.
+
+Merge-only. `adopt` reads a fragment, whose refs are its author's
+statements about their own archive -- "correcting" those would falsify what
+they wrote rather than fix it.
+
+Found and fixed along the way: `refs._SESSION_RE` only accepted the `S-`
+prefix, so a bare `I-26-0001` -- an ordinary thing to write in an intake
+archive's `related_runs` -- parsed as a *filename* in the current session.
 
 **Limit, stated plainly:** this only catches refs that *fail* to resolve. A
 typo that happens to land on a real, different session is undetectable.
@@ -298,9 +312,6 @@ URI, and the property to hold the whole design to.
 
 Options 1 and the `value@authority` convention are both complete — see the
 BUILT markers above. Nothing further here is scheduled.
-
-The next self-contained piece is **ref repair on intake import**, which is
-independent of everything else in this document.
 
 Keys, hub, and tiers B and C still wait for real answers to questions 1
 and 5. Until those are answered, the honest position is the one now
