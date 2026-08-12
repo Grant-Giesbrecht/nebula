@@ -241,6 +241,14 @@ class SessionMeta:
     # reconciles, and later replaces/deletes), so a hand-edited session
     # carries its own record of what changed, when, by whom, and why.
     history: List[Dict[str, Any]] = field(default_factory=list)
+    # Artefact renames, oldest first: [{"from": ..., "to": ..., "at": ...}].
+    # Separate from `history` because this one is *load-bearing* rather than
+    # informational: ref resolution walks it, so a ref written against the
+    # old name still finds the file. That is what lets a rename happen
+    # without breaking citations nobody can reach -- see
+    # docs/relational-data-roadmap.md. A rename may be recorded without it
+    # (nebula rename --no-history), which trades that safety for tidiness.
+    renames: List[Dict[str, str]] = field(default_factory=list)
 
     def to_dict(self) -> Dict[str, Any]:
         return asdict(self)
@@ -256,6 +264,7 @@ class SessionMeta:
             related_runs=d.get("related_runs", []),
             hold_until=d.get("hold_until"),
             history=d.get("history", []),
+            renames=d.get("renames", []),
         )
 
     def related_run_refs(self) -> List[Ref]:

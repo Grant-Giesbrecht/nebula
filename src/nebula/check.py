@@ -240,7 +240,7 @@ def check(
                     _ref_from_dict(entry), kind="derived_from", run_id=run_id,
                     file=artifact,
                     existing_sessions=existing_sessions, existing_files=existing_files,
-                    registry=registry, label=label))
+                    registry=registry, label=label, archive_root=archive_root))
             issues.extend(_check_code_ref(
                 archive_root, meta.produced_by.code, run_id, artifact, label))
 
@@ -263,7 +263,7 @@ def check(
                 issues.extend(_check_ref(
                     rr, kind="related_run", run_id=run_id, file=None,
                     existing_sessions=existing_sessions, existing_files=existing_files,
-                    registry=registry, label=label))
+                    registry=registry, label=label, archive_root=archive_root))
 
     issues.extend(_check_assets(archive_root, label))
     issues.extend(_check_collections(archive_root, label))
@@ -531,6 +531,7 @@ def _check_session_meta(run_id, smeta, label) -> List[CheckIssue]:
 
 
 def _check_ref(ref, *, kind, run_id, file, existing_sessions, existing_files,
+               archive_root=None,
                registry, label) -> List[CheckIssue]:
     """Verify one derived_from / related_run ref. Same-archive refs are
     checked against what exists; cross-archive refs are reported as info
@@ -565,9 +566,32 @@ def _check_ref(ref, *, kind, run_id, file, existing_sessions, existing_files,
                 f"{kind} points at missing session {target_session}",
                 fix=f"restore session {target_session}, or drop the ref"))
     elif (target_session, ref.file) not in existing_files:
-        out.append(CheckIssue(
-            dangling, run_id, file,
-            f"{kind} points at missing {target_session}/{ref.file}",
-            fix=(f"restore {target_session}/{ref.file} (check {target_session}/.trash/), "
-                 f"or drop the ref")))
+        # A rename is not damage: the session records what the file is
+        # called now, so the ref still resolves. Reporting it would train
+        # people to ignore dangling_ref, which is the one issue that must
+        # stay believable.
+        renamed = _renamed_to(archive_root, target_session, ref.file) \
+            if archive_root is not None else None
+        if renamed and (target_session, renamed) in existing_files:
+            out.append(CheckIssue(
+                "renamed_ref", run_id, file,
+                f"{kind} names {target_session}/{ref.file}, which was renamed "
+                f"to {renamed}; the session's rename log still resolves it",
+                fix=f"optional: rewrite the ref to {target_session}/{renamed}",
+                severity="info"))
+        else:
+            out.append(CheckIssue(
+                dangling, run_id, file,
+                f"{kind} points at missing {target_session}/{ref.file}",
+                fix=(f"restore {target_session}/{ref.file} (check {target_session}/.trash/), "
+                     f"or drop the ref")))
     return out
+
+
+def _renamed_to(archive_root: Path, run_id: str, filename: str):
+    """What `filename` in `run_id` is called now, per its rename log."""
+    from nebula.manual import current_name
+    from nebula.session import _find_session_dir
+
+    session_dir = _find_session_dir(archive_root, run_id)
+    return current_name(session_dir, filename) if session_dir else None

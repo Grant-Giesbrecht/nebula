@@ -680,7 +680,19 @@ def _resolve_ref(ref: Ref, *, archive_root: Path, archive_label: str,
     out["path"] = str(target)
     out["exists"] = target.is_file()
     if not out["exists"]:
-        out["note"] = "file is missing"
+        # Follow the session's rename log before calling it missing: a ref
+        # written against the old name is still correct, it just needs a
+        # hop. Say so, so the view can show "raw.csv -> sweep.csv" rather
+        # than a broken link.
+        from nebula.manual import current_name
+        renamed = current_name(session_dir, ref.file)
+        moved = (session_dir / renamed) if renamed else None
+        if moved is not None and moved.is_file():
+            out.update({"path": str(moved), "exists": True,
+                        "renamed_from": ref.file, "filename": renamed,
+                        "note": f"renamed from {ref.file}"})
+        else:
+            out["note"] = "file is missing"
     return out
 
 

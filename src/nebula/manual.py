@@ -20,12 +20,13 @@ from __future__ import annotations
 
 import datetime
 import getpass
+import os
 import shutil
 from pathlib import Path
 from typing import Dict, List, Optional
 
 from nebula.check import dependents_of, inbound_to_session
-from nebula.registry import resolve_archive
+from nebula.registry import get_registry, resolve_archive
 from nebula.session import (
     Session,
     _created_today,
@@ -36,6 +37,7 @@ from nebula.session import (
     orphan_artifacts_in,
 )
 from nebula.sidecar import (
+    SIDECAR_SUFFIX,
     ProducedBy,
     SidecarMeta,
     read_session_yaml,
@@ -45,6 +47,10 @@ from nebula.sidecar import (
     write_session_yaml,
     write_sidecar,
 )
+
+
+def _now_iso() -> str:
+    return datetime.datetime.now().astimezone().isoformat(timespec="seconds")
 
 
 def _default_user() -> str:
@@ -465,3 +471,204 @@ def find_orphan_files(
     for session_dir in session_dirs:
         orphans.extend(orphan_artifacts_in(session_dir))
     return orphans
+
+
+# ---------------------------------------------------------------------
+# Rename
+# ---------------------------------------------------------------------
+
+#: What a rename does about references to the old name.
+#:
+#:   local -- rewrite refs in this archive (the default: it is the set we
+#:            can find exhaustively and fix exactly)
+#:   all   -- also scan every registered archive. Only ever a best effort:
+#:            an archive that is not registered here, or not mounted, is
+#:            invisible, and there is no way to know it exists.
+#:   none  -- touch no refs. Safe *only* because the rename log keeps the
+#:            old name resolving; with --no-history it means the old refs
+#:            simply break.
+RENAME_REF_MODES = ("local", "all", "none")
+
+
+def current_name(session_dir: Path, filename: str) -> Optional[str]:
+    """Follow the session's rename log from `filename` to what it is called
+    now, or None if the log says nothing about it.
+
+    This is what makes a rename non-destructive to references: a ref
+    written against `raw.csv` still resolves after `raw.csv` becomes
+    `sweep.csv`, because the session remembers. Follows chains (a file
+    renamed twice) and stops on a cycle rather than looping.
+    """
+    try:
+        meta = read_session_yaml(session_dir)
+    except Exception:       # noqa: BLE001
+        return None
+    log = meta.renames or []
+    if not log:
+        return None
+    name, seen = filename, {filename}
+    moved = False
+    while True:
+        nxt = None
+        for entry in log:                      # last matching wins
+            if entry.get("from") == name:
+                nxt = entry.get("to")
+        if not nxt or nxt in seen:
+            break
+        name, moved = nxt, True
+        seen.add(name)
+    return name if moved else None
+
+
+def _rename_targets(archive_root: Path, archive_label: str, run_id: str,
+                    filename: str, *, mode: str) -> List[dict]:
+    """Every derived_from edge that names run_id/filename.
+
+    Same-archive refs may name the archive explicitly or not at all; both
+    are the same edge and both have to be found.
+    """
+    from nebula.check import _iter_all_session_dirs
+
+    def scan(root: Path, label: str, foreign: bool) -> List[dict]:
+        out: List[dict] = []
+        for session_dir in _iter_all_session_dirs(root):
+            here = session_dir.name
+            for sidecar in sorted(session_dir.glob(f"*{SIDECAR_SUFFIX}")):
+                name = sidecar.name[: -len(SIDECAR_SUFFIX)]
+                try:
+                    sc = read_sidecar(session_dir / name)
+                except Exception:   # noqa: BLE001
+                    continue
+                for i, ref in enumerate(sc.derived_from_refs()):
+                    if ref.file != filename:
+                        continue
+                    if (ref.session or here) != run_id:
+                        continue
+                    if foreign:
+                        if ref.archive != archive_label:
+                            continue
+                    elif ref.archive not in (None, archive_label):
+                        continue
+                    out.append({"root": str(root), "archive": label,
+                                "run_id": here, "file": name, "index": i})
+        return out
+
+    hits = scan(archive_root, archive_label, foreign=False)
+    if mode != "all":
+        return hits
+    for cfg in get_registry().all().values():
+        root = Path(cfg.root)
+        if not root.is_dir() or root.resolve() == archive_root.resolve():
+            continue
+        hits.extend(scan(root, cfg.name, foreign=True))
+    return hits
+
+
+def _apply_rename_to_refs(hits: List[dict], new_name: str) -> int:
+    n = 0
+    for hit in hits:
+        session_dir = _find_session_dir(Path(hit["root"]), hit["run_id"])
+        if session_dir is None:
+            continue
+        artifact = session_dir / hit["file"]
+        try:
+            sc = read_sidecar(artifact)
+        except Exception:   # noqa: BLE001
+            continue
+        entry = sc.derived_from[hit["index"]]
+        if isinstance(entry, dict):
+            entry["file"] = new_name
+        else:
+            continue
+        write_sidecar(artifact, sc)
+        n += 1
+    return n
+
+
+def plan_rename(archive, run_id: str, filename: str, new_name: str, *,
+                refs: str = "local") -> dict:
+    """What renaming would do, without doing it. The dry run."""
+    if refs not in RENAME_REF_MODES:
+        raise ValueError(f"refs must be one of {RENAME_REF_MODES}, got {refs!r}")
+    archive_root, _ = resolve_archive(archive)
+    from nebula.config import archive_identity
+    label = archive_identity(archive_root)["name"]
+
+    session_dir = _find_session_dir(archive_root, run_id)
+    if session_dir is None:
+        raise FileNotFoundError(f"no session {run_id!r} in this archive")
+    target = session_dir / filename
+    if not target.is_file():
+        raise FileNotFoundError(f"no artifact {filename!r} in {run_id}")
+    _check_new_name(session_dir, filename, new_name)
+
+    hits = _rename_targets(archive_root, label, run_id, filename,
+                           mode=("all" if refs == "all" else "local"))
+    local = [h for h in hits if h["archive"] == label]
+    foreign = [h for h in hits if h["archive"] != label]
+    return {
+        "archive": label, "root": str(archive_root), "run_id": run_id,
+        "from": filename, "to": new_name, "refs": refs,
+        "session_path": str(session_dir),
+        "referrers": hits, "n_local": len(local), "n_foreign": len(foreign),
+        "will_update": [] if refs == "none" else hits,
+    }
+
+
+def _check_new_name(session_dir: Path, filename: str, new_name: str) -> None:
+    if not new_name or new_name != Path(new_name).name:
+        raise ValueError(f"{new_name!r} is not a plain filename")
+    if new_name.startswith(".") or new_name.endswith(SIDECAR_SUFFIX):
+        raise ValueError(f"{new_name!r} is not a valid artifact name")
+    if new_name == filename:
+        raise ValueError("the new name is the same as the old one")
+    if (session_dir / new_name).exists():
+        raise FileExistsError(
+            f"{new_name!r} already exists in this session; rename would "
+            "overwrite it")
+
+
+def rename_file(archive, run_id: str, filename: str, new_name: str, *,
+                refs: str = "local", record_history: bool = True,
+                by: Optional[str] = None, allow_frozen: bool = False,
+                plan: Optional[dict] = None) -> dict:
+    """Rename an artifact, and decide what happens to references to it.
+
+    The artefact and its sidecar move together -- a sidecar is found by its
+    artefact's name, so leaving it behind would strand both.
+
+    `record_history=False` skips the rename log, which is the "I mistyped
+    the name two seconds ago and nothing can possibly reference it" case.
+    It is the only irreversible choice here: without the log, a ref written
+    against the old name has nothing left to resolve through.
+    """
+    archive_root, _ = resolve_archive(archive)
+    plan = plan or plan_rename(archive, run_id, filename, new_name, refs=refs)
+    session_dir = Path(plan["session_path"])
+
+    meta = read_session_yaml(session_dir)
+    _ensure_writable(meta, run_id, allow_frozen)
+    _check_new_name(session_dir, filename, new_name)
+
+    target = session_dir / filename
+    sidecar = sidecar_path_for(target)
+    dest = session_dir / new_name
+    os.replace(target, dest)
+    if sidecar.is_file():
+        os.replace(sidecar, sidecar_path_for(dest))
+
+    updated = 0 if refs == "none" else _apply_rename_to_refs(plan["referrers"],
+                                                             new_name)
+
+    meta = read_session_yaml(session_dir)
+    if record_history:
+        meta.renames = list(meta.renames or [])
+        meta.renames.append({"from": filename, "to": new_name,
+                             "at": _now_iso()})
+    meta.add_history("renamed", file=new_name, by=by or _default_user(),
+                     note=f"{filename} -> {new_name}",
+                     refs=refs, refs_updated=updated,
+                     resolvable=bool(record_history))
+    write_session_yaml(session_dir, meta)
+
+    return dict(plan, updated=updated, recorded=bool(record_history))

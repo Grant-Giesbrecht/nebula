@@ -1016,6 +1016,62 @@ def cmd_whoami(args):
           file=sys.stderr)
 
 
+def manual_rename_modes():
+    from nebula.manual import RENAME_REF_MODES
+    return list(RENAME_REF_MODES)
+
+
+def cmd_rename(args):
+    from nebula import manual
+
+    # Lenient, like the transfer commands: renaming in an unregistered
+    # scratch archive by path is the common case, not an error.
+    root, _ = _resolve_archive_cli(args.archive)
+    try:
+        plan = manual.plan_rename(root, args.run_id, args.file,
+                                  args.new_name, refs=args.refs)
+    except (ValueError, OSError, KeyError) as e:
+        print(str(e), file=sys.stderr)
+        sys.exit(1)
+
+    print(f"{plan['run_id']}: {plan['from']} -> {plan['to']}")
+    if plan["n_local"] or plan["n_foreign"]:
+        where = [f"{plan['n_local']} in this archive"]
+        if plan["n_foreign"]:
+            where.append(f"{plan['n_foreign']} in other registered archives")
+        verb = "would be left pointing at the old name" if args.refs == "none" \
+            else "would be updated"
+        print(f"  {' and '.join(where)} {verb}")
+        for hit in plan["referrers"][:10]:
+            print(f"    {hit['archive']}|{hit['run_id']}/{hit['file']}")
+        if len(plan["referrers"]) > 10:
+            print(f"    ...and {len(plan['referrers']) - 10} more")
+    else:
+        print("  nothing in reach references it")
+    if args.refs != "all":
+        # Never let "no references found" read as "safe": the archives we
+        # cannot see are exactly the ones a citation would come from.
+        sys.stdout.flush()
+        print("  note: only this archive was searched; refs from archives not "
+              "registered here cannot be seen", file=sys.stderr)
+    if not args.no_history:
+        print("  the old name stays resolvable (recorded in the rename log)")
+    else:
+        print("  NOT recorded: refs to the old name will not resolve")
+
+    if args.dry_run:
+        return
+    try:
+        got = manual.rename_file(root, args.run_id, args.file,
+                                 args.new_name, refs=args.refs,
+                                 record_history=not args.no_history,
+                                 allow_frozen=args.reopen, plan=plan)
+    except (ValueError, OSError, RuntimeError, KeyError) as e:
+        print(str(e), file=sys.stderr)
+        sys.exit(1)
+    print(f"renamed; {got['updated']} ref(s) updated")
+
+
 def cmd_register(args):
     """Register an archive under the name it declares for itself.
 
@@ -1335,6 +1391,23 @@ def main(argv=None):
     p.add_argument("--from", dest="origin", help="free-text note on where the new bytes came from")
     p.add_argument("--move", action="store_true", help="move instead of copy the new file")
     p.set_defaults(func=cmd_replace)
+
+    p = sub.add_parser("rename", help="rename an artifact, and decide what happens to refs")
+    p.add_argument("archive", help="registered archive name, or a literal path")
+    p.add_argument("run_id", type=_run_id_arg, help="session id -- S-26-0012, or 0012 for the current year")
+    p.add_argument("file")
+    p.add_argument("new_name", help="the new filename")
+    p.add_argument("--refs", choices=manual_rename_modes(), default="local",
+                   help="local: rewrite refs in this archive (default); "
+                        "all: also every registered archive; "
+                        "none: leave refs alone")
+    p.add_argument("--no-history", action="store_true",
+                   help="do not record the rename, so the old name stops "
+                        "resolving. For a name you mistyped seconds ago.")
+    p.add_argument("--reopen", action="store_true",
+                   help="allow renaming in a session closed on a previous day")
+    p.add_argument("--dry-run", action="store_true")
+    p.set_defaults(func=cmd_rename)
 
     p = sub.add_parser("rm-session", help="soft-delete a whole session (moves it to the archive .trash/)")
     p.add_argument("archive", help="registered archive name, or a literal path")

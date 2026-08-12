@@ -237,11 +237,24 @@ present.
   silently merged two people's data into one chain.
 - **Tag vocabulary** — deferred again 2026-08-12; moved to the quality-of-life
   section of `TODO.md` with the reasoning.
-- **`nebula rename`** — the one organisational fix that requires touching
-  refs. Doable in the project's spirit (rewrite same-archive refs, record the
-  old name like `original_name` already does for duplicates, log it in
-  session history), but cross-archive refs would dangle with no way to find
-  them. Would want a dry run and an explicit decision on that residual risk.
+- ~~**`nebula rename`**~~ — **DONE** (2026-08-12). The residual risk was
+  settled by making it *not* residual: `SessionMeta.renames` is a rename log
+  that ref resolution walks, so a ref written against the old name still
+  finds the file whether or not anyone rewrote it. `check` reports that as
+  `renamed_ref` (info), not `dangling_derived_from`.
+
+  `--refs local|all|none` chooses what happens to references; `--no-history`
+  skips the log for the "mistyped it seconds ago" case and is the one
+  irreversible option. `--refs all` is explicitly best-effort: an archive
+  not registered here is invisible, so the CLI says so every time rather
+  than letting "no references found" read as "safe".
+
+  A content-addressed store for session files was considered and rejected
+  (Grant proposed it, 2026-08-12): it would have made local renames trivial
+  but done nothing for the cross-archive case, since a colleague's ref
+  names a *name* wherever the bytes live. It would also have cost the
+  plain-filesystem interface and dissolved drift detection, which depends
+  on session artefacts being immutable-by-convention.
 
 ---
 
