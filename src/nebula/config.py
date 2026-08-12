@@ -1,7 +1,7 @@
 """
 Per-archive settings (``<archive>/archive.yaml``).
 
-Distinct from the *registry* (~/.nebula/archives.yaml), which is
+Distinct from the *registry* (~/.nebula/registry.yaml), which is
 machine-local config about where archives live. These settings belong to
 the archive itself and travel with it, so every machine writing into a
 shared archive agrees on how it behaves.

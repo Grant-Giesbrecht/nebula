@@ -82,6 +82,17 @@ Read every identity as **who**, issued by **which authority**, joined by
 | Self-certifying | `k7f3a…@key` | signature (option 3 below) |
 | Hub-issued | `grant@nebulahub.org` | the hub issued it |
 
+Two authorities are **reserved** and mean "this machine only":
+
+| Reserved | Means |
+|---|---|
+| `grant@local` | an identity with no authority behind it — usually *your own*, before you have picked one. Stands for nobody but itself. |
+| `grant@localid` | a **petname for someone else**, meaningful only because this machine has a contacts entry saying who it points at. |
+
+The difference matters and is enforced: `@localid` is refused as your own
+identity, and a petname must never be written into a ref that leaves this
+machine — it would name someone who exists nowhere else.
+
     nebula://0000-0003-2885-4801@orcid.org/postdoc/S-26-0152/diode.graf
 
 **This needs no parser change.** `refs.py` already documents
@@ -141,6 +152,63 @@ A hub still appears in the *identity* scheme as a namespace authority
 (`grant@nebulahub.org`), which is the answer for someone with no ORCID, no
 institutional email and no GitHub. Two jobs, one hub; only the second
 belongs in the URI.
+
+## Petnames and identity trails — **BUILT** 2026-08-12
+
+Implemented in `nebula.contacts` (`~/.nebula/contacts.yaml`), CLI `nebula
+contacts`, covered by `tests/test_contacts.py`.
+
+*This was missing from the roadmap until 2026-08-12 — it was argued for
+when `value@authority` was chosen (opaque ids need petnames to be usable)
+but never written down, and nearly fell through the cracks.*
+
+### The problem
+
+People change identity. Someone starts with an institutional email because
+they had nothing else, moves to a GitHub handle, gets an ORCID when they
+first publish, and may one day get a hub account. Every one of those is
+stamped into archives written at the time, and all of them are the same
+person.
+
+### Succession, not equivalence
+
+The file records an **ordered trail**, oldest first, not a set:
+
+    grant:
+      display: Grant Giesbrecht
+      ids:
+        - grant@ncsu.edu
+        - Grant-Giesbrecht@github.com
+        - id: 0000-0003-2885-4801@orcid.org
+          since: 2022-01
+
+A *set* of equivalent ids would say they are the same person but not which
+to use for a **new** reference — and "write new refs with their current id"
+is the main thing this is for. Order supplies that: the last entry is
+current. Dates are recorded where known but are informational; order
+decides, because a date is often unknown and order never is.
+
+This is the succession record that question 6 says is needed under every
+option here.
+
+### Three properties it deliberately has
+
+**Local, and yours.** These are assertions *you* make. They live on this
+machine, are never written into an archive, and never travel in a fragment.
+That is a security property: a succession record that propagated would let
+anyone claim "their id superseded yours", and every machine importing the
+claim would start attributing your work to them. A hub could later serve
+*authenticated* successions — where the person proved control of both ids —
+and those would be safe to accept from a stranger. Nothing here is.
+
+**It never rewrites history.** An archive written in 2019 says
+`grant@ncsu.edu` and that stays true; it is what was the case. Contacts
+affect how an identity is *displayed* and which id a *new* ref uses. Same
+rule as the rename log, which resolves old names without rewriting them.
+
+**One id belongs to one person.** Loading refuses a file where an id is
+listed under two petnames. Every answer about such an id would otherwise be
+a coin flip, and a silent wrong answer misattributes work.
 
 ## What a hub can and cannot enforce — **IDEA**
 
@@ -302,11 +370,11 @@ URI, and the property to hold the whole design to.
    Telling people apart is satisfied by `value@authority` alone. If real
    verification matters even slightly, generate keys early — retrofitting
    identity onto refs already written is the expensive path.
-6. **What happens when someone changes authority?** A succession record
-   ("this identity supersedes that one") is needed under *every* option
-   here, including the do-nothing one, because people move institutions and
-   acquire ORCIDs late. It is what makes upgrading a tier possible without
-   breaking old refs.
+6. ~~**What happens when someone changes authority?**~~ *Answered
+   2026-08-12:* a local succession trail, in `nebula.contacts`. See
+   "Petnames and identity trails" above. Still open is the *authenticated*
+   version, which needs a hub — the local file is only ever your own
+   belief.
 
 ## Nearest-term step
 

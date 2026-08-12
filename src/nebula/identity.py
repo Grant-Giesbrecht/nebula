@@ -68,6 +68,25 @@ LOCAL_AUTHORITY = "local"
 #: squatted by someone typing it in the meantime.
 KEY_AUTHORITY = "key"
 
+#: Reserved for **local petnames**: `grant@localid` is a shorthand this
+#: machine resolves through ~/.nebula/contacts.yaml to whatever identity
+#: that person currently uses. See :mod:`nebula.contacts`.
+#:
+#: Distinct from LOCAL_AUTHORITY, and the difference matters:
+#:
+#:   grant@local     -- an identity with no authority behind it. Usually
+#:                      *your own*, before you have picked one. It stands
+#:                      for nobody but itself.
+#:   grant@localid   -- an alias *for someone else*, which only means
+#:                      anything because this machine has a contacts entry
+#:                      saying who it points at.
+#:
+#: A petname must never be written into a ref that leaves this machine --
+#: it would name someone who does not exist anywhere else. `contacts.resolve`
+#: turns one into a real identity; this constant is what makes "is this a
+#: petname?" checkable rather than a convention people forget.
+LOCAL_ID_AUTHORITY = "localid"
+
 _DOMAIN_RE = re.compile(
     r"^(?=.{1,253}$)[A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?"
     r"(\.[A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?)*"
@@ -116,6 +135,12 @@ def _validate_github(value: str) -> Optional[str]:
     return None
 
 
+def _validate_localid(value: str) -> Optional[str]:
+    if not value:
+        return "a petname cannot be empty"
+    return None
+
+
 def _validate_key(value: str) -> Optional[str]:
     return ("the '@key' authority is reserved for signed identities, which "
             "nebula does not issue yet -- see docs/identity-trust-roadmap.md")
@@ -152,6 +177,8 @@ AUTHORITIES: Dict[str, Authority] = {
         "github.com", "GitHub", _validate_github, verifiable_by="OAuth"),
     KEY_AUTHORITY: Authority(
         KEY_AUTHORITY, "signed key (not yet issued)", _validate_key),
+    LOCAL_ID_AUTHORITY: Authority(
+        LOCAL_ID_AUTHORITY, "local petname", _validate_localid),
 }
 
 
@@ -231,6 +258,12 @@ def validate_identity(name: str) -> List[str]:
     ident = parse_identity(clean_user(name))
     warnings: List[str] = []
 
+    if ident.authority == LOCAL_ID_AUTHORITY:
+        raise IdentityError(
+            f"{ident.raw!r}: '{LOCAL_ID_AUTHORITY}' is reserved for local "
+            "petnames of *other* people (see nebula.contacts). It cannot be "
+            "your own identity, and it must never appear in a ref that "
+            "leaves this machine.")
     if not ident.value:
         raise IdentityError(
             f"{ident.raw!r}: nothing before the '@' -- an identity is "

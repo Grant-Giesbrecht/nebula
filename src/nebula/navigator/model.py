@@ -1437,7 +1437,7 @@ def _human_size_public(n: int) -> str:
 
 
 def registered_archives() -> List[dict]:
-    """The machine's archive registry (~/.nebula/archives.yaml), so the
+    """The machine's archive registry (~/.nebula/registry.yaml), so the
     archive switcher can offer known archives without the user hunting for
     the directory. ``exists`` is False for a root that isn't mounted."""
     out = []

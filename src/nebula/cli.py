@@ -848,14 +848,90 @@ def cmd_stale(args):
 
 
 def cmd_archives(args):
+    from nebula.registry import Location
+
     reg = get_registry()
+    moved = reg.migrate()
+    if moved:
+        print(f"note: renamed archives.yaml -> {moved.name} (it was one "
+              f"character from an archive's own archive.yaml)", file=sys.stderr)
+    if args.add_location or args.remove_location:
+        return _edit_locations(reg, args)
+
     archives = reg.all()
     if not archives:
         print(f"no archives registered in {reg.path}")
         return
     for name, cfg in archives.items():
-        exists = "✓" if cfg.root.exists() else "✗ (not mounted?)"
-        print(f"{name:15} {cfg.root}  {exists}")
+        head = f"{name:15}"
+        for i, loc in enumerate(cfg.locations):
+            if loc.kind == "path":
+                mark = "✓" if loc.available else "✗ (not mounted?)"
+            else:
+                # Recorded, but nebula has no client. Say which it is
+                # rather than showing a ✗ that reads as "broken".
+                mark = "— (remote; no client yet)"
+            label = f"  [{loc.label}]" if loc.label else ""
+            pref = "" if i == 0 else " " * 15 + " "
+            print(f"{head if i == 0 else pref}{loc.value}{label}  {mark}")
+            head = ""
+
+
+def _edit_locations(reg, args):
+    from nebula.registry import Location
+
+    name = args.archive
+    if not name:
+        print("--add-location/--remove-location need an archive name",
+              file=sys.stderr)
+        sys.exit(1)
+    try:
+        if args.remove_location:
+            cfg = reg.remove_location(name, args.remove_location)
+            print(f"{name}: removed {args.remove_location}")
+        else:
+            kind = "url" if "://" in args.add_location else "path"
+            cfg = reg.add_location(
+                name, Location(kind=kind, value=args.add_location,
+                               label=args.label or ""),
+                first=args.prefer)
+            where = "preferred" if args.prefer else "added"
+            print(f"{name}: {where} {kind} {args.add_location}")
+    except (KeyError, ValueError) as e:
+        print(str(e), file=sys.stderr)
+        sys.exit(1)
+    for i, loc in enumerate(cfg.locations):
+        print(f"  {i + 1}. {loc.value}" + (f"  [{loc.label}]" if loc.label else ""))
+
+
+def cmd_contacts(args):
+    """Local petnames, and the identities each person has used."""
+    from nebula import contacts as contacts_mod
+
+    book = contacts_mod.get_contacts()
+    try:
+        if args.add:
+            got = book.add_identity(args.petname, args.add,
+                                    since=args.since, display=args.display or "")
+            print(f"{got.petname}: now {got.current}")
+        elif args.forget:
+            book.forget(args.forget)
+            print(f"forgot {args.forget}")
+        elif args.who:
+            print(book.current_for(book.resolve(args.who)))
+            return
+        known = book.all()
+        if not known:
+            print(f"no contacts in {book.path}")
+            return
+        for petname, c in sorted(known.items()):
+            print(f"{c.alias:28} {c.label}")
+            for one in c.former:
+                print(f"    was  {one}")
+            print(f"    now  {c.current}")
+    except (ValueError, OSError) as e:
+        print(str(e), file=sys.stderr)
+        sys.exit(1)
 
 
 def cmd_collection(args):
@@ -1570,8 +1646,29 @@ def main(argv=None):
     p.add_argument("--hours", type=float, default=24.0)
     p.set_defaults(func=cmd_stale)
 
-    p = sub.add_parser("archives", help="list registered archives")
+    p = sub.add_parser("archives", help="list registered archives and where they live")
+    p.add_argument("archive", nargs="?", help="archive to edit locations for")
+    p.add_argument("--add-location", metavar="PATH_OR_URL",
+                   help="record another place this archive lives (appended, "
+                        "so it does not displace the working copy)")
+    p.add_argument("--prefer", action="store_true",
+                   help="with --add-location, put it first instead")
+    p.add_argument("--label", help="a name for the location: 'lab NAS', 'laptop'")
+    p.add_argument("--remove-location", metavar="PATH_OR_URL",
+                   help="forget one location (the last one cannot be removed)")
     p.set_defaults(func=cmd_archives)
+
+    p = sub.add_parser("contacts", help="local petnames for people, and the ids they have used")
+    p.add_argument("petname", nargs="?", help="the local shorthand, e.g. grant")
+    p.add_argument("--add", metavar="ID",
+                   help="record an identity for this petname; appended, so it "
+                        "becomes the one new refs use")
+    p.add_argument("--since", help="when it became current (free text, e.g. 2022-01)")
+    p.add_argument("--display", help="how to show them, e.g. 'Grant Giesbrecht'")
+    p.add_argument("--forget", metavar="PETNAME", help="drop a contact entirely")
+    p.add_argument("--who", metavar="ID_OR_ALIAS",
+                   help="print the current identity for a petname or an old id")
+    p.set_defaults(func=cmd_contacts)
 
     p = sub.add_parser("init", help="create an archive")
     p.add_argument("root")
@@ -1652,7 +1749,7 @@ def main(argv=None):
     p.add_argument("--home", help="override NEBULA_HOME for this scan")
     p.set_defaults(func=cmd_scan)
 
-    p = sub.add_parser("register", help="register an archive in ~/.nebula/archives.yaml")
+    p = sub.add_parser("register", help="register an archive in ~/.nebula/registry.yaml")
     p.add_argument("root")
     p.add_argument("name", nargs="?", help="override the name it declares "
                                            "(normally unnecessary)")

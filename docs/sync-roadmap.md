@@ -105,6 +105,35 @@ These three came out of the discussion, are independent of the
 client-server decision, and are worth doing whatever that decision is.
 None of them is built.
 
+### 0. ~~Multiple locations per archive~~ — **DONE** 2026-08-12
+
+The registry now lists *locations* per archive, most-preferred first, and
+resolution takes the first that is actually there. So an unplugged external
+drive falls back to the NAS copy rather than failing.
+
+- `~/.nebula/archives.yaml` is now `~/.nebula/registry.yaml`. It was one
+  character from an archive's own `archive.yaml`, which was a standing
+  source of confusion. The old name is still read when the new one is
+  absent, and `nebula archives` renames it in place.
+- A location is a local `path` or a remote `url`. **Remote locations are
+  recorded but never reachable** — nebula has no client, and the honest
+  behaviour is to report "remote; no client yet" rather than a ✗ that reads
+  as broken. Recording one is still useful: it says where the archive also
+  lives, and it means the file format does not have to change when a client
+  does exist.
+- `nebula archives <name> --add-location <path|url> [--label ...] [--prefer]`.
+  Appended by default: a newly added location is usually a backup, and
+  silently preferring it over the working copy would be a surprise.
+- The last location cannot be removed. An entry with nowhere to look is not
+  a registration, it is a puzzle.
+
+`ArchiveConfig.root` is now a property returning the first available
+location, so every existing caller gained the fallback without changing.
+
+This is the "ordered resolver list" from `identity-trust-roadmap.md`, for
+archives. The identity-side half of it — resolving a *URI* through a list
+of servers — still needs the client-server decision below.
+
 ### 1. Move `index.db` out of the synced tree
 
 It is a disposable cache, rebuildable from the filesystem at any time

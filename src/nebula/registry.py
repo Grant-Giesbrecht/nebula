@@ -7,18 +7,41 @@ The registry file is intentionally NOT versioned per-archive -- it's a small
 piece of machine-local config, similar in spirit to ~/.gitconfig. Each
 archive itself has no knowledge of being "in" a registry; it's just a
 directory tree with its own S-XXXX sessions and its own index.db.
+
+**One archive, several locations.** An archive can be in more than one
+place -- a working copy on a laptop, a backup on a NAS, a copy on a lab
+server -- and the registry lists them in priority order. Resolution walks
+them and takes the first that is actually there, so unplugging an external
+drive falls back to the NAS rather than failing. See :class:`Location`.
+
+The file is ``~/.nebula/registry.yaml``. It used to be ``archives.yaml``,
+renamed because an archive's *own* settings file is ``archive.yaml`` and
+the two were one character apart. The old name is still read if the new one
+is absent, so nothing breaks on upgrade.
 """
 
 from __future__ import annotations
 
 import os
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Dict, Optional
 
 import yaml
 
-DEFAULT_REGISTRY_PATH = Path(os.path.expanduser("~/.nebula/archives.yaml"))
+DEFAULT_REGISTRY_PATH = Path(os.path.expanduser("~/.nebula/registry.yaml"))
+
+#: What the registry used to be called. Read when the new name is absent,
+#: so an existing install keeps working; `Registry.migrate` renames it.
+LEGACY_REGISTRY_PATH = Path(os.path.expanduser("~/.nebula/archives.yaml"))
+
+#: Location kinds. Only `path` is reachable today -- a remote location is
+#: recorded and reported, but nothing here speaks a network protocol yet
+#: (see docs/sync-roadmap.md). Recording one is still useful: it says where
+#: the archive also lives, which is exactly what a person needs to go and
+#: get it, and it means the registry format does not have to change when a
+#: client does exist.
+LOCATION_KINDS = ("path", "url")
 
 #: Where archives live by convention. Scanned to discover archives so that
 #: dropping one in the right place is enough -- but only ever to *populate*
@@ -54,9 +77,58 @@ def fragment_dir(user: str, archive_name: str) -> Path:
 
 
 @dataclass(frozen=True)
+class Location:
+    """One place an archive lives.
+
+    `path` is a local filesystem location; `url` is remote. Order in
+    ArchiveConfig.locations *is* the priority -- first listed is preferred
+    -- because an explicit list a human can reorder beats a numeric field
+    nobody remembers the direction of.
+    """
+
+    kind: str = "path"
+    value: str = ""
+    #: Free-text, for the listing: "laptop", "lab NAS", "office server".
+    label: str = ""
+
+    @property
+    def path(self) -> Optional[Path]:
+        return Path(os.path.expanduser(self.value)) if self.kind == "path" else None
+
+    @property
+    def available(self) -> bool:
+        """Whether this location can be used *right now*.
+
+        A remote location is never available: nebula has no client yet. It
+        reports False rather than raising, so a remote entry degrades to
+        "recorded but not reachable" instead of breaking resolution.
+        """
+        p = self.path
+        return bool(p and p.is_dir())
+
+    def to_dict(self) -> Dict[str, str]:
+        out = {self.kind: self.value}
+        if self.label:
+            out["label"] = self.label
+        return out
+
+    @classmethod
+    def from_dict(cls, raw) -> "Location":
+        if isinstance(raw, str):            # bare string is a path
+            return cls(kind="path", value=raw)
+        for kind in LOCATION_KINDS:
+            if kind in raw:
+                return cls(kind=kind, value=str(raw[kind]),
+                           label=str(raw.get("label") or ""))
+        raise ValueError(
+            f"location {raw!r} names neither {' nor '.join(LOCATION_KINDS)}")
+
+
+@dataclass(frozen=True)
 class ArchiveConfig:
     name: str
-    root: Path
+    #: Every known location, most preferred first. Never empty.
+    locations: "tuple[Location, ...]" = ()
     git_org: Optional[str] = None
     #: Who owns this archive, for nebula:// URIs. None means "me" (see
     #: nebula.identity) -- a colleague's archive mounted locally records
@@ -74,6 +146,33 @@ class ArchiveConfig:
     declared_name: str = ""
 
     @property
+    def root(self) -> Path:
+        """Where the archive is *right now*: the first available location,
+        else the first location listed.
+
+        A property rather than a stored field so that every existing caller
+        keeps working unchanged while gaining the fallback. Falling back to
+        the first location when none is available means callers still get a
+        path to name in an error message ("not mounted") instead of None.
+        """
+        for loc in self.locations:
+            if loc.available:
+                return loc.path
+        first = self.locations[0] if self.locations else None
+        return (first.path if first and first.path
+                else Path(first.value if first else ""))
+
+    @property
+    def available(self) -> bool:
+        return any(loc.available for loc in self.locations)
+
+    @property
+    def remote_only(self) -> bool:
+        """Known, but only in places nebula cannot reach yet."""
+        return bool(self.locations) and not any(
+            loc.kind == "path" for loc in self.locations)
+
+    @property
     def index_path(self) -> Path:
         return self.root / "index.db"
 
@@ -88,6 +187,36 @@ class ArchiveConfig:
         return (self.user or "", self.uri_name)
 
 
+def _read_locations(name: str, cfg: Dict, path: Path) -> "tuple[Location, ...]":
+    """One archive's locations, accepting both the old and new shapes.
+
+    Old: a single `root:` string. New: a `locations:` list in priority
+    order. Both are read, so a registry written before this existed loads
+    unchanged and gains a one-element list.
+    """
+    if "locations" in cfg:
+        got = [Location.from_dict(item) for item in (cfg["locations"] or [])]
+        if got:
+            return tuple(got)
+    if "root" in cfg:
+        return (Location(kind="path", value=str(cfg["root"])),)
+    raise ValueError(
+        f"archive {name!r} in {path} has neither 'root' nor 'locations'")
+
+
+def _write_locations(cfg: "ArchiveConfig") -> Dict:
+    """Serialise locations, staying terse in the common case.
+
+    One local path is written back as `root:` -- the overwhelming majority
+    of entries, and a hand-edited file should not grow a list-of-dicts for
+    something that was a single line.
+    """
+    locs = list(cfg.locations)
+    if len(locs) == 1 and locs[0].kind == "path" and not locs[0].label:
+        return {"root": locs[0].value}
+    return {"locations": [loc.to_dict() for loc in locs]}
+
+
 class Registry:
     """Loads and queries the archive registry file.
 
@@ -97,7 +226,14 @@ class Registry:
     """
 
     def __init__(self, path: Optional[Path] = None):
-        self.path = Path(path) if path else DEFAULT_REGISTRY_PATH
+        if path:
+            self.path = Path(path)
+        else:
+            # Prefer the new name; fall back to the old one only if it is
+            # the only one there, so an upgrade is invisible.
+            self.path = DEFAULT_REGISTRY_PATH
+            if not DEFAULT_REGISTRY_PATH.exists() and LEGACY_REGISTRY_PATH.exists():
+                self.path = LEGACY_REGISTRY_PATH
         self._archives: Dict[str, ArchiveConfig] = {}
         self._loaded = False
 
@@ -110,13 +246,9 @@ class Registry:
         with open(self.path, "r") as f:
             raw = yaml.safe_load(f) or {}
         for name, cfg in raw.items():
-            if "root" not in cfg:
-                raise ValueError(
-                    f"archive {name!r} in {self.path} is missing a 'root' key"
-                )
             self._archives[name] = ArchiveConfig(
                 name=name,
-                root=Path(os.path.expanduser(cfg["root"])),
+                locations=_read_locations(name, cfg, self.path),
                 git_org=cfg.get("git_org"),
                 user=cfg.get("user"),
                 kind=cfg.get("kind") or "standard",
@@ -144,15 +276,72 @@ class Registry:
         self._load()
         return dict(self._archives)
 
-    def register(self, name: str, root: Path, git_org: Optional[str] = None,
+    def register(self, name: str, root=None, git_org: Optional[str] = None,
                  user: Optional[str] = None, kind: str = "standard",
-                 declared_name: str = "") -> None:
-        """Add or update an archive entry and persist it to disk."""
+                 declared_name: str = "",
+                 locations: "Optional[list[Location]]" = None) -> None:
+        """Add or update an archive entry and persist it to disk.
+
+        `root` is kept for every existing caller; `locations` is the way to
+        register more than one place at once.
+        """
         self._load()
+        if locations is None:
+            if root is None:
+                raise ValueError("register needs either root or locations")
+            locations = [Location(kind="path", value=str(root))]
         self._archives[name] = ArchiveConfig(
-            name=name, root=Path(root), git_org=git_org, user=user, kind=kind,
-            declared_name=declared_name or name)
+            name=name, locations=tuple(locations), git_org=git_org, user=user,
+            kind=kind, declared_name=declared_name or name)
         self._save()
+
+    def add_location(self, name: str, location: Location, *,
+                     first: bool = False) -> ArchiveConfig:
+        """Record another place this archive lives.
+
+        Appended by default: a newly-added location is usually a backup or
+        a server copy, and silently *preferring* it over the working copy
+        someone has been using would be a surprise. `first=True` says
+        otherwise explicitly.
+        """
+        self._load()
+        cfg = self.get(name)
+        existing = [loc for loc in cfg.locations
+                    if not (loc.kind == location.kind
+                            and loc.value == location.value)]
+        ordered = ([location] + existing) if first else (existing + [location])
+        self._archives[name] = replace(cfg, locations=tuple(ordered))
+        self._save()
+        return self._archives[name]
+
+    def remove_location(self, name: str, value: str) -> ArchiveConfig:
+        """Forget one location. The last one cannot be removed -- an entry
+        with nowhere to look is not a registration, it is a puzzle."""
+        self._load()
+        cfg = self.get(name)
+        kept = [loc for loc in cfg.locations if loc.value != value]
+        if not kept:
+            raise ValueError(
+                f"{value!r} is the only location for {name!r}; unregister the "
+                "archive instead of leaving it with nowhere to look")
+        if len(kept) == len(cfg.locations):
+            raise KeyError(f"{name!r} has no location {value!r}")
+        self._archives[name] = replace(cfg, locations=tuple(kept))
+        self._save()
+        return self._archives[name]
+
+    def migrate(self) -> Optional[Path]:
+        """Move a legacy archives.yaml to registry.yaml. Returns the new
+        path if anything moved."""
+        if self.path != LEGACY_REGISTRY_PATH or not self.path.exists():
+            return None
+        if DEFAULT_REGISTRY_PATH.exists():
+            return None
+        self._load()
+        DEFAULT_REGISTRY_PATH.parent.mkdir(parents=True, exist_ok=True)
+        os.replace(self.path, DEFAULT_REGISTRY_PATH)
+        self.path = DEFAULT_REGISTRY_PATH
+        return self.path
 
     def register_archive(self, root, *, git_org: Optional[str] = None,
                          key: Optional[str] = None) -> ArchiveConfig:
@@ -244,7 +433,7 @@ class Registry:
         self.path.parent.mkdir(parents=True, exist_ok=True)
         raw = {
             name: {
-                "root": str(cfg.root),
+                **_write_locations(cfg),
                 **({"git_org": cfg.git_org} if cfg.git_org else {}),
                 **({"user": cfg.user} if cfg.user else {}),
                 **({"kind": cfg.kind} if cfg.kind and cfg.kind != "standard" else {}),
@@ -262,7 +451,7 @@ _default_registry: Optional[Registry] = None
 
 def get_registry() -> Registry:
     """Process-wide default registry, loaded lazily from
-    ~/.nebula/archives.yaml (or $NEBULA_REGISTRY if set)."""
+    ~/.nebula/registry.yaml (or $NEBULA_REGISTRY if set)."""
     global _default_registry
     if _default_registry is None:
         override = os.environ.get("NEBULA_REGISTRY")

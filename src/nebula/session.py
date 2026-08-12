@@ -743,7 +743,7 @@ def new(
     """Create a brand-new session folder and return an open Session.
 
     `archive` is either a registered archive name (str) -- looked up in
-    ~/.nebula/archives.yaml -- or a literal filesystem root (Path), not
+    ~/.nebula/registry.yaml -- or a literal filesystem root (Path), not
     including the data/year/id path. See registry.resolve_archive() for
     the exact resolution rule.
 
