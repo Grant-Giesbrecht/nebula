@@ -163,13 +163,27 @@ shows a trailing-weeks strip sized to the current rail width; clicking a day
 filters the list, clicking it again clears. Only item 5 (the timeline canvas
 with lineage arcs) is left here.
 
-### 5. Timeline canvas with lineage arcs — **IDEA**
+### 5. Timeline canvas with lineage arcs — **FUTURE WORK**
 
 Time on the x-axis, one row per session, artifacts as marks, and
 `derived_from` edges drawn *between* rows — a file in August deriving from a
 raw run in March shows as an arc across the archive. This is the payoff of
-items 2–4 together, not a separate feature; only worth it if item 3 lands as
-a node-link diagram whose layout code can be shared.
+items 2–4 together, not a separate feature.
+
+**Parked 2026-08-12, deliberately, not blocked.** Grant: worth doing
+eventually, alongside a proper node-link diagram, but not now.
+
+The dependency is the reason to wait rather than to hurry. This entry
+originally made the canvas conditional on item 3 landing as a node-link
+diagram whose layout code could be shared; item 3 shipped as an indented
+*tree* (the right call for reading one artefact's provenance), so no layout
+code exists to share. Doing the canvas today means writing graph layout
+from scratch for a single view.
+
+The order that makes both cheap: build the **node-link diagram** first — as
+an alternative rendering of item 3's data, which is already computed and
+depth-capped — and let the canvas reuse its layout. Two views, one layout
+engine, in that order.
 
 ### 6. `source` as a facet — **DONE** (2026-08-11)
 
@@ -231,7 +245,6 @@ present.
 4. ~~Transitive lineage with a depth cap (item 2)~~ — **done**
 5. ~~Session provenance view, indented tree (item 3)~~ — **done**
 6. ~~`source` facet (item 6)~~ — **done** (2026-08-11)
-7. Timeline canvas (item 5) — **blocked, needs a decision.** Its own entry
-   makes it conditional on item 3 landing as a node-link diagram whose
-   layout code could be shared. Item 3 shipped as an indented *tree*, so
-   that precondition never held. It needs either a redesign or dropping.
+7. Node-link diagram, then the timeline canvas (item 5) — **future work**,
+   parked 2026-08-12. Wanted eventually; the diagram comes first so the
+   canvas can reuse its layout.

@@ -84,7 +84,12 @@ in `main.js`, around the existing panels) covering the seven settings:
 
 Larger questions live in their own documents:
 
-- `relational-data-roadmap.md` — lineage, provenance views, timeline canvas.
+- `relational-data-roadmap.md` — lineage, provenance views. Node-link
+  diagram and timeline canvas are future work, parked 2026-08-12.
+- `sync-roadmap.md` — backup, cloud sync and the client-server question.
+  Three items are ready to build regardless of that decision: sync-conflict
+  detection in `check`, a creating-machine field, and moving `index.db` out
+  of the synced tree.
 - `identity-trust-roadmap.md` — the owner segment of a nebula URI is
   self-asserted and unverified. Settles the identifier *shape*
   (`value@authority`, so ORCID / GitHub / email / hub ids coexist) and why
