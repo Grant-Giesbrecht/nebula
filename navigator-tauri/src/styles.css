@@ -107,6 +107,10 @@ body {
 .pop-sep { height:1px; background:var(--border); margin:6px 0 4px; }
 .pop .check { font-size:12.5px; }
 .pop .hint { color:var(--text-faint); font-size:11px; }
+.pop-syntax { font-size:11.5px; line-height:1.75; color:var(--text-dim); }
+.pop-syntax code { background:var(--panel-2); border:1px solid var(--border);
+                    border-radius:4px; padding:1px 4px; font-size:11px; color:var(--text); }
+.pop-syntax .hint { margin-top:2px; }
 .pop-dates { display:flex; gap:8px; }
 .pop-dates .field { flex:1; }
 .pop-dates input { height:28px; font-size:12.5px; border:1px solid var(--border-strong); border-radius:6px;

@@ -289,6 +289,133 @@ def test_search_items_limit_truncates(tmp_path):
 
 
 # ---------------------------------------------------------------------
+# search query syntax: field:, quoting, case sensitivity, wildcards
+# ---------------------------------------------------------------------
+
+def _tagged_sessions(archive):
+    """Two sessions, tagged twpa-v6 and twpa-V7 respectively, so tests can
+    tell substring/exact/case/wildcard rules apart."""
+    s6 = nebula.new(archive, tags=["twpa-v6"], description="run six")
+    with s6.artifact("a.csv") as fn:
+        fn.write_text("x")
+    s6.close()
+    s7 = nebula.new(archive, tags=["twpa-V7"], description="run seven")
+    with s7.artifact("b.csv") as fn:
+        fn.write_text("x")
+    s7.close()
+    return s6, s7
+
+
+def test_search_bare_term_is_loose_substring(tmp_path):
+    archive = tmp_path / "archive"
+    _tagged_sessions(archive)
+    # unquoted "twpa" is a substring match, so it hits both tags
+    assert len(_search(archive, "twpa")["items"]) == 2
+    # and an unquoted exact tag only hits the session with that exact tag,
+    # since it isn't a substring of the other one
+    assert [h["item"].name for h in _search(archive, "twpa-v6")["items"]] == ["a.csv"]
+
+
+def test_search_single_quotes_are_exact_case_insensitive(tmp_path):
+    archive = tmp_path / "archive"
+    _tagged_sessions(archive)
+    # exact match: 'twpa' alone does not match either compound tag
+    assert _search(archive, "'twpa'")["items"] == []
+    # but the exact tag, single-quoted, matches case-insensitively
+    assert [h["item"].name for h in _search(archive, "'twpa-v6'")["items"]] == ["a.csv"]
+    assert [h["item"].name for h in _search(archive, "'twpa-v7'")["items"]] == ["b.csv"]
+
+
+def test_search_double_quotes_are_exact_case_sensitive(tmp_path):
+    archive = tmp_path / "archive"
+    _tagged_sessions(archive)
+    assert [h["item"].name for h in _search(archive, '"twpa-v6"')["items"]] == ["a.csv"]
+    # wrong case does not match under double quotes
+    assert _search(archive, '"twpa-V6"')["items"] == []
+    # but does match the session that actually has that case
+    assert [h["item"].name for h in _search(archive, '"twpa-V7"')["items"]] == ["b.csv"]
+
+
+def test_search_wildcards_in_quotes(tmp_path):
+    archive = tmp_path / "archive"
+    _tagged_sessions(archive)
+    # a bare quoted "twpa" hits neither compound tag...
+    assert _search(archive, '"twpa"')["items"] == []
+    # ...but a wildcarded one reaches both, case-insensitively via '' ...
+    assert len(_search(archive, "'twpa*'")["items"]) == 2
+    # ...and case-sensitively via "" when the case actually lines up
+    assert len(_search(archive, '"twpa-v*"')["items"]) == 1  # only twpa-v6
+    assert len(_search(archive, '"twpa-V*"')["items"]) == 1  # only twpa-V7
+
+
+def test_search_field_prefix_scopes_the_match(tmp_path):
+    archive = tmp_path / "archive"
+    _tagged_sessions(archive)
+    # tag: scopes to the tags field regardless of the fields= filter --
+    # naming a field is a deliberate ask the checkboxes shouldn't defeat
+    res = _search(archive, "tag:'twpa*'", fields=["filename"])
+    assert len(res["items"]) == 2
+    res = _search(archive, "tag:'twpa-v6'", fields=[])
+    assert [h["item"].name for h in res["items"]] == ["a.csv"]
+    # session: matches the run's description exactly
+    assert [h["item"].name for h in
+            _search(archive, "session:'run six'")["items"]] == ["a.csv"]
+    # but not a substring of it, once quoted for an exact match
+    assert _search(archive, "session:'run'")["items"] == []
+
+
+def test_search_field_prefix_requires_a_known_name(tmp_path):
+    archive = tmp_path / "archive"
+    _tagged_sessions(archive)
+    # an unrecognised field name is kept as part of the literal term
+    res = _search(archive, "bogus:twpa-v6")
+    assert res["items"] == []  # "bogus:twpa-v6" isn't a substring of any field
+
+
+def test_search_clauses_still_and_together(tmp_path):
+    archive = tmp_path / "archive"
+    _tagged_sessions(archive)
+    assert [h["item"].name for h in
+            _search(archive, "tag:'twpa-v6' filename:'a.csv'")["items"]] == ["a.csv"]
+    assert _search(archive, "tag:'twpa-v6' filename:'b.csv'")["items"] == []
+
+
+# ---------------------------------------------------------------------
+# CLI: `nebula search` uses the same grammar as the GUI/model
+# ---------------------------------------------------------------------
+
+def test_cli_search_matches_and_reports_a_count(tmp_path, capsys):
+    from nebula import cli
+    archive = tmp_path / "archive"
+    _tagged_sessions(archive)
+
+    cli.main(["search", str(archive), "tag:'twpa-v6'"])
+    out = capsys.readouterr().out
+    assert "a.csv" in out and "b.csv" not in out
+    assert "1 match" in out
+
+
+def test_cli_search_wildcard_and_json(tmp_path, capsys):
+    from nebula import cli
+    archive = tmp_path / "archive"
+    _tagged_sessions(archive)
+
+    cli.main(["search", str(archive), "tag:'twpa*'", "--json"])
+    payload = json.loads(capsys.readouterr().out)
+    assert {i["filename"] for i in payload["items"]} == {"a.csv", "b.csv"}
+    assert payload["n_sessions"] == 2
+
+
+def test_cli_search_no_matches(tmp_path, capsys):
+    from nebula import cli
+    archive = tmp_path / "archive"
+    _tagged_sessions(archive)
+
+    cli.main(["search", str(archive), '"twpa"'])
+    assert "no matches" in capsys.readouterr().out
+
+
+# ---------------------------------------------------------------------
 # lineage (both directions of the provenance graph)
 # ---------------------------------------------------------------------
 

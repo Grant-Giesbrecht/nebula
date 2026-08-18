@@ -513,6 +513,33 @@ nebula collection <archive> show paper-2026        # resolved tree
 nebula collection <archive> list | rm | remove
 ```
 
+`nebula search` walks every session in an archive and matches artefacts
+against a query -- the same one the Navigator GUI's search bar takes, since
+both call `search_items`. A query is whitespace-separated clauses, ANDed:
+
+| clause | matches |
+|---|---|
+| `word` | case-insensitive substring, in any enabled field (unchanged from before) |
+| `'word'` | exact match of the whole field value, case-insensitive |
+| `"word"` | exact match of the whole field value, case-sensitive |
+| `'wo*d'`, `"wo?d"` | same, but `*`/`?` are glob wildcards inside the quotes |
+| `field:term` | scope any of the above to one field, e.g. `tag:'twpa*'` |
+
+So an unquoted `twpa-v6` still substring-matches, `"twpa-v6"` matches only
+that exact tag, and `"twpa*"` (or `'twpa*'`, case-insensitively) reaches
+both `twpa-v6` and `twpa-v7` deliberately, via the wildcard. Recognised
+field names: `filename`/`file`/`name`, `tag`/`tags`, `origin`/`source`,
+`session`/`run`/`run_id`, `user_tag`/`user_tags`, `comment`/`comments`; an
+explicit `field:` clause is checked regardless of which fields are enabled.
+Quote the whole query at the shell so its inner quotes survive, e.g.
+`nebula search postdoc "tag:'twpa*'"`.
+
+```
+nebula search postdoc diode csv               # AND of two substrings
+nebula search postdoc "tag:'twpa-v6'"          # exact tag, case-insensitive
+nebula search postdoc 'tag:"twpa*"'            # case-sensitive prefix wildcard
+```
+
 **Saved searches** are the computed counterpart — a stored query that
 answers itself, holding exactly the arguments `search_items` takes:
 
@@ -664,6 +691,8 @@ nebula archives                                    # list registered archives
 nebula register <name> <root> [--git-org ORG] [--user WHO]
 nebula whoami [--set NAME]                         # your name in nebula:// URIs
 nebula collection <archive> list|show|new|rename|rm|add|remove
+nebula search <archive> [query...] [--fields F,F] [--date-from D] [--date-to D]
+                        [--sources script|external|unrecorded ...] [--json]
 nebula view <archive> list|save|run|rm             # saved searches
                                                    # (alias: nebula saved-search)
 nebula config <archive> [--capture-code B] [--max-file-bytes N] [--on-overwrite P]

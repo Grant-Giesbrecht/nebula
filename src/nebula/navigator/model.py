@@ -21,6 +21,7 @@ from __future__ import annotations
 import datetime
 import json
 import os
+import re
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Dict, List, Optional
@@ -1061,6 +1062,145 @@ def resolve_refs(archive, run_id: str, refs: List[str]) -> List[dict]:
 ITEM_SEARCH_FIELDS = ("filename", "tags", "origin", "session",
                       "user_tags", "comments")
 
+#: What a query clause's ``field:`` prefix can spell, mapped to the
+#: internal field name above. Several read naturally either way ("tag" for
+#: a singular hit, "tags" to match how the checkbox is labelled), so both
+#: are accepted rather than picking one and surprising the other half of
+#: users.
+FIELD_ALIASES = {
+    "filename": "filename", "file": "filename", "name": "filename",
+    "tag": "tags", "tags": "tags",
+    "origin": "origin", "source": "origin",
+    "session": "session", "run": "session", "run_id": "session",
+    "utag": "user_tags", "utags": "user_tags",
+    "user_tag": "user_tags", "user_tags": "user_tags",
+    "comment": "comments", "comments": "comments",
+}
+
+
+@dataclass
+class SearchClause:
+    """One piece of a search query -- e.g. ``tag:'twpa*'`` or a bare word.
+
+    ``field`` is ``None`` when the clause has no ``field:`` prefix, in
+    which case it is checked against every field the caller has enabled
+    rather than one in particular.
+
+    ``quote`` records which quote character (if any) wrapped the term,
+    because that is what picks the matching rule:
+
+        no quote    -- case-insensitive substring (the old, default rule)
+        ' (single)  -- case-insensitive exact match, wildcards allowed
+        " (double)  -- case-sensitive exact match, wildcards allowed
+
+    "Exact match" means the whole field value must match, not just contain
+    the term -- that is the point of quoting. ``*`` and ``?`` inside a
+    quoted term are glob wildcards (any run of characters / any one
+    character), so ``'twpa*'`` reaches back into substring territory
+    deliberately, on request, while a bare ``'twpa'`` does not match
+    ``twpa-v6``.
+    """
+    field: Optional[str]
+    quote: Optional[str]
+    text: str
+
+
+def _wildcard_pattern(text: str) -> str:
+    """Turn a quoted search term into an anchored regex: ``*`` matches any
+    run of characters, ``?`` matches exactly one, everything else is
+    literal. A term with no wildcards therefore becomes an exact-match
+    regex, which is what plain quoting (no ``*``/``?``) is for."""
+    out = ["^"]
+    for ch in text:
+        if ch == "*":
+            out.append(".*")
+        elif ch == "?":
+            out.append(".")
+        else:
+            out.append(re.escape(ch))
+    out.append("$")
+    return "".join(out)
+
+
+def parse_search_query(query: str) -> List[SearchClause]:
+    """Split a search-bar query into clauses.
+
+    Clauses are whitespace-separated except inside quotes, so a quoted
+    term can contain spaces. Each clause may be prefixed with a known
+    ``field:`` name (see :data:`FIELD_ALIASES`) immediately before the
+    term, with no space -- ``tag:'twpa*'`` is one clause, ``tag: 'twpa*'``
+    is two (an unrecognised bare "tag:" clause, then a quoted one). An
+    unrecognised prefix is left alone and treated as part of the term
+    itself, so a colon in an ordinary word (a URL, say) doesn't silently
+    vanish.
+
+    All returned clauses must match (AND), same as the old whitespace-split
+    behaviour it replaces.
+    """
+    clauses: List[SearchClause] = []
+    i, n = 0, len(query)
+    field_re = re.compile(r"[A-Za-z_]+:")
+    while i < n:
+        while i < n and query[i].isspace():
+            i += 1
+        if i >= n:
+            break
+        field = None
+        m = field_re.match(query, i)
+        if m:
+            name = m.group(0)[:-1].lower()
+            if name in FIELD_ALIASES:
+                field = FIELD_ALIASES[name]
+                i = m.end()
+        if i < n and query[i] in ("'", '"'):
+            quote = query[i]
+            i += 1
+            buf: List[str] = []
+            while i < n and query[i] != quote:
+                if query[i] == "\\" and i + 1 < n:
+                    buf.append(query[i + 1])
+                    i += 2
+                else:
+                    buf.append(query[i])
+                    i += 1
+            if i < n:            # skip the closing quote if it was there
+                i += 1
+            clauses.append(SearchClause(field, quote, "".join(buf)))
+        else:
+            j = i
+            while j < n and not query[j].isspace():
+                j += 1
+            clauses.append(SearchClause(field, None, query[i:j]))
+            i = j
+    return clauses
+
+
+def _clause_matches(clause: SearchClause, field_values: Dict[str, List[str]],
+                    enabled_fields) -> bool:
+    """Whether one clause matches an item, given every field's candidate
+    strings. A clause with no ``field:`` prefix is checked against every
+    *enabled* field (the search-in checkboxes); an explicit ``field:``
+    always applies regardless of those checkboxes -- naming a field is a
+    deliberate, specific ask that a stale checkbox shouldn't silently
+    defeat."""
+    if not clause.text:
+        return True
+    candidate_fields = [clause.field] if clause.field else list(enabled_fields)
+    if clause.quote is None:
+        needle = clause.text.lower()
+        for f in candidate_fields:
+            for v in field_values.get(f, ()):
+                if needle in (v or "").lower():
+                    return True
+        return False
+    flags = re.IGNORECASE if clause.quote == "'" else 0
+    rx = re.compile(_wildcard_pattern(clause.text), flags)
+    for f in candidate_fields:
+        for v in field_values.get(f, ()):
+            if rx.match(v or ""):
+                return True
+    return False
+
 
 def _in_date_range(timestamp, date_from, date_to) -> bool:
     """Compare an ISO timestamp's date part against YYYY-MM-DD bounds
@@ -1092,14 +1232,27 @@ def search_items(
 ) -> dict:
     """Search artefacts across every session in an archive.
 
-    ``query`` is split on whitespace and every term must match somewhere in
-    the enabled ``fields`` (AND, case-insensitive substring) -- so "diode
-    csv" finds a csv in a diode-tagged session. Fields:
+    ``query`` is split into clauses on whitespace (see
+    :func:`parse_search_query`), and every clause must match somewhere in
+    the enabled ``fields`` -- AND across clauses, OR across the fields one
+    clause is checked against. Fields:
 
-        filename -- the artefact's own name
-        tags     -- its *session's* tags (tags live on sessions, not files)
-        origin   -- the sidecar's free-text origin, plus script/external
-        session  -- the run id and session description
+        filename  -- the artefact's own name
+        tags      -- its *session's* tags (tags live on sessions, not files)
+        origin    -- the sidecar's free-text origin, plus script/external
+        session   -- the run id and session description
+        user_tags -- your tags on the item or the session
+        comments  -- your comments on the item or the session
+
+    Each clause is a bare word, or a term wrapped in quotes, optionally
+    preceded by ``field:`` (e.g. ``tag:'twpa*'``) to check one field
+    instead of every enabled one -- see :data:`FIELD_ALIASES` for the
+    names ``field:`` accepts. Bare words keep the old behaviour: a
+    case-insensitive substring match. Quoting switches to an exact match of
+    the whole field value -- ``'word'`` case-insensitively, ``"word"``
+    case-sensitively -- and ``*``/``?`` inside the quotes are glob
+    wildcards, so ``"twpa*"`` reaches back into substring/prefix territory
+    on request while a bare quoted ``"twpa"`` does not match ``twpa-v6``.
 
     ``date_from``/``date_to`` are inclusive YYYY-MM-DD bounds on the item's
     timestamp (its sidecar 'created', else the file's mtime).
@@ -1115,7 +1268,7 @@ def search_items(
     archive.
     """
     fields = set(fields or ITEM_SEARCH_FIELDS)
-    terms = [t for t in (query or "").lower().split() if t]
+    clauses = parse_search_query(query or "")
     empty = {"items": [], "truncated": False, "n_sessions": 0, "n_scanned": 0}
     # None means "no source filter"; an explicit empty list means the user
     # unticked every box, which asks for nothing and must not silently read
@@ -1130,7 +1283,7 @@ def search_items(
             return empty
         if wanted == set(SOURCE_FACETS):
             wanted = set()
-    if not terms and not date_from and not date_to and not wanted:
+    if not clauses and not date_from and not date_to and not wanted:
         return empty
 
     root, _ = resolve(archive)
@@ -1147,26 +1300,20 @@ def search_items(
                 continue
             if wanted and item_source_facet(it) not in wanted:
                 continue
-            if terms:
-                hay: List[str] = []
-                if "filename" in fields:
-                    hay.append(it.name)
-                if "tags" in fields:
-                    hay.extend(s.tags)
-                if "origin" in fields:
-                    hay.append(it.origin or "")
-                    hay.append(it.source or "")
-                if "session" in fields:
-                    hay.append(s.run_id)
-                    hay.append(s.description)
-                if "user_tags" in fields:
-                    hay.extend(it.user_tags)
-                    hay.extend(session_notes["tags"])
-                if "comments" in fields:
-                    hay.append(it.user_comment)
-                    hay.append(session_notes["comment"])
-                blob = " ".join(hay).lower()
-                if not all(t in blob for t in terms):
+            if clauses:
+                # Built for every field regardless of what's enabled, so
+                # an explicit field:term clause still works even if that
+                # field's checkbox is off -- naming a field is a
+                # deliberate ask the checkboxes shouldn't defeat.
+                field_values = {
+                    "filename": [it.name],
+                    "tags": list(s.tags),
+                    "origin": [it.origin or "", it.source or ""],
+                    "session": [s.run_id, s.description],
+                    "user_tags": list(it.user_tags) + list(session_notes["tags"]),
+                    "comments": [it.user_comment, session_notes["comment"]],
+                }
+                if not all(_clause_matches(c, field_values, fields) for c in clauses):
                     continue
             if len(out) >= limit:
                 truncated = True

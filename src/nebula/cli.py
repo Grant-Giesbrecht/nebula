@@ -27,6 +27,9 @@ Usage:
     nebula upstream <archive> <run_id> <filename>
     nebula downstream <archive> <run_id> <filename> [--also-search ARCHIVE ...]
     nebula stale <archive> [--hours N]
+    nebula search <archive> [query...] [--fields F,F] [--date-from D] [--date-to D]
+                             [--sources script|external|unrecorded ...] [--json]
+    nebula view <archive> list|save|rm|run       # (alias: saved-search)
     nebula index <archive> [--rebuild]          # index status / freshness
     nebula seal <archive> <year> [--force]      # declare a year finished
     nebula unseal <archive> <year>
@@ -1052,6 +1055,40 @@ def cmd_view(args):
         sys.exit(1)
 
 
+def cmd_search(args):
+    """Search artefacts across every session in an archive -- the CLI
+    counterpart to the Navigator's search bar, and driven by the exact
+    same query grammar (see nebula.navigator.model.search_items)."""
+    from nebula.navigator import model
+
+    query = " ".join(args.query) if args.query else ""
+    fields = args.fields.split(",") if args.fields else None
+    sources = args.sources if args.sources else None
+    res = model.search_items(
+        args.archive, query, fields=fields,
+        date_from=args.date_from, date_to=args.date_to,
+        sources=sources, limit=args.limit,
+    )
+    if args.json:
+        print(json.dumps({
+            "truncated": res["truncated"], "n_sessions": res["n_sessions"],
+            "n_scanned": res["n_scanned"],
+            "items": [{"run_id": h["run_id"], "filename": h["item"].name,
+                       "session_path": h["session_path"],
+                       "tags": h["tags"]} for h in res["items"]],
+        }, indent=2))
+        return
+    hits = res["items"]
+    if not hits:
+        print("no matches")
+    for h in hits:
+        tag_str = ",".join(h["tags"]) if h["tags"] else "-"
+        print(f"{h['run_id']}/{h['item'].name}  [{tag_str}]")
+    suffix = "+" if res["truncated"] else ""
+    print(f"\n{len(hits)}{suffix} match(es) -- {res['n_scanned']} artefact(s) "
+          f"scanned in {res['n_sessions']} session(s)")
+
+
 def cmd_whoami(args):
     from nebula import identity
 
@@ -1545,6 +1582,39 @@ def main(argv=None):
     q.add_argument("name")
     q.add_argument("refs", nargs="+")
     p.set_defaults(func=cmd_collection)
+
+    p = sub.add_parser(
+        "search", help="search artefacts across every session in an archive",
+        description="Search artefacts across every session in an archive -- "
+                     "the same query grammar as the Navigator GUI's search "
+                     "bar. Bare words are a case-insensitive substring match, "
+                     "ANDed together. Wrap a term in quotes for an exact "
+                     "match of the whole field value: single quotes "
+                     "('word') case-insensitively, double quotes (\"word\") "
+                     "case-sensitively; * and ? inside quotes are glob "
+                     "wildcards (\"twpa*\" reaches twpa-v6 and twpa-v7, a "
+                     "bare \"twpa\" reaches neither). Prefix a term with a "
+                     "field name to search just that field, e.g. "
+                     "tag:'twpa*' -- known fields: filename, tag(s), "
+                     "origin/source, session, user_tag(s), comment(s). "
+                     "Remember to quote the whole query at the shell so its "
+                     "own quotes survive, e.g. nebula search postdoc "
+                     "\"tag:'twpa*'\".")
+    p.add_argument("archive", help="registered archive name, or a literal path")
+    p.add_argument("query", nargs="*", help="search query (see above); "
+                   "multiple words are ANDed, same as one space-separated query")
+    p.add_argument("--fields", help="comma-separated fields to search by default "
+                   "when a clause has no field: prefix: filename,tags,origin,"
+                   "session,user_tags,comments (default: all of them)")
+    p.add_argument("--date-from", dest="date_from", metavar="YYYY-MM-DD",
+                   help="only artefacts created on/after this date")
+    p.add_argument("--date-to", dest="date_to", metavar="YYYY-MM-DD",
+                   help="only artefacts created on/before this date")
+    p.add_argument("--sources", nargs="*", choices=("script", "external", "unrecorded"),
+                   help="restrict to how the artefact got here")
+    p.add_argument("--limit", type=int, default=1000, help="cap on results (default 1000)")
+    p.add_argument("--json", action="store_true", help="machine-readable output")
+    p.set_defaults(func=cmd_search)
 
     p = sub.add_parser("view", aliases=["saved-search"], help="saved searches")
     p.add_argument("archive", help="registered archive name, or a literal path")

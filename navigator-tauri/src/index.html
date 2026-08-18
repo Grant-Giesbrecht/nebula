@@ -387,10 +387,20 @@
           <span class="s-ico">
             <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><circle cx="11" cy="11" r="7"/><line x1="16.5" y1="16.5" x2="21" y2="21"/></svg>
           </span>
-          <input id="itemSearch" placeholder="Search artefacts in this archive — filenames, tags, origin…" spellcheck="false" />
+          <input id="itemSearch" placeholder="Search artefacts — try tag:'twpa*' or &quot;exact-name&quot;…"
+                 title="Bare words: substring match. 'word': exact match, case-insensitive. &quot;word&quot;: exact match, case-sensitive. * and ? are wildcards inside quotes. Prefix with a field name to scope the match, e.g. tag:'twpa*'." spellcheck="false" />
           <button class="s-x hidden" id="itemSearchClear" title="Clear search">✕</button>
           <button class="abtn wide-btn" id="itemCfgBtn" title="Advanced search options">⚙ Advanced</button>
           <div class="pop right hidden" id="itemCfg">
+          <div class="pop-h">Query syntax</div>
+          <div class="pop-syntax">
+            <code>word</code> substring, any case<br>
+            <code>'word'</code> exact match, any case<br>
+            <code>"word"</code> exact match, case-sensitive<br>
+            <code>*</code> / <code>?</code> wildcards inside quotes<br>
+            <code>tag:'twpa*'</code> scope to one field
+            <div class="hint">fields: filename, tag(s), origin, session, user_tag(s), comment(s)</div>
+          </div>
           <div class="pop-h">Search in</div>
           <label class="check"><input type="checkbox" id="ifName" checked /> Filenames</label>
           <label class="check"><input type="checkbox" id="ifTag" checked /> Session Tags </label>
