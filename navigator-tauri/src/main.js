@@ -3608,6 +3608,8 @@ function showItemMenu(x, y) {
     { label: many ? "Add all to collection…" : "Add to collection…",
       action: () => openCollectionPicker(selectedRefs(), label) },
     ...collectionShortcuts(() => selectedRefs(), label),
+    { label: "Bulk edit tags & comments…", disabled: !it,
+      action: openBulkTagDialog },
     { label: "Export as a fragment…", disabled: !selectedRefs().length,
       action: () => exportSelection({ refs: selectedRefs(), label }) },
     { label: "Show relations", disabled: many || !it,
@@ -4527,6 +4529,95 @@ function wireNotes(kind, sessionPath, filename, onSaved) {
   };
 }
 
+// ---- bulk tag/comment editor --------------------------------------------
+// Cmd/Ctrl-Shift-T on a multi-selection: add/remove tags and append one
+// comment line across every picked artefact in one go. Each file keeps its
+// own existing tags and comment -- this only adds, removes, and appends,
+// it never replaces a file's whole annotation the way the single-file
+// notes editor's "Save" does.
+let bulkTagTargets = [];
+
+// Whatever is highlighted -- the multi-selection if there is one, else
+// just the single selected file. Each target carries its own session, so
+// a selection spanning search results across sessions still works.
+function pickedTargets() {
+  const list = picked.length > 1 ? picked : (selected ? [selected] : []);
+  const fallbackSession = curSession && curSession.path;
+  const fallbackRun = curSession && curSession.run_id;
+  return list
+    .map((it) => ({
+      session_path: it.session_path || fallbackSession,
+      filename: it.name,
+      run_id: it.run_id || fallbackRun,
+    }))
+    .filter((t) => t.session_path && t.filename);
+}
+
+function openBulkTagDialog() {
+  const targets = pickedTargets();
+  if (!targets.length) { toast("Select one or more files first."); return; }
+  bulkTagTargets = targets;
+  $("bulkTagTarget").textContent = targets.length === 1
+    ? targets[0].filename : `${targets.length} files`;
+  $("bulkTagList").innerHTML = targets
+    .map((t) => `<div class="f">${escapeHtml(t.run_id ? `${t.run_id}/${t.filename}` : t.filename)}</div>`)
+    .join("");
+  $("bulkTagAdd").value = "";
+  $("bulkTagRemove").value = "";
+  $("bulkTagComment").value = "";
+  $("bulkTagNote").textContent = "";
+  $("bulkTagNote").className = "bulk-note";
+  showDialog("bulkTagScrim");
+}
+
+async function saveBulkTags() {
+  const addTags = $("bulkTagAdd").value.trim();
+  const removeTags = $("bulkTagRemove").value.trim();
+  const comment = $("bulkTagComment").value.trim();
+  if (!addTags && !removeTags && !comment) { toast("Nothing to save."); return; }
+  try {
+    const res = await call("bulk_annotate", {
+      targets: bulkTagTargets.map((t) => ({ session_path: t.session_path, filename: t.filename })),
+      add_tags: addTags, remove_tags: removeTags, append_comment: comment,
+    });
+    if (res.error) {
+      $("bulkTagNote").textContent = res.error;      // a bad tag, rejected before writing anything
+      $("bulkTagNote").className = "bulk-note err";
+      return;
+    }
+    const byKey = {};
+    let okCount = 0, failCount = 0;
+    for (const r of res.results) {
+      byKey[`${r.session_path} ${r.filename}`] = r;
+      if (r.ok) okCount++; else failCount++;
+    }
+    // Reflect the new tags/comment into whatever is already in memory --
+    // the item list and the detail panel -- so the GUI doesn't need a
+    // round trip to the archive to show what just changed.
+    const applyTo = (it) => {
+      if (!it) return;
+      const sessionPath = it.session_path || (curSession && curSession.path);
+      const r = byKey[`${sessionPath} ${it.name}`];
+      if (r && r.ok) { it.user_tags = r.tags; it.user_comment = r.comment; }
+    };
+    (items || []).forEach(applyTo);
+    if (selected) applyTo(selected);
+    picked.forEach(applyTo);
+    renderItemArea();
+    updateDetails();
+    for (const t of bulkTagTargets) {
+      announceChange({ session_path: t.session_path, filename: t.filename });
+    }
+    $("bulkTagScrim").classList.remove("show");
+    toast(failCount
+      ? `Updated ${okCount} file(s), ${failCount} failed`
+      : `Updated ${okCount} file(s)`);
+  } catch (e) {
+    $("bulkTagNote").textContent = `${e}`;
+    $("bulkTagNote").className = "bulk-note err";
+  }
+}
+
 // ---- captured source ----------------------------------------------------
 // What was snapshotted for this artifact: which snapshot, how big, which
 // repos it drew from, and how much of it the store already had.
@@ -5206,6 +5297,7 @@ const MENU_ACTIONS = {
   relations: openRelationsForSelection,
   "index-view": () => openIndexTab(curSession ? curSession.run_id : ""),
   collect: addSelectionToCollection,
+  "bulk-tag": openBulkTagDialog,
   "tab-sessions": () => setRailTab("sessions"),
   "tab-collections": () => setRailTab("collections"),
   "tab-assets": () => setRailTab("assets"),
@@ -5273,6 +5365,7 @@ function initShortcuts() {
     else if (k === "i" && shift) name = "import";
     else if (k === "o" && !shift) name = "open";
     else if (k === "c" && shift) name = "collect";
+    else if (k === "t" && shift) name = "bulk-tag";
     else if (k === "1" && !shift) name = "tab-sessions";
     else if (k === "2" && !shift) name = "tab-collections";
     else if (k === "3" && !shift) name = "tab-assets";
@@ -5466,6 +5559,9 @@ $("collNew").onchange = syncCollMode;
 $("collCancel").onclick = () => $("collScrim").classList.remove("show");
 $("collOk").onclick = doAddToCollection;
 $("collScrim").onclick = (e) => { if (e.target === $("collScrim")) $("collScrim").classList.remove("show"); };
+$("bulkTagCancel").onclick = () => $("bulkTagScrim").classList.remove("show");
+$("bulkTagOk").onclick = saveBulkTags;
+$("bulkTagScrim").onclick = (e) => { if (e.target === $("bulkTagScrim")) $("bulkTagScrim").classList.remove("show"); };
 $("arcBtn").onclick = openArchivePanel;
 $("arcClose").onclick = () => $("arcScrim").classList.remove("show");
 $("arcScrim").onclick = (e) => { if (e.target === $("arcScrim")) $("arcScrim").classList.remove("show"); };

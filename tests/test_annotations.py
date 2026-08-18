@@ -143,6 +143,29 @@ def test_add_and_remove_tags(tmp_path):
     assert annotations.get(s.path, "a.csv")["tags"] == ["one", "three"]
 
 
+def test_append_comment_adds_a_line_without_losing_the_rest(tmp_path):
+    archive = tmp_path / "archive"
+    s = _session(archive)
+    annotations.append_comment(s.path, "a.csv", "first line")
+    annotations.append_comment(s.path, "a.csv", "second line")
+    assert annotations.get(s.path, "a.csv")["comment"] == "first line\nsecond line"
+
+
+def test_append_comment_onto_empty_comment(tmp_path):
+    archive = tmp_path / "archive"
+    s = _session(archive)
+    annotations.append_comment(s.path, "a.csv", "  padded  ")
+    assert annotations.get(s.path, "a.csv")["comment"] == "padded"
+
+
+def test_append_comment_blank_text_is_a_no_op(tmp_path):
+    archive = tmp_path / "archive"
+    s = _session(archive)
+    annotations.set_annotation(s.path, "a.csv", comment="keep")
+    annotations.append_comment(s.path, "a.csv", "   ")
+    assert annotations.get(s.path, "a.csv")["comment"] == "keep"
+
+
 def test_bad_tag_is_rejected_without_writing(tmp_path):
     archive = tmp_path / "archive"
     s = _session(archive)
@@ -239,6 +262,84 @@ def test_check_reports_annotations_for_a_missing_file(tmp_path):
     assert len(issues) == 1
     assert issues[0].severity == "info"        # not corruption
     assert issues[0].file == "gone.csv"
+
+
+# ---------------------------------------------------------------------
+# bulk editing (GUI multi-select)
+# ---------------------------------------------------------------------
+
+def test_bulk_annotate_adds_and_removes_tags_across_targets(tmp_path):
+    from nebula.navigator import api
+
+    archive = tmp_path / "archive"
+    s = _session(archive, files=("a.csv", "b.csv"))
+    annotations.add_tags(s.path, "a.csv", ["keep-me", "drop-me"])
+
+    res = api.dispatch("bulk_annotate", {
+        "targets": [{"session_path": str(s.path), "filename": "a.csv"},
+                    {"session_path": str(s.path), "filename": "b.csv"}],
+        "add_tags": "twpa-v6, shared",
+        "remove_tags": "drop-me",
+    })
+    by_file = {r["filename"]: r for r in res["results"]}
+    assert by_file["a.csv"]["ok"] and by_file["a.csv"]["tags"] == ["keep-me", "twpa-v6", "shared"]
+    assert by_file["b.csv"]["ok"] and by_file["b.csv"]["tags"] == ["twpa-v6", "shared"]
+
+
+def test_bulk_annotate_appends_a_comment_line_preserving_each_files_own(tmp_path):
+    from nebula.navigator import api
+
+    archive = tmp_path / "archive"
+    s = _session(archive, files=("a.csv", "b.csv"))
+    annotations.set_annotation(s.path, "a.csv", comment="a's own note")
+
+    res = api.dispatch("bulk_annotate", {
+        "targets": [{"session_path": str(s.path), "filename": "a.csv"},
+                    {"session_path": str(s.path), "filename": "b.csv"}],
+        "append_comment": "shows drift",
+    })
+    by_file = {r["filename"]: r for r in res["results"]}
+    assert by_file["a.csv"]["comment"] == "a's own note\nshows drift"
+    assert by_file["b.csv"]["comment"] == "shows drift"
+
+
+def test_bulk_annotate_bad_shared_tag_reports_error_without_touching_targets(tmp_path):
+    from nebula.navigator import api
+
+    archive = tmp_path / "archive"
+    s = _session(archive, files=("a.csv",))
+    annotations.set_annotation(s.path, "a.csv", tags=["existing"])
+
+    res = api.dispatch("bulk_annotate", {
+        "targets": [{"session_path": str(s.path), "filename": "a.csv"}],
+        "add_tags": "bad\ttab",   # invalid: tabs aren't allowed inside a tag
+    })
+    assert res["results"] == [] and "error" in res
+    assert annotations.get(s.path, "a.csv")["tags"] == ["existing"]
+
+
+def test_bulk_annotate_one_bad_target_does_not_stop_the_rest(tmp_path):
+    from nebula.navigator import api
+
+    archive = tmp_path / "archive"
+    s = _session(archive, files=("a.csv", "b.csv"))
+    # A regular file standing in for "this target's session is gone" --
+    # writing an annotation there fails with a real OSError, deterministically
+    # and without touching anything outside tmp_path.
+    not_a_session = tmp_path / "not_a_session.txt"
+    not_a_session.write_text("x")
+
+    res = api.dispatch("bulk_annotate", {
+        "targets": [{"session_path": str(s.path), "filename": "a.csv"},
+                    {"session_path": str(not_a_session), "filename": "b.csv"},
+                    {"session_path": str(s.path), "filename": "c.csv"}],
+        "add_tags": "twpa-v6",
+    })
+    by_file = {r["filename"]: r for r in res["results"]}
+    assert by_file["a.csv"]["ok"] and by_file["a.csv"]["tags"] == ["twpa-v6"]
+    assert by_file["c.csv"]["ok"] and by_file["c.csv"]["tags"] == ["twpa-v6"]
+    assert not by_file["b.csv"]["ok"] and by_file["b.csv"]["error"]
+    assert annotations.get(s.path, "a.csv")["tags"] == ["twpa-v6"]
 
 
 # ---------------------------------------------------------------------

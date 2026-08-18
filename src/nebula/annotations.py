@@ -246,6 +246,20 @@ def remove_tags(session_dir, filename: Optional[str], tags) -> Dict[str, Any]:
                           tags=[t for t in current if t not in drop])
 
 
+def append_comment(session_dir, filename: Optional[str], text: str) -> Dict[str, Any]:
+    """Add a line to the existing comment rather than replacing it -- the
+    bulk editor's use case: noting the same thing on several files without
+    clobbering whatever was already written on each one. A blank ``text``
+    is a no-op, so callers can pass through an empty bulk-edit field
+    unconditionally."""
+    line = (text or "").strip()
+    if not line:
+        return get(session_dir, filename)
+    current = get(session_dir, filename)["comment"]
+    combined = f"{current}\n{line}" if current else line
+    return set_annotation(session_dir, filename, comment=combined)
+
+
 def annotated_files(session_dir) -> List[str]:
     """Artifact names this session has annotations for -- including any
     that no longer exist, which `check` reports."""

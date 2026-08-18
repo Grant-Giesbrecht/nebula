@@ -650,6 +650,34 @@
     </div>
   </div>
 
+  <div class="scrim" id="bulkTagScrim">
+    <div class="dialog" role="dialog" aria-modal="true" aria-labelledby="bulkTagHead">
+      <div class="dlg-head" id="bulkTagHead">Bulk edit tags &amp; comments</div>
+      <div class="dlg-body">
+        <div class="dlg-arc">editing <b id="bulkTagTarget"></b></div>
+        <div class="bulk-list" id="bulkTagList"></div>
+        <div class="field">
+          <label>Add tags <span class="hint">comma-separated; applied to every file above</span></label>
+          <input class="notes-tags" id="bulkTagAdd" placeholder="e.g. shows-drift, paper:2026" spellcheck="false" />
+        </div>
+        <div class="field">
+          <label>Remove tags <span class="hint">comma-separated; only removes tags a file already has</span></label>
+          <input class="notes-tags" id="bulkTagRemove" placeholder="e.g. needs-review" spellcheck="false" />
+        </div>
+        <div class="field">
+          <label>Add a comment line <span class="hint">appended to each file's existing comment, not a replacement</span></label>
+          <textarea class="notes-comment" id="bulkTagComment" rows="3"
+                    placeholder="anything worth noting on all of these"></textarea>
+        </div>
+        <div class="bulk-note" id="bulkTagNote"></div>
+      </div>
+      <div class="dlg-actions">
+        <button class="dbtn ghost" id="bulkTagCancel">Cancel</button>
+        <button class="dbtn fill" id="bulkTagOk">Save</button>
+      </div>
+    </div>
+  </div>
+
   <div class="scrim" id="cfmScrim">
     <div class="dialog" role="dialog" aria-modal="true" aria-labelledby="cfmHead">
       <div class="dlg-head" id="cfmHead">Are you sure?</div>

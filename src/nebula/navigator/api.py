@@ -395,6 +395,48 @@ def op_set_annotation(args: Dict[str, Any]) -> Dict[str, Any]:
     )
 
 
+def op_bulk_annotate(args: Dict[str, Any]) -> Dict[str, Any]:
+    """Edit tags and/or append a comment line on several targets at once --
+    the multi-select bulk editor. Each target keeps its own existing tags
+    and comment; this only adds/removes tags and appends a line, it never
+    replaces a target's whole annotation the way ``set_annotation`` does.
+
+    A bad tag on one target must not lose the edits already made to the
+    others, so failures are collected per-target rather than raised.
+    """
+    from nebula import annotations
+
+    targets = args.get("targets") or []
+    try:
+        add_tags = annotations.split_tags(args.get("add_tags") or "")
+        rm_tags = annotations.split_tags(args.get("remove_tags") or "")
+    except annotations.TagError as e:
+        return {"results": [], "error": str(e)}
+    comment_line = (args.get("append_comment") or "").strip()
+
+    results = []
+    for t in targets:
+        session_path = t.get("session_path")
+        filename = t.get("filename")
+        try:
+            if add_tags:
+                annotations.add_tags(session_path, filename, add_tags)
+            if rm_tags:
+                annotations.remove_tags(session_path, filename, rm_tags)
+            if comment_line:
+                annotations.append_comment(session_path, filename, comment_line)
+            got = annotations.get(session_path, filename)
+            results.append({"session_path": session_path, "filename": filename,
+                            "ok": True, "tags": got["tags"], "comment": got["comment"]})
+        except (annotations.TagError, OSError) as e:
+            # One target's session having vanished (a stale search result,
+            # a session that was just deleted in another window) must not
+            # lose the edits already applied to every other target.
+            results.append({"session_path": session_path, "filename": filename,
+                            "ok": False, "error": str(e)})
+    return {"results": results}
+
+
 def op_activity(args: Dict[str, Any]) -> Dict[str, Any]:
     return model.activity(args["archive"])
 
@@ -956,6 +998,7 @@ OPS = {
     "release": op_release,
     "get_annotations": op_get_annotations,
     "set_annotation": op_set_annotation,
+    "bulk_annotate": op_bulk_annotate,
     "entry_point_link": op_entry_point_link,
     "open_url": op_open_url,
     "importable_sessions": op_importable_sessions,

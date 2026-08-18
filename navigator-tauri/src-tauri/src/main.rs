@@ -326,6 +326,9 @@ fn install_menu(app: &tauri::App) -> tauri::Result<()> {
     let edit_menu_extras = MenuItemBuilder::with_id("menu:collect", "Add to Collection…")
         .accelerator("CmdOrCtrl+Shift+C")
         .build(app)?;
+    let bulk_tag = MenuItemBuilder::with_id("menu:bulk-tag", "Bulk Edit Tags/Comments…")
+        .accelerator("CmdOrCtrl+Shift+T")
+        .build(app)?;
 
     let edit_menu = SubmenuBuilder::new(app, "Edit")
         .undo()
@@ -337,6 +340,7 @@ fn install_menu(app: &tauri::App) -> tauri::Result<()> {
         .select_all()
         .separator()
         .item(&edit_menu_extras)
+        .item(&bulk_tag)
         .build()?;
 
     // Ids match the MENU_ACTIONS table in main.js.
