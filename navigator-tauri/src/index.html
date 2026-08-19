@@ -655,7 +655,17 @@
       <div class="dlg-head" id="bulkTagHead">Bulk edit tags &amp; comments</div>
       <div class="dlg-body">
         <div class="dlg-arc">editing <b id="bulkTagTarget"></b></div>
-        <div class="bulk-list" id="bulkTagList"></div>
+        <div class="bulk-list" id="bulkTagFileList"></div>
+        <div class="bulk-taggrid">
+          <div class="field">
+            <label>In every file <span class="hint">click a tag to stage it for removal</span></label>
+            <div class="bulk-taglist" id="bulkTagAllList"></div>
+          </div>
+          <div class="field">
+            <label>In some files <span class="hint">click a tag to stage it for removal</span></label>
+            <div class="bulk-taglist" id="bulkTagSomeList"></div>
+          </div>
+        </div>
         <div class="field">
           <label>Add tags <span class="hint">comma-separated; applied to every file above</span></label>
           <input class="notes-tags" id="bulkTagAdd" placeholder="e.g. shows-drift, paper:2026" spellcheck="false" />
@@ -673,6 +683,7 @@
       </div>
       <div class="dlg-actions">
         <button class="dbtn ghost" id="bulkTagCancel">Cancel</button>
+        <button class="dbtn ghost" id="bulkTagApply">Apply</button>
         <button class="dbtn fill" id="bulkTagOk">Save</button>
       </div>
     </div>

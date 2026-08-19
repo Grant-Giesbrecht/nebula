@@ -4535,49 +4535,112 @@ function wireNotes(kind, sessionPath, filename, onSaved) {
 // own existing tags and comment -- this only adds, removes, and appends,
 // it never replaces a file's whole annotation the way the single-file
 // notes editor's "Save" does.
-let bulkTagTargets = [];
+//
+// `bulkTagItems` holds the actual item object references (not copies), so
+// the "in every file" / "in some files" tag lists can just read
+// `.user_tags` off them and stay correct after Apply without a re-fetch --
+// applyBulkTags() mutates these same objects in place.
+let bulkTagItems = [];
+
+function bulkTagTarget(it) {
+  return {
+    session_path: it.session_path || (curSession && curSession.path),
+    filename: it.name,
+    run_id: it.run_id || (curSession && curSession.run_id),
+  };
+}
 
 // Whatever is highlighted -- the multi-selection if there is one, else
-// just the single selected file. Each target carries its own session, so
-// a selection spanning search results across sessions still works.
-function pickedTargets() {
-  const list = picked.length > 1 ? picked : (selected ? [selected] : []);
-  const fallbackSession = curSession && curSession.path;
-  const fallbackRun = curSession && curSession.run_id;
-  return list
-    .map((it) => ({
-      session_path: it.session_path || fallbackSession,
-      filename: it.name,
-      run_id: it.run_id || fallbackRun,
-    }))
-    .filter((t) => t.session_path && t.filename);
+// just the single selected file. Each carries its own session, so a
+// selection spanning search results across sessions still works.
+function pickedItems() {
+  return picked.length > 1 ? picked : (selected ? [selected] : []);
 }
 
 function openBulkTagDialog() {
-  const targets = pickedTargets();
-  if (!targets.length) { toast("Select one or more files first."); return; }
-  bulkTagTargets = targets;
-  $("bulkTagTarget").textContent = targets.length === 1
-    ? targets[0].filename : `${targets.length} files`;
-  $("bulkTagList").innerHTML = targets
-    .map((t) => `<div class="f">${escapeHtml(t.run_id ? `${t.run_id}/${t.filename}` : t.filename)}</div>`)
-    .join("");
+  const list = pickedItems().filter((it) => it.name && bulkTagTarget(it).session_path);
+  if (!list.length) { toast("Select one or more files first."); return; }
+  bulkTagItems = list;
+  $("bulkTagTarget").textContent = list.length === 1 ? list[0].name : `${list.length} files`;
+  $("bulkTagFileList").innerHTML = list.map((it) => {
+    const t = bulkTagTarget(it);
+    return `<div class="f">${escapeHtml(t.run_id ? `${t.run_id}/${it.name}` : it.name)}</div>`;
+  }).join("");
   $("bulkTagAdd").value = "";
   $("bulkTagRemove").value = "";
   $("bulkTagComment").value = "";
   $("bulkTagNote").textContent = "";
   $("bulkTagNote").className = "bulk-note";
+  renderBulkTagSummary();
   showDialog("bulkTagScrim");
 }
 
-async function saveBulkTags() {
+// Splits the selection's tags into "on every file" and "on some, but not
+// all" -- the second list is where over-tagging usually hides, so it is
+// the one worth scanning when deciding what to remove.
+function bulkTagSummary() {
+  const counts = new Map();
+  for (const it of bulkTagItems) {
+    for (const tag of new Set(it.user_tags || [])) {
+      counts.set(tag, (counts.get(tag) || 0) + 1);
+    }
+  }
+  const total = bulkTagItems.length;
+  const all = [], some = [];
+  for (const [tag, n] of counts) (n === total ? all : some).push(tag);
+  const byName = (a, b) => a.localeCompare(b);
+  return { all: all.sort(byName), some: some.sort(byName) };
+}
+
+function stagedRemovals() {
+  return new Set($("bulkTagRemove").value.split(",")
+    .map((t) => t.trim().toLowerCase()).filter(Boolean));
+}
+
+function bulkTagListHTML(tags, staged) {
+  if (!tags.length) return `<span class="none">none</span>`;
+  return tags.map((t) => {
+    const on = staged.has(t.toLowerCase());
+    return `<span class="chip tag click${on ? " staged" : ""}" data-bulk-tag="${escapeHtml(t)}"
+              title="Click to ${on ? "un-stage" : "stage"} for removal">${escapeHtml(t)}</span>`;
+  }).join("");
+}
+
+function renderBulkTagSummary() {
+  const { all, some } = bulkTagSummary();
+  const staged = stagedRemovals();
+  $("bulkTagAllList").innerHTML = bulkTagListHTML(all, staged);
+  $("bulkTagSomeList").innerHTML = bulkTagListHTML(some, staged);
+  [$("bulkTagAllList"), $("bulkTagSomeList")].forEach((list) => {
+    list.querySelectorAll("[data-bulk-tag]").forEach((chip) => {
+      chip.onclick = () => toggleStagedRemoval(chip.dataset.bulkTag);
+    });
+  });
+}
+
+// Clicking a tag in either summary list toggles it in the "Remove tags"
+// field -- the whole point of the two lists is to make "what should I
+// delete" a click instead of a retype.
+function toggleStagedRemoval(tag) {
+  const el = $("bulkTagRemove");
+  const current = el.value.split(",").map((t) => t.trim()).filter(Boolean);
+  const idx = current.findIndex((t) => t.toLowerCase() === tag.toLowerCase());
+  if (idx >= 0) current.splice(idx, 1); else current.push(tag);
+  el.value = current.join(", ");
+  renderBulkTagSummary();
+}
+
+async function applyBulkTags(keepOpen) {
   const addTags = $("bulkTagAdd").value.trim();
   const removeTags = $("bulkTagRemove").value.trim();
   const comment = $("bulkTagComment").value.trim();
-  if (!addTags && !removeTags && !comment) { toast("Nothing to save."); return; }
+  if (!addTags && !removeTags && !comment) { toast("Nothing to apply."); return; }
   try {
     const res = await call("bulk_annotate", {
-      targets: bulkTagTargets.map((t) => ({ session_path: t.session_path, filename: t.filename })),
+      targets: bulkTagItems.map((it) => {
+        const t = bulkTagTarget(it);
+        return { session_path: t.session_path, filename: t.filename };
+      }),
       add_tags: addTags, remove_tags: removeTags, append_comment: comment,
     });
     if (res.error) {
@@ -4588,35 +4651,53 @@ async function saveBulkTags() {
     const byKey = {};
     let okCount = 0, failCount = 0;
     for (const r of res.results) {
-      byKey[`${r.session_path} ${r.filename}`] = r;
+      byKey[`${r.session_path} ${r.filename}`] = r;
       if (r.ok) okCount++; else failCount++;
     }
     // Reflect the new tags/comment into whatever is already in memory --
-    // the item list and the detail panel -- so the GUI doesn't need a
-    // round trip to the archive to show what just changed.
+    // the dialog's own items, the item list, and the detail panel -- so
+    // neither the dialog nor the GUI needs a round trip to show what just
+    // changed.
     const applyTo = (it) => {
       if (!it) return;
       const sessionPath = it.session_path || (curSession && curSession.path);
-      const r = byKey[`${sessionPath} ${it.name}`];
+      const r = byKey[`${sessionPath} ${it.name}`];
       if (r && r.ok) { it.user_tags = r.tags; it.user_comment = r.comment; }
     };
+    bulkTagItems.forEach(applyTo);
     (items || []).forEach(applyTo);
     if (selected) applyTo(selected);
     picked.forEach(applyTo);
     renderItemArea();
     updateDetails();
-    for (const t of bulkTagTargets) {
+    for (const it of bulkTagItems) {
+      const t = bulkTagTarget(it);
       announceChange({ session_path: t.session_path, filename: t.filename });
     }
-    $("bulkTagScrim").classList.remove("show");
-    toast(failCount
-      ? `Updated ${okCount} file(s), ${failCount} failed`
-      : `Updated ${okCount} file(s)`);
+    if (keepOpen) {
+      // The add/remove/comment fields are one-shot instructions, already
+      // applied -- clear them and refresh the lists so the dialog shows
+      // what is left to edit, not what was just done.
+      $("bulkTagAdd").value = "";
+      $("bulkTagRemove").value = "";
+      $("bulkTagComment").value = "";
+      renderBulkTagSummary();
+      $("bulkTagNote").textContent = failCount
+        ? `Applied to ${okCount} file(s), ${failCount} failed`
+        : `Applied to ${okCount} file(s)`;
+      $("bulkTagNote").className = "bulk-note ok";
+    } else {
+      $("bulkTagScrim").classList.remove("show");
+      toast(failCount
+        ? `Updated ${okCount} file(s), ${failCount} failed`
+        : `Updated ${okCount} file(s)`);
+    }
   } catch (e) {
     $("bulkTagNote").textContent = `${e}`;
     $("bulkTagNote").className = "bulk-note err";
   }
 }
+
 
 // ---- captured source ----------------------------------------------------
 // What was snapshotted for this artifact: which snapshot, how big, which
@@ -5560,8 +5641,17 @@ $("collCancel").onclick = () => $("collScrim").classList.remove("show");
 $("collOk").onclick = doAddToCollection;
 $("collScrim").onclick = (e) => { if (e.target === $("collScrim")) $("collScrim").classList.remove("show"); };
 $("bulkTagCancel").onclick = () => $("bulkTagScrim").classList.remove("show");
-$("bulkTagOk").onclick = saveBulkTags;
+$("bulkTagApply").onclick = () => applyBulkTags(true);
+$("bulkTagOk").onclick = () => applyBulkTags(false);
 $("bulkTagScrim").onclick = (e) => { if (e.target === $("bulkTagScrim")) $("bulkTagScrim").classList.remove("show"); };
+$("bulkTagRemove").oninput = () => {
+  // Typing directly into "Remove tags" should highlight the matching chips
+  // too, not just clicking them.
+  document.querySelectorAll("#bulkTagAllList .chip, #bulkTagSomeList .chip").forEach((chip) => {
+    const tag = (chip.dataset.bulkTag || "").toLowerCase();
+    chip.classList.toggle("staged", stagedRemovals().has(tag));
+  });
+};
 $("arcBtn").onclick = openArchivePanel;
 $("arcClose").onclick = () => $("arcScrim").classList.remove("show");
 $("arcScrim").onclick = (e) => { if (e.target === $("arcScrim")) $("arcScrim").classList.remove("show"); };

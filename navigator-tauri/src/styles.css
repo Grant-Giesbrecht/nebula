@@ -327,6 +327,12 @@ body.resizing *, body.resizing-y * { pointer-events:none; }
 .bulk-note { font-size:12px; }
 .bulk-note.err { color:var(--danger, #c33); }
 .bulk-note.ok { color:var(--text-faint); }
+.bulk-taggrid { display:grid; grid-template-columns:1fr 1fr; gap:12px; }
+.bulk-taglist { background:var(--panel-2); border:1px solid var(--border); border-radius:8px; padding:6px;
+                max-height:96px; overflow:auto; display:flex; flex-wrap:wrap; align-content:flex-start; gap:4px; }
+.bulk-taglist .none { font-size:11px; color:var(--text-faint); padding:2px 4px; }
+.bulk-taglist .chip { user-select:none; }
+.bulk-taglist .chip.staged { background:var(--err-bg); color:var(--err); text-decoration:line-through; }
 .radio { display:flex; align-items:center; gap:8px; cursor:pointer; padding:2px 0; }
 .radio input { accent-color:var(--accent); }
 .field { display:flex; flex-direction:column; gap:4px; }
