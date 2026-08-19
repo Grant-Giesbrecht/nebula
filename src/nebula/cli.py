@@ -1378,21 +1378,51 @@ def cmd_init(args):
         print(f"registered as '{hl(cfg.nickname)}'")
 
 
+#: Fixed registry nickname for `nebula intake --auto`. Scripts hardcode
+#: ARCHIVE = AUTO_INTAKE_NICKNAME permanently -- each `--auto` run
+#: re-registers this same name against the new intake, so nothing in the
+#: script needs to change day to day. After the old intake is merged and
+#: its folder removed, resolving this name again fails loudly (see
+#: nebula.validate_archive / session.new()'s own missing-archive.yaml
+#: warning) instead of silently writing into a deleted archive's ghost.
+AUTO_INTAKE_NICKNAME = "auto-intake"
+
+
 def cmd_intake(args):
     """Create a timestamped intake archive for capturing data."""
     from nebula import transfer
-    
-    print(f"{Fore.YELLOW}WARNING:{Style.RESET_ALL} Intake archives should usually be created with `nebula intake` to ensure correct automatic naming. ")
-    usr_input = input(f"Continue? [Y/n]: ")
-    if usr_input.upper() != "Y":
-        print(f"Canceling operation.")
-        return
-    
-    root = transfer.new_intake(Path(args.parent), label=args.label or "")
+
+    try:
+        root = transfer.new_intake(Path(args.parent), label=args.label or "")
+    except transfer.TransferError as e:
+        err(str(e))
+        sys.exit(1)
     print(f"created intake archive {root.name}")
     print(f"  {root}")
     print(f"  sessions here are numbered I-<yy>-<nnnn> and are provisional: "
           f"merging renames them and records what they became.")
+
+    if args.auto:
+        from nebula.config import archive_identity
+
+        reg = get_registry()
+        previous = reg.try_get(AUTO_INTAKE_NICKNAME)
+        if previous is not None and previous.root != root and previous.available:
+            warn(f"  note: '{AUTO_INTAKE_NICKNAME}' already pointed at "
+                 f"{previous.root}, which still exists on disk -- has it "
+                 f"been merged yet? Overwriting the pointer now; that "
+                 f"archive is untouched but is no longer reachable as "
+                 f"'{AUTO_INTAKE_NICKNAME}'.")
+        # Not register_archive(): its job is to key by the archive's own
+        # declared name and disambiguate a collision as <user>-<name>,
+        # which is the opposite of what --auto wants -- this nickname is
+        # meant to be force-overwritten every time, unconditionally, so
+        # scripts never have to change what they point at.
+        ident = archive_identity(root)
+        reg.register(AUTO_INTAKE_NICKNAME, root, user=ident["user"] or None,
+                     kind=ident["kind"], declared_name=ident["name"])
+        print(f"  registered as '{hl(AUTO_INTAKE_NICKNAME)}' -- scripts "
+              f"using ARCHIVE = {AUTO_INTAKE_NICKNAME!r} now write here")
 
 
 def _print_plan(plan, *, verb: str) -> None:
@@ -2032,6 +2062,12 @@ def main(argv=None):
                      "into a standard archive with 'merge'.")
     p.add_argument("parent", help="where to create it")
     p.add_argument("--label", help="appended to the name, e.g. the instrument")
+    p.add_argument("--auto", action="store_true",
+                   help=f"also (re-)register this intake under the fixed "
+                        f"nickname {AUTO_INTAKE_NICKNAME!r}, overwriting "
+                        f"any previous entry -- for a daily workflow where "
+                        f"scripts hardcode ARCHIVE = {AUTO_INTAKE_NICKNAME!r} "
+                        f"and never need to change it")
     p.set_defaults(func=cmd_intake)
 
     p = sub.add_parser(

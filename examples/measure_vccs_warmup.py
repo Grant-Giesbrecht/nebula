@@ -6,6 +6,7 @@ from pathlib import Path
 import nebula
 
 ARCHIVE = "spielplatz"
+nebula.validate_archive(ARCHIVE) # Will raise and error if the archive cannot be
 
 log = plf.LogPile()
 
