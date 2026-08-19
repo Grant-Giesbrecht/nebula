@@ -126,7 +126,16 @@ class Location:
 
 @dataclass(frozen=True)
 class ArchiveConfig:
-    name: str
+    #: The registry key -- what you type at the CLI/GUI to pick this
+    #: archive (``nebula ls postdoc``). Purely local: it lives only in
+    #: *this machine's* registry.yaml and never travels with the archive,
+    #: so two people can each call the same archive something different.
+    #: Deliberately NOT called ``name`` -- that word is already taken by
+    #: ``declared_name`` below (the archive's own, portable name from its
+    #: archive.yaml), and one archive can have several nicknames (see
+    #: `Registry.register_archive`'s <user>-<name> fallback, or simply
+    #: registering the same root under a second key by hand).
+    nickname: str
     #: Every known location, most preferred first. Never empty.
     locations: "tuple[Location, ...]" = ()
     git_org: Optional[str] = None
@@ -139,9 +148,10 @@ class ArchiveConfig:
     #: its archive.yaml at registration time. The file is authoritative;
     #: this is here so listing archives doesn't have to open all of them.
     kind: str = "standard"
-    #: The name the archive declares for itself, which is what appears in a
-    #: nebula:// URI. Usually the same as the registry key -- but when two
-    #: archives claim one name, the key is disambiguated and this is not,
+    #: The name the archive declares for itself in its own archive.yaml --
+    #: portable, and what appears in a nebula:// URI. Usually the same as
+    #: the registry nickname, but not required to be: when two archives
+    #: claim one name, the nickname is disambiguated and this is not,
     #: because refs written by their authors still say the plain name.
     declared_name: str = ""
 
@@ -178,12 +188,13 @@ class ArchiveConfig:
 
     @property
     def uri_name(self) -> str:
-        return self.declared_name or self.name
+        return self.declared_name or self.nickname
 
     @property
     def key(self) -> "tuple[str, str]":
-        """Archives are identified by owner *and* name: two colleagues can
-        each have a 'postdoc', and both may be registered here."""
+        """Archives are identified by owner *and* (declared) name: two
+        colleagues can each have a 'postdoc', and both may be registered
+        here."""
         return (self.user or "", self.uri_name)
 
 
@@ -245,38 +256,38 @@ class Registry:
             return
         with open(self.path, "r") as f:
             raw = yaml.safe_load(f) or {}
-        for name, cfg in raw.items():
-            self._archives[name] = ArchiveConfig(
-                name=name,
-                locations=_read_locations(name, cfg, self.path),
+        for nickname, cfg in raw.items():
+            self._archives[nickname] = ArchiveConfig(
+                nickname=nickname,
+                locations=_read_locations(nickname, cfg, self.path),
                 git_org=cfg.get("git_org"),
                 user=cfg.get("user"),
                 kind=cfg.get("kind") or "standard",
-                declared_name=cfg.get("name") or name,
+                declared_name=cfg.get("name") or nickname,
             )
 
-    def get(self, name: str) -> ArchiveConfig:
+    def get(self, nickname: str) -> ArchiveConfig:
         self._load()
-        if name not in self._archives:
+        if nickname not in self._archives:
             raise KeyError(
-                f"unknown archive {name!r}. Known archives: "
+                f"unknown archive {nickname!r}. Known archives: "
                 f"{sorted(self._archives) or '(none registered)'}. "
                 f"Check {self.path}"
             )
-        return self._archives[name]
+        return self._archives[nickname]
 
-    def try_get(self, name: str) -> Optional[ArchiveConfig]:
+    def try_get(self, nickname: str) -> Optional[ArchiveConfig]:
         """Like get(), but returns None instead of raising -- useful for
         gracefully reporting an unresolved external reference (e.g. the
         other archive's NAS share isn't mounted on this machine)."""
         self._load()
-        return self._archives.get(name)
+        return self._archives.get(nickname)
 
     def all(self) -> Dict[str, ArchiveConfig]:
         self._load()
         return dict(self._archives)
 
-    def register(self, name: str, root=None, git_org: Optional[str] = None,
+    def register(self, nickname: str, root=None, git_org: Optional[str] = None,
                  user: Optional[str] = None, kind: str = "standard",
                  declared_name: str = "",
                  locations: "Optional[list[Location]]" = None) -> None:
@@ -290,12 +301,12 @@ class Registry:
             if root is None:
                 raise ValueError("register needs either root or locations")
             locations = [Location(kind="path", value=str(root))]
-        self._archives[name] = ArchiveConfig(
-            name=name, locations=tuple(locations), git_org=git_org, user=user,
-            kind=kind, declared_name=declared_name or name)
+        self._archives[nickname] = ArchiveConfig(
+            nickname=nickname, locations=tuple(locations), git_org=git_org, user=user,
+            kind=kind, declared_name=declared_name or nickname)
         self._save()
 
-    def add_location(self, name: str, location: Location, *,
+    def add_location(self, nickname: str, location: Location, *,
                      first: bool = False) -> ArchiveConfig:
         """Record another place this archive lives.
 
@@ -305,30 +316,30 @@ class Registry:
         otherwise explicitly.
         """
         self._load()
-        cfg = self.get(name)
+        cfg = self.get(nickname)
         existing = [loc for loc in cfg.locations
                     if not (loc.kind == location.kind
                             and loc.value == location.value)]
         ordered = ([location] + existing) if first else (existing + [location])
-        self._archives[name] = replace(cfg, locations=tuple(ordered))
+        self._archives[nickname] = replace(cfg, locations=tuple(ordered))
         self._save()
-        return self._archives[name]
+        return self._archives[nickname]
 
-    def remove_location(self, name: str, value: str) -> ArchiveConfig:
+    def remove_location(self, nickname: str, value: str) -> ArchiveConfig:
         """Forget one location. The last one cannot be removed -- an entry
         with nowhere to look is not a registration, it is a puzzle."""
         self._load()
-        cfg = self.get(name)
+        cfg = self.get(nickname)
         kept = [loc for loc in cfg.locations if loc.value != value]
         if not kept:
             raise ValueError(
-                f"{value!r} is the only location for {name!r}; unregister the "
+                f"{value!r} is the only location for {nickname!r}; unregister the "
                 "archive instead of leaving it with nowhere to look")
         if len(kept) == len(cfg.locations):
-            raise KeyError(f"{name!r} has no location {value!r}")
-        self._archives[name] = replace(cfg, locations=tuple(kept))
+            raise KeyError(f"{nickname!r} has no location {value!r}")
+        self._archives[nickname] = replace(cfg, locations=tuple(kept))
         self._save()
-        return self._archives[name]
+        return self._archives[nickname]
 
     def migrate(self) -> Optional[Path]:
         """Move a legacy archives.yaml to registry.yaml. Returns the new
@@ -414,10 +425,10 @@ class Registry:
         from nebula.identity import get_user
 
         # Match the name an author would have written in a ref, which is the
-        # name the archive declares -- not the registry key, which may have
-        # been disambiguated when two archives claimed the same one.
+        # name the archive declares -- not the registry nickname, which may
+        # have been disambiguated when two archives claimed the same one.
         candidates = [cfg for cfg in self._archives.values()
-                      if cfg.uri_name == name or cfg.name == name]
+                      if cfg.uri_name == name or cfg.nickname == name]
         if not candidates:
             return None
         if user is None:
@@ -432,15 +443,20 @@ class Registry:
     def _save(self) -> None:
         self.path.parent.mkdir(parents=True, exist_ok=True)
         raw = {
-            name: {
+            nickname: {
                 **_write_locations(cfg),
                 **({"git_org": cfg.git_org} if cfg.git_org else {}),
                 **({"user": cfg.user} if cfg.user else {}),
                 **({"kind": cfg.kind} if cfg.kind and cfg.kind != "standard" else {}),
+                # Written as "name" in the YAML itself -- that key is the
+                # archive's own declared name (archive.yaml's field of the
+                # same name), not this entry's nickname, so the file format
+                # is unchanged even though the Python attribute is not
+                # called that any more.
                 **({"name": cfg.declared_name}
-                   if cfg.declared_name and cfg.declared_name != name else {}),
+                   if cfg.declared_name and cfg.declared_name != nickname else {}),
             }
-            for name, cfg in self._archives.items()
+            for nickname, cfg in self._archives.items()
         }
         with open(self.path, "w") as f:
             yaml.safe_dump(raw, f, sort_keys=True)

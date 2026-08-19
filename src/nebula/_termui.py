@@ -28,6 +28,10 @@ ANSI = {
     "green": "\033[32m",
     "yellow": "\033[33m",
     "cyan": "\033[36m",
+    # 256-colour: there is no ANSI-16 orange, and yellow is already used
+    # for search highlights, so warnings get their own code rather than
+    # reusing (and overloading the meaning of) an existing one.
+    "orange": "\033[38;5;208m",
 }
 
 # readline needs non-printing sequences in a prompt wrapped in these
@@ -84,6 +88,44 @@ def highlight(
         + paint(match, match_style, enabled)
         + paint(after, base_style, enabled)
     )
+
+
+# ---------------------------------------------------------------------
+# CLI-command output: errors, warnings, and picking a word out of a line
+# ---------------------------------------------------------------------
+# The interactive pickers above colour whole lines; a plain `nebula`
+# subcommand instead prints one message at a time and wants a quick way to
+# mark it as a failure, a caution, or just call out one word (an archive's
+# name, a run id) in an otherwise plain line. These three cover that
+# without every command hand-rolling its own ANSI.
+
+def err(msg: str, *, file=None) -> None:
+    """Print an error to stderr in red. Colour is skipped automatically
+    when stderr isn't a terminal or NO_COLOR is set (see color_enabled),
+    so piped/redirected output and CI logs stay plain text."""
+    f = file if file is not None else sys.stderr
+    print(paint(str(msg), "bold red", color_enabled(f)), file=f)
+
+
+def warn(msg: str, *, file=None) -> None:
+    """Print a non-fatal caution to stderr in orange -- something worth
+    noticing but that did not stop the command."""
+    f = file if file is not None else sys.stderr
+    print(paint(str(msg), "orange", color_enabled(f)), file=f)
+
+
+def ok(msg: str, *, file=None) -> None:
+    """Print a success confirmation to stdout in green."""
+    f = file if file is not None else sys.stdout
+    print(paint(str(msg), "green", color_enabled(f)), file=f)
+
+
+def hl(text: str, *, file=None) -> str:
+    """Bold+cyan for picking one word out of an otherwise plain line -- an
+    archive's name, a run id -- the same role `highlight()` above plays
+    for a search match, but for a fixed word rather than a query hit."""
+    f = file if file is not None else sys.stdout
+    return paint(str(text), "bold cyan", color_enabled(f))
 
 
 # ---------------------------------------------------------------------

@@ -239,7 +239,7 @@ def op_create_archive(args: Dict[str, Any]) -> Dict[str, Any]:
     registered = None
     if args.get("register", True):
         try:
-            registered = get_registry().register_archive(root).name
+            registered = get_registry().register_archive(root).nickname
         except Exception:       # noqa: BLE001 -- the archive exists either way
             registered = None
     from nebula.config import archive_identity

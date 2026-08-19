@@ -49,6 +49,7 @@ from pathlib import Path
 from nebula.config import ASSET_POLICIES, OVERWRITE_POLICIES
 from nebula import check as check_mod
 from nebula import assets, config, graph, index, manual
+from nebula._termui import color_enabled, err, hl, ok, paint, warn
 from nebula.registry import get_registry
 from nebula.sidecar import read_session_yaml
 # Import from the submodule directly: `nebula.session` the *name* is the
@@ -120,7 +121,7 @@ def cmd_seal(args):
     try:
         path = index.seal_year(root, args.year, force=args.force)
     except index.IndexError_ as e:
-        print(str(e), file=sys.stderr)
+        err(str(e))
         sys.exit(1)
     seal = index.read_seal(root, args.year) or {}
     print(f"sealed {args.year}: {seal.get('sessions')} session(s), "
@@ -173,7 +174,7 @@ def cmd_show(args):
         "SELECT * FROM sessions WHERE run_id = ?", (args.run_id,)
     ).fetchone()
     if session_row is None:
-        print(f"no session {args.run_id!r} in index", file=sys.stderr)
+        err(f"no session {args.run_id!r} in index")
         sys.exit(1)
 
     print(f"{session_row['run_id']}  [{session_row['status']}]")
@@ -280,7 +281,7 @@ def cmd_asset_import(args):
                 else resolved
             print(f"{meta.id}  {meta.name}  [{why}]")
     except (assets.AssetError, OSError, ValueError) as e:
-        print(f"error: {e}", file=sys.stderr)
+        err(f"error: {e}")
         sys.exit(1)
 
 
@@ -325,7 +326,7 @@ def cmd_asset_show(args):
     try:
         meta = assets.read_asset(root, args.asset_id)
     except assets.AssetError as e:
-        print(f"error: {e}", file=sys.stderr)
+        err(f"error: {e}")
         sys.exit(1)
 
     path = assets.live_file(root, meta.id)
@@ -374,7 +375,7 @@ def cmd_asset_commit(args):
         snap = assets.commit(root, args.asset_id, note=args.note,
                              force=args.force)
     except assets.AssetError as e:
-        print(f"error: {e}", file=sys.stderr)
+        err(f"error: {e}")
         sys.exit(1)
     if snap is None:
         print("no change since the last snapshot -- nothing committed")
@@ -389,7 +390,7 @@ def cmd_asset_history(args):
     try:
         snaps = assets.history(root, args.asset_id)
     except assets.AssetError as e:
-        print(f"error: {e}", file=sys.stderr)
+        err(f"error: {e}")
         sys.exit(1)
     if not snaps:
         print("no snapshots")
@@ -413,7 +414,7 @@ def cmd_asset_policy(args):
             max_snapshot_bytes=args.max_snapshot_bytes,
         )
     except assets.AssetError as e:
-        print(f"error: {e}", file=sys.stderr)
+        err(f"error: {e}")
         sys.exit(1)
     resolved = meta.effective_policy(settings)
     declared = meta.policy or assets.AUTO_ASSET_POLICY
@@ -429,7 +430,7 @@ def cmd_asset_scan(args):
         try:
             state = assets.scan(root, asset_id)
         except assets.AssetError as e:
-            print(f"error: {e}", file=sys.stderr)
+            err(f"error: {e}")
             continue
         if state["missing"]:
             print(f"{asset_id}: file missing on disk")
@@ -451,7 +452,7 @@ def cmd_asset_path(args):
     root, _ = _resolve_archive_cli(args.archive)
     path = assets.live_file(root, args.asset_id)
     if path is None:
-        print(f"error: {args.asset_id} has no file on disk", file=sys.stderr)
+        err(f"{args.asset_id} has no file on disk")
         sys.exit(1)
     print(path)
 
@@ -466,7 +467,7 @@ def _fmt_ref_row(row) -> str:
 def cmd_import(args):
     root, _ = _resolve_archive_cli(args.archive)
     if args.dest_name and len(args.files) != 1:
-        print("--as can only be used with a single file", file=sys.stderr)
+        err("--as can only be used with a single file")
         sys.exit(1)
     try:
         for f in args.files:
@@ -478,7 +479,7 @@ def cmd_import(args):
             )
             print(f"imported {f} -> {dest}")
     except (FileNotFoundError, FileExistsError, RuntimeError) as e:
-        print(f"error: {e}", file=sys.stderr)
+        err(f"error: {e}")
         sys.exit(1)
     index.rebuild(root)
 
@@ -492,7 +493,7 @@ def cmd_import_new(args):
             origin=args.origin, move=args.move,
         )
     except (FileNotFoundError, FileExistsError) as e:
-        print(f"error: {e}", file=sys.stderr)
+        err(f"error: {e}")
         sys.exit(1)
     print(f"created {s.id} with {len(args.files)} file(s) at {s.path}")
     index.rebuild(root)
@@ -537,7 +538,7 @@ def cmd_rm(args):
             reason=args.reason, force=args.force,
         )
     except (FileNotFoundError, RuntimeError) as e:
-        print(f"error: {e}", file=sys.stderr)
+        err(f"error: {e}")
         sys.exit(1)
     print(f"deleted {args.file} (moved to {trashed})")
     index.rebuild(root)
@@ -551,7 +552,7 @@ def cmd_replace(args):
             reason=args.reason, origin=args.origin, move=args.move,
         )
     except (FileNotFoundError, RuntimeError) as e:
-        print(f"error: {e}", file=sys.stderr)
+        err(f"error: {e}")
         sys.exit(1)
     print(f"replaced {args.file} (old version in {dest.parent / manual.TRASH_DIRNAME})")
     index.rebuild(root)
@@ -564,7 +565,7 @@ def cmd_rm_session(args):
             root, args.run_id, reason=args.reason, force=args.force,
         )
     except (FileNotFoundError, RuntimeError) as e:
-        print(f"error: {e}", file=sys.stderr)
+        err(f"error: {e}")
         sys.exit(1)
     print(f"deleted session {args.run_id} (moved to {trashed})")
     index.rebuild(root)
@@ -575,7 +576,7 @@ def cmd_reseal(args):
     try:
         new_sha = manual.reseal(root, args.run_id, args.file)
     except FileNotFoundError as e:
-        print(f"error: {e}", file=sys.stderr)
+        err(f"error: {e}")
         sys.exit(1)
     print(f"resealed {args.file} -> sha256 {new_sha[:12]}...")
     index.rebuild(root)
@@ -587,15 +588,18 @@ def cmd_check(args):
     issues = check_mod.check(root, verify_checksums=not args.no_checksums,
                              archive_label=args.archive)
     if not issues:
-        print("ok -- no integrity problems found")
+        ok("ok -- no integrity problems found")
         return
     for issue in issues:
-        print(str(issue))
+        enabled = color_enabled(sys.stdout)
+        style = "bold red" if issue.severity == "error" else "orange"
+        print(paint(str(issue), style, enabled))
         if issue.fix:
             print(f"    fix: {issue.fix}")
     errors = [i for i in issues if i.severity == "error"]
     info = len(issues) - len(errors)
-    print(f"\n{len(errors)} error(s), {info} info", file=sys.stderr)
+    summary = f"\n{len(errors)} error(s), {info} info"
+    (err if errors else warn)(summary)
     if errors:
         sys.exit(1)
 
@@ -652,7 +656,7 @@ def cmd_config(args):
 
     if changes:
         if not root.is_dir():
-            print(f"no archive at {root}", file=sys.stderr)
+            err(f"no archive at {root}")
             sys.exit(1)
         # Read the file's own values, not the env-overridden ones, so a
         # temporary NEBULA_CAPTURE_CODE never gets written into the archive.
@@ -683,7 +687,7 @@ def cmd_annotate(args):
     try:
         session_dir = _find_session_dir(root, args.run_id)
     except FileNotFoundError as e:
-        print(str(e), file=sys.stderr)
+        err(str(e))
         sys.exit(1)
 
     target = args.file
@@ -705,7 +709,7 @@ def cmd_annotate(args):
             annotations.set_annotation(session_dir, target, comment=args.comment)
             changed = True
     except annotations.TagError as e:
-        print(f"bad tag: {e}", file=sys.stderr)
+        err(f"bad tag: {e}")
         sys.exit(1)
 
     got = annotations.get(session_dir, target)
@@ -753,10 +757,9 @@ def _gc_assets(root, args) -> None:
     if res["skipped"]:
         # Never let a partial sweep read as a clean one: the blobs spared
         # are exactly the ones whose safety could not be established.
-        print(f"warning: asset blob collection skipped -- {res['skipped']}",
-              file=sys.stderr)
-        print(f"    fix: repair the asset record (see 'nebula check "
-              f"{args.archive}'), then re-run", file=sys.stderr)
+        warn(f"warning: asset blob collection skipped -- {res['skipped']}")
+        warn(f"    fix: repair the asset record (see 'nebula check "
+            f"{args.archive}'), then re-run")
         return
     print(f"assets: {res['live_blobs']} version(s) still referenced")
     if res["blobs"]:
@@ -770,15 +773,14 @@ def cmd_hold(args):
     try:
         _find_session_dir(root, args.run_id)
     except FileNotFoundError:
-        print(f"no session {args.run_id!r} under {root}", file=sys.stderr)
+        err(f"no session {args.run_id!r} under {root}")
         sys.exit(1)
 
     if args.duration:
         try:
             seconds = parse_duration(args.duration)
         except ValueError:
-            print(f"bad duration {args.duration!r} (try 2h, 90m, 45s, 1d)",
-                  file=sys.stderr)
+            err(f"bad duration {args.duration!r} (try 2h, 90m, 45s, 1d)")
             sys.exit(1)
         until = hold_session(root, args.run_id, seconds=seconds)
         print(f"holding {args.run_id} until {until}")
@@ -803,7 +805,7 @@ def cmd_release(args):
     try:
         had_hold = release_session(root, args.run_id)
     except FileNotFoundError:
-        print(f"no session {args.run_id!r} under {root}", file=sys.stderr)
+        err(f"no session {args.run_id!r} under {root}")
         sys.exit(1)
     if had_hold:
         print(f"released hold on {args.run_id}")
@@ -850,58 +852,117 @@ def cmd_stale(args):
               f"{index.session_path(root, row)}")
 
 
+def _location_mark(loc) -> str:
+    if loc.kind == "path":
+        return "✓" if loc.available else "✗ (not mounted?)"
+    # Recorded, but nebula has no client. Say which it is rather than
+    # showing a ✗ that reads as "broken".
+    return "— (remote; no client yet)"
+
+
 def cmd_archives(args):
+    """List archives, keyed by the name each one declares for itself (its
+    archive.yaml), not by the machine-local nickname(s) registry.yaml
+    files them under -- those are shown too, but only with --long, since
+    they are this machine's business, not the archive's."""
     from nebula.registry import Location
 
     reg = get_registry()
     moved = reg.migrate()
     if moved:
-        print(f"note: renamed archives.yaml -> {moved.name} (it was one "
-              f"character from an archive's own archive.yaml)", file=sys.stderr)
+        warn(f"note: renamed archives.yaml -> {moved.name} (it was one "
+            f"character from an archive's own archive.yaml)")
     if args.add_location or args.remove_location:
         return _edit_locations(reg, args)
 
-    archives = reg.all()
+    archives = reg.all()   # {nickname: ArchiveConfig}
     if not archives:
         print(f"no archives registered in {reg.path}")
         return
-    for name, cfg in archives.items():
-        head = f"{name:15}"
-        for i, loc in enumerate(cfg.locations):
-            if loc.kind == "path":
-                mark = "✓" if loc.available else "✗ (not mounted?)"
-            else:
-                # Recorded, but nebula has no client. Say which it is
-                # rather than showing a ✗ that reads as "broken".
-                mark = "— (remote; no client yet)"
+
+    # More than one nickname can point at the same archive -- a manually
+    # added alias, or the automatic <user>-<name> fallback for a name
+    # collision -- so group entries by (owner, declared name) and show
+    # each archive once, not once per door in.
+    groups: Dict[tuple, list] = {}
+    for nickname, cfg in archives.items():
+        groups.setdefault(cfg.key, []).append((nickname, cfg))
+
+    NAME_W = 15
+    for key, entries in sorted(groups.items(), key=lambda kv: kv[1][0][1].uri_name.lower()):
+        entries.sort(key=lambda ne: ne[0])
+        primary = entries[0][1]
+        official = primary.uri_name
+        nicknames = [n for n, _ in entries]
+
+        # Union every location any alias for this archive knows about:
+        # each `nebula register` call only ever appends to the one entry
+        # it targets, so two aliases can otherwise diverge.
+        seen = set()
+        locations = []
+        for _, cfg in entries:
+            for loc in cfg.locations:
+                lk = (loc.kind, loc.value)
+                if lk not in seen:
+                    seen.add(lk)
+                    locations.append(loc)
+
+        if not args.long:
+            head = hl(f"{official:{NAME_W}}")
+            for i, loc in enumerate(locations):
+                label = f"  [{loc.label}]" if loc.label else ""
+                pref = "" if i == 0 else " " * NAME_W + " "
+                print(f"{head if i == 0 else pref}{loc.value}{label}  {_location_mark(loc)}")
+                head = ""
+            continue
+
+        kind_note = f" [{primary.kind}]"
+        print(f"{hl(official)}{kind_note}")
+        others = [n for n in nicknames if n != official]
+        if others or nicknames == [official]:
+            print(f"  aliases: {', '.join(nicknames)}")
+        for loc in locations:
             label = f"  [{loc.label}]" if loc.label else ""
-            pref = "" if i == 0 else " " * 15 + " "
-            print(f"{head if i == 0 else pref}{loc.value}{label}  {mark}")
-            head = ""
+            print(f"    {loc.value}{label}  {_location_mark(loc)}")
+        if primary.git_org:
+            print(f"  git_org: {primary.git_org}")
+        root = next((loc.path for loc in locations
+                    if loc.kind == "path" and loc.available), None)
+        if root is None:
+            warn("  settings: unavailable (not mounted)")
+        else:
+            try:
+                settings = config.read_settings(root, apply_env=False)
+                print(f"  settings: on_overwrite={settings.on_overwrite} "
+                      f"capture_code={settings.capture_code} "
+                      f"auto_index={settings.auto_index} "
+                      f"asset_policy={settings.asset_policy}")
+            except config.ConfigError as e:
+                warn(f"  settings: {e}")
+        print()
 
 
 def _edit_locations(reg, args):
     from nebula.registry import Location
 
-    name = args.archive
-    if not name:
-        print("--add-location/--remove-location need an archive name",
-              file=sys.stderr)
+    nickname = args.archive
+    if not nickname:
+        err("--add-location/--remove-location need an archive nickname")
         sys.exit(1)
     try:
         if args.remove_location:
-            cfg = reg.remove_location(name, args.remove_location)
-            print(f"{name}: removed {args.remove_location}")
+            cfg = reg.remove_location(nickname, args.remove_location)
+            print(f"{nickname}: removed {args.remove_location}")
         else:
             kind = "url" if "://" in args.add_location else "path"
             cfg = reg.add_location(
-                name, Location(kind=kind, value=args.add_location,
-                               label=args.label or ""),
+                nickname, Location(kind=kind, value=args.add_location,
+                                   label=args.label or ""),
                 first=args.prefer)
             where = "preferred" if args.prefer else "added"
-            print(f"{name}: {where} {kind} {args.add_location}")
+            print(f"{nickname}: {where} {kind} {args.add_location}")
     except (KeyError, ValueError) as e:
-        print(str(e), file=sys.stderr)
+        err(str(e))
         sys.exit(1)
     for i, loc in enumerate(cfg.locations):
         print(f"  {i + 1}. {loc.value}" + (f"  [{loc.label}]" if loc.label else ""))
@@ -933,7 +994,7 @@ def cmd_contacts(args):
                 print(f"    was  {one}")
             print(f"    now  {c.current}")
     except (ValueError, OSError) as e:
-        print(str(e), file=sys.stderr)
+        err(str(e))
         sys.exit(1)
 
 
@@ -987,7 +1048,7 @@ def cmd_collection(args):
             _print_collection(collection_mod.tree(root, args.name))
             return
     except (collection_mod.CollectionError, ValueError) as e:
-        print(str(e), file=sys.stderr)
+        err(str(e))
         sys.exit(1)
 
 
@@ -1051,7 +1112,7 @@ def cmd_view(args):
                 print(f"  {hit['run_id']}/{hit['item'].name}")
             return
     except (views_mod.ViewError, ValueError) as e:
-        print(str(e), file=sys.stderr)
+        err(str(e))
         sys.exit(1)
 
 
@@ -1097,7 +1158,7 @@ def cmd_whoami(args):
             warnings = identity.validate_identity(args.set_user)
             path = identity.set_user(args.set_user)
         except identity.IdentityError as e:
-            print(str(e), file=sys.stderr)
+            err(str(e))
             sys.exit(1)
         print(f"wrote {path}")
         # Advisory, so it goes to stderr and does not fail the command --
@@ -1107,16 +1168,16 @@ def cmd_whoami(args):
         # streams interleave backwards.
         sys.stdout.flush()
         for warning in warnings:
-            print(f"warning: {warning}", file=sys.stderr)
+            warn(f"warning: {warning}")
 
     user = identity.get_user()
     if not user:
-        print("(no user name set -- 'nebula whoami --set <name>' to pick one)")
+        warn("(no user name set -- 'nebula whoami --set <name>' to pick one)")
         print(f"would be stored in {identity.identity_path()}", file=sys.stderr)
         return
 
     info = identity.describe_identity(user)
-    print(info["user"])
+    print(hl(info["user"]))
     sys.stdout.flush()
     # Detail goes to stderr so that `nebula whoami` in a script still yields
     # exactly the name, as it always has, while a human at a terminal sees
@@ -1144,7 +1205,7 @@ def cmd_rename(args):
         plan = manual.plan_rename(root, args.run_id, args.file,
                                   args.new_name, refs=args.refs)
     except (ValueError, OSError, KeyError) as e:
-        print(str(e), file=sys.stderr)
+        err(str(e))
         sys.exit(1)
 
     print(f"{plan['run_id']}: {plan['from']} -> {plan['to']}")
@@ -1165,8 +1226,8 @@ def cmd_rename(args):
         # Never let "no references found" read as "safe": the archives we
         # cannot see are exactly the ones a citation would come from.
         sys.stdout.flush()
-        print("  note: only this archive was searched; refs from archives not "
-              "registered here cannot be seen", file=sys.stderr)
+        warn("  note: only this archive was searched; refs from archives not "
+            "registered here cannot be seen")
     if not args.no_history:
         print("  the old name stays resolvable (recorded in the rename log)")
     else:
@@ -1180,35 +1241,39 @@ def cmd_rename(args):
                                  record_history=not args.no_history,
                                  allow_frozen=args.reopen, plan=plan)
     except (ValueError, OSError, RuntimeError, KeyError) as e:
-        print(str(e), file=sys.stderr)
+        err(str(e))
         sys.exit(1)
     print(f"renamed; {got['updated']} ref(s) updated")
 
 
 def cmd_register(args):
-    """Register an archive under the name it declares for itself.
+    """Add an archive to this machine's registry (~/.nebula/registry.yaml),
+    so it can be addressed by a short nickname instead of its full path.
 
-    The name and owner are part of a nebula URI, so an archive has to keep
-    the ones its author used -- otherwise a fragment stops resolving under
-    the name they cited. A name can still be forced with --as for the rare
-    collision the automatic <user>-<name> fallback doesn't suit.
+    The registry entry is keyed by that nickname, which defaults to the
+    name the archive declares for itself (in its own archive.yaml) -- but
+    is purely local and never travels with the archive, so two people (or
+    two registrations of the same archive) can use different nicknames for
+    it. The positional NICKNAME argument overrides the default, for the
+    rare case where the declared name collides with one already
+    registered, or you would just rather call it something else.
     """
     from nebula.config import archive_identity
 
     reg = get_registry()
     root = Path(args.root)
-    if args.name and not root.exists() and Path(args.name).exists():
-        root, args.name = Path(args.name), None      # tolerate reversed arguments
+    if args.nickname and not root.exists() and Path(args.nickname).exists():
+        root, args.nickname = Path(args.nickname), None   # tolerate reversed arguments
     ident = archive_identity(root)
-    cfg = reg.register_archive(root, git_org=args.git_org, key=args.name or None)
+    cfg = reg.register_archive(root, git_org=args.git_org, key=args.nickname or None)
     kind = f" ({ident['kind']})" if ident["kind"] != "standard" else ""
     owner = f" owned by {ident['user_display']}" if ident["user"] else ""
-    print(f"registered {cfg.name!r}{kind}{owner} -> {cfg.root}")
+    print(f"registered '{hl(cfg.nickname)}'{kind}{owner} -> {cfg.root}")
     if ident["user_note"]:
-        print(f"  note: {ident['user_note']}")
+        warn(f"  note: {ident['user_note']}")
     if not ident["declared"]:
-        print(f"  note: {root/'archive.yaml'} does not name this archive, so its "
-              f"folder name was used. 'nebula init' records one.")
+        warn(f"  note: {root/'archive.yaml'} does not name this archive, so its "
+            f"folder name was used. 'nebula init' records one.")
 
 
 def cmd_scan(args):
@@ -1222,7 +1287,7 @@ def cmd_scan(args):
         return
     for cfg in found:
         kind = f" ({cfg.kind})" if cfg.kind != "standard" else ""
-        print(f"registered {cfg.name!r}{kind} -> {cfg.root}")
+        print(f"registered '{hl(cfg.nickname)}'{kind} -> {cfg.root}")
 
 
 def cmd_init(args):
@@ -1241,24 +1306,23 @@ def cmd_init(args):
                                      name=args.name or "", user=args.user or "",
                                      settings=settings)
     except transfer.TransferError as e:
-        print(str(e), file=sys.stderr)
+        err(str(e))
         sys.exit(1)
 
     ident = archive_identity(root)
-    print(f"created {ident['kind']} archive {ident['name']!r} at {root}")
+    print(f"created {ident['kind']} archive '{hl(ident['name'])}' at {root}")
     print(f"  archive.yaml, data/ and code/")
     print(f"  on_overwrite={settings.on_overwrite} capture_code={settings.capture_code} "
           f"auto_index={settings.auto_index}")
     if not ident["user"]:
         # The owner is half of a nebula:// URI, so an archive without one
         # cannot be referred to unambiguously once it leaves this machine.
-        print("\nno user name is set on this machine, so this archive records no "
-              "owner.\nRefs into it from elsewhere will be ambiguous -- set one with "
-              "'nebula whoami --set <name>',\nthen 'nebula config' this archive again.",
-              file=sys.stderr)
+        warn("\nno user name is set on this machine, so this archive records no "
+            "owner.\nRefs into it from elsewhere will be ambiguous -- set one with "
+            "'nebula whoami --set <name>',\nthen 'nebula config' this archive again.")
     if args.register:
         cfg = get_registry().register_archive(root)
-        print(f"registered as {cfg.name!r}")
+        print(f"registered as '{hl(cfg.nickname)}'")
 
 
 def cmd_intake(args):
@@ -1303,7 +1367,7 @@ def _print_plan(plan, *, verb: str) -> None:
     for item in d["dangling"]:
         print(f"  dangling {item['ref']}: {item['note']}")
     for warning in d["warnings"]:
-        print(f"  warning: {warning}", file=sys.stderr)
+        warn(f"  warning: {warning}")
 
 
 def _human_bytes(n: int) -> str:
@@ -1326,7 +1390,7 @@ def cmd_export(args):
             refs=args.ref or None, collection=args.collection,
             include_foreign=not args.exclude_foreign)
     except transfer.TransferError as e:
-        print(str(e), file=sys.stderr)
+        err(str(e))
         sys.exit(1)
     _print_plan(plan, verb="would export" if args.dry_run else "exporting")
     if args.dry_run:
@@ -1343,7 +1407,7 @@ def cmd_merge(args):
     try:
         plan = transfer.plan_merge(src, dst)
     except transfer.TransferError as e:
-        print(str(e), file=sys.stderr)
+        err(str(e))
         sys.exit(1)
     if args.repair:
         n = transfer.accept_unambiguous_repairs(plan)
@@ -1361,7 +1425,7 @@ def cmd_merge(args):
         transfer.merge(src, dst, plan=plan, verify=not args.no_verify,
                        lock=not args.no_lock)
     except transfer.TransferError as e:
-        print(str(e), file=sys.stderr)
+        err(str(e))
         sys.exit(1)
     print(f"merged into {plan.dest}; {plan.source} is now locked "
           f"(nebula unlock {args.source} to keep using it)")
@@ -1375,7 +1439,7 @@ def cmd_adopt(args):
     try:
         plan = transfer.plan_adopt(src, dst, sessions=args.session or None)
     except transfer.TransferError as e:
-        print(str(e), file=sys.stderr)
+        err(str(e))
         sys.exit(1)
     _print_plan(plan, verb="would adopt" if args.dry_run else "adopting")
     if args.dry_run:
@@ -1395,7 +1459,7 @@ def cmd_receive(args):
     try:
         plans = transfer.plan_receive(args.source, home=args.home)
     except transfer.TransferError as e:
-        print(str(e), file=sys.stderr)
+        err(str(e))
         sys.exit(1)
     for item in plans:
         where = "already here" if item["exists"] else "new"
@@ -1409,8 +1473,8 @@ def cmd_receive(args):
     print(f"installed {len(got['installed'])} fragment(s): "
           f"{got['added']} session(s) added, {got['skipped']} already present")
     for c in got["conflicts"]:
-        print(f"  conflict: {c['archive']}/{c['run_id']} differs "
-              f"({', '.join(c['files'][:3])}) -- {c['note']}", file=sys.stderr)
+        warn(f"  conflict: {c['archive']}/{c['run_id']} differs "
+            f"({', '.join(c['files'][:3])}) -- {c['note']}")
 
 
 def cmd_prune(args):
@@ -1420,7 +1484,7 @@ def cmd_prune(args):
     try:
         got = transfer.prune(root, force=args.force)
     except transfer.TransferError as e:
-        print(str(e), file=sys.stderr)
+        err(str(e))
         sys.exit(1)
     print(f"deleted {got['removed']}")
 
@@ -1442,24 +1506,42 @@ def main(argv=None):
     parser = argparse.ArgumentParser(prog="nebula")
     sub = parser.add_subparsers(dest="command", required=True)
 
-    p = sub.add_parser("rebuild", help="rebuild the SQLite index from sidecar files")
-    p.add_argument("archive", help="registered archive name, or a literal path")
+    p = sub.add_parser(
+        "rebuild", help="rebuild the SQLite index from sidecar files",
+        description="Rebuild an archive's index.db from scratch by rereading "
+                     "every session's sidecar files. Use this if the index "
+                     "looks stale or wrong; nothing on disk outside index.db "
+                     "is touched.")
+    p.add_argument("archive", help="registered archive nickname, or a literal path")
     p.set_defaults(func=cmd_rebuild)
 
-    p = sub.add_parser("ls", help="list sessions")
-    p.add_argument("archive", help="registered archive name, or a literal path")
-    p.add_argument("--tag")
-    p.add_argument("--status", choices=["open", "closed", "crashed"])
-    p.add_argument("--today", action="store_true")
+    p = sub.add_parser(
+        "ls", help="list sessions",
+        description="List an archive's sessions, one per line: id, creation "
+                     "time, status, tags, and description.")
+    p.add_argument("archive", help="registered archive nickname, or a literal path")
+    p.add_argument("--tag", help="only sessions carrying this tag")
+    p.add_argument("--status", choices=["open", "closed", "crashed"],
+                   help="only sessions in this state")
+    p.add_argument("--today", action="store_true", help="only sessions created today")
     p.set_defaults(func=cmd_ls)
 
-    p = sub.add_parser("show", help="show details for one session")
-    p.add_argument("archive", help="registered archive name, or a literal path")
+    p = sub.add_parser(
+        "show", help="show details for one session",
+        description="Show everything recorded about one session: status, "
+                     "tags, description, and its files with their "
+                     "derived_from provenance graph.")
+    p.add_argument("archive", help="registered archive nickname, or a literal path")
     p.add_argument("run_id", type=_run_id_arg, help="session id -- S-26-0012, or 0012 for the current year")
     p.set_defaults(func=cmd_show)
 
-    p = sub.add_parser("import", help="add external file(s) to an existing session")
-    p.add_argument("archive", help="registered archive name, or a literal path")
+    p = sub.add_parser(
+        "import", help="add external file(s) to an existing session",
+        description="Copy or move one or more externally-produced files "
+                     "into an already-open session, writing a sidecar for "
+                     "each so they are recorded the same way a script's own "
+                     "output would be.")
+    p.add_argument("archive", help="registered archive nickname, or a literal path")
     p.add_argument("run_id", type=_run_id_arg, help="session id -- S-26-0012, or 0012 for the current year")
     p.add_argument("files", nargs="+", help="file(s) to import")
     p.add_argument("--from", dest="origin", help="free-text note on where it came from")
@@ -1471,44 +1553,68 @@ def main(argv=None):
                    help="ref(s) this file was derived from")
     p.set_defaults(func=cmd_import)
 
-    p = sub.add_parser("import-new", help="create a new session seeded with external files")
-    p.add_argument("archive", help="registered archive name, or a literal path")
+    p = sub.add_parser(
+        "import-new", help="create a new session seeded with external files",
+        description="Create a brand-new session and import one or more "
+                     "externally-produced files into it in one step -- the "
+                     "'import' command for when the session does not exist "
+                     "yet.")
+    p.add_argument("archive", help="registered archive nickname, or a literal path")
     p.add_argument("files", nargs="+", help="file(s) to seed the session with")
     p.add_argument("--from", dest="origin", help="free-text note on where it came from")
     p.add_argument("--tags", help="comma-separated tags")
-    p.add_argument("--description", default="")
+    p.add_argument("--description", default="", help="one-line description of the session")
     p.add_argument("--move", action="store_true", help="move instead of copy")
     p.set_defaults(func=cmd_import_new)
 
-    p = sub.add_parser("reconcile", help="write sidecars for files added to a session by hand")
-    p.add_argument("archive", help="registered archive name, or a literal path")
+    p = sub.add_parser(
+        "reconcile", help="write sidecars for files added to a session by hand",
+        description="Scan a session (or the whole archive) for files that "
+                     "exist on disk but have no sidecar -- e.g. dropped in "
+                     "by hand outside nebula -- and write sidecars for them "
+                     "so they show up as tracked artifacts.")
+    p.add_argument("archive", help="registered archive nickname, or a literal path")
     p.add_argument("run_id", nargs="?", type=_run_id_arg,
                    help="limit to one session (default: whole archive)")
     p.set_defaults(func=cmd_reconcile)
 
-    p = sub.add_parser("rm", help="soft-delete an artifact (moves it to the session's .trash/)")
-    p.add_argument("archive", help="registered archive name, or a literal path")
+    p = sub.add_parser(
+        "rm", help="soft-delete an artifact (moves it to the session's .trash/)",
+        description="Soft-delete one artifact: its file and sidecar move "
+                     "into the session's .trash/ rather than being erased, "
+                     "so it can still be recovered by hand.")
+    p.add_argument("archive", help="registered archive nickname, or a literal path")
     p.add_argument("run_id", type=_run_id_arg, help="session id -- S-26-0012, or 0012 for the current year")
-    p.add_argument("file")
+    p.add_argument("file", help="the artifact's filename")
     p.add_argument("--reason", help="why it's being deleted (recorded in history)")
     p.add_argument("--force", action="store_true",
                    help="delete even if another artifact derives from it")
     p.set_defaults(func=cmd_rm)
 
-    p = sub.add_parser("replace", help="replace an artifact's bytes, trashing the old version")
-    p.add_argument("archive", help="registered archive name, or a literal path")
+    p = sub.add_parser(
+        "replace", help="replace an artifact's bytes, trashing the old version",
+        description="Replace an artifact's bytes with a new file's, moving "
+                     "the old version into .trash/ rather than overwriting "
+                     "it in place -- use this instead of 'import --as' when "
+                     "the name must stay the same.")
+    p.add_argument("archive", help="registered archive nickname, or a literal path")
     p.add_argument("run_id", type=_run_id_arg, help="session id -- S-26-0012, or 0012 for the current year")
-    p.add_argument("file")
+    p.add_argument("file", help="the artifact's filename to replace")
     p.add_argument("new_file", help="file whose bytes replace the artifact")
     p.add_argument("--reason", help="why it's being replaced (recorded in history)")
     p.add_argument("--from", dest="origin", help="free-text note on where the new bytes came from")
     p.add_argument("--move", action="store_true", help="move instead of copy the new file")
     p.set_defaults(func=cmd_replace)
 
-    p = sub.add_parser("rename", help="rename an artifact, and decide what happens to refs")
-    p.add_argument("archive", help="registered archive name, or a literal path")
+    p = sub.add_parser(
+        "rename", help="rename an artifact, and decide what happens to refs",
+        description="Rename an artifact's file (and sidecar), and rewrite "
+                     "any derived_from refs that pointed at the old name so "
+                     "they keep resolving -- how far that rewrite reaches is "
+                     "controlled by --refs.")
+    p.add_argument("archive", help="registered archive nickname, or a literal path")
     p.add_argument("run_id", type=_run_id_arg, help="session id -- S-26-0012, or 0012 for the current year")
-    p.add_argument("file")
+    p.add_argument("file", help="the artifact's current filename")
     p.add_argument("new_name", help="the new filename")
     p.add_argument("--refs", choices=manual_rename_modes(), default="local",
                    help="local: rewrite refs in this archive (default); "
@@ -1519,31 +1625,49 @@ def main(argv=None):
                         "resolving. For a name you mistyped seconds ago.")
     p.add_argument("--reopen", action="store_true",
                    help="allow renaming in a session closed on a previous day")
-    p.add_argument("--dry-run", action="store_true")
+    p.add_argument("--dry-run", action="store_true", help="show what would change, without changing it")
     p.set_defaults(func=cmd_rename)
 
-    p = sub.add_parser("rm-session", help="soft-delete a whole session (moves it to the archive .trash/)")
-    p.add_argument("archive", help="registered archive name, or a literal path")
+    p = sub.add_parser(
+        "rm-session", help="soft-delete a whole session (moves it to the archive .trash/)",
+        description="Soft-delete an entire session: its whole directory "
+                     "moves into the archive's top-level .trash/ rather than "
+                     "being erased.")
+    p.add_argument("archive", help="registered archive nickname, or a literal path")
     p.add_argument("run_id", type=_run_id_arg, help="session id -- S-26-0012, or 0012 for the current year")
     p.add_argument("--reason", help="why it's being deleted (recorded in history)")
     p.add_argument("--force", action="store_true",
                    help="delete even if another session references it")
     p.set_defaults(func=cmd_rm_session)
 
-    p = sub.add_parser("reseal", help="re-record an artifact's checksum after an intended edit")
-    p.add_argument("archive", help="registered archive name, or a literal path")
+    p = sub.add_parser(
+        "reseal", help="re-record an artifact's checksum after an intended edit",
+        description="Re-hash an artifact and write the new checksum into "
+                     "its sidecar -- for when you deliberately edited a file "
+                     "in place and want it to stop being reported as "
+                     "'drifted'.")
+    p.add_argument("archive", help="registered archive nickname, or a literal path")
     p.add_argument("run_id", type=_run_id_arg, help="session id -- S-26-0012, or 0012 for the current year")
-    p.add_argument("file")
+    p.add_argument("file", help="the artifact's filename")
     p.set_defaults(func=cmd_reseal)
 
-    p = sub.add_parser("check", help="report integrity problems in an archive (fsck)")
-    p.add_argument("archive", help="registered archive name, or a literal path")
+    p = sub.add_parser(
+        "check", help="report integrity problems in an archive (fsck)",
+        description="Walk an archive looking for integrity problems -- "
+                     "orphaned files, missing sidecars, checksum drift, "
+                     "dangling refs -- and report them with a fix hint for "
+                     "each. Read-only: it never changes anything itself.")
+    p.add_argument("archive", help="registered archive nickname, or a literal path")
     p.add_argument("--no-checksums", action="store_true",
                    help="skip re-hashing files (faster on large archives)")
     p.set_defaults(func=cmd_check)
 
-    p = sub.add_parser("config", help="show or edit an archive's settings")
-    p.add_argument("archive", help="registered archive name, or a literal path")
+    p = sub.add_parser(
+        "config", help="show or edit an archive's settings",
+        description="Show an archive's archive.yaml settings, or change "
+                     "them with the flags below. With no flags, just prints "
+                     "the current settings.")
+    p.add_argument("archive", help="registered archive nickname, or a literal path")
     p.add_argument("--capture-code", type=_bool_arg, metavar="true|false",
                    help="snapshot first-party source into <archive>/.code on save")
     p.add_argument("--max-file-bytes", type=int, dest="max_file_bytes",
@@ -1556,31 +1680,37 @@ def main(argv=None):
                         "(off just means readers do that work instead)")
     p.set_defaults(func=cmd_config)
 
-    p = sub.add_parser("collection", help="curated, nestable sets of refs")
-    p.add_argument("archive", help="registered archive name, or a literal path")
+    p = sub.add_parser(
+        "collection", help="curated, nestable sets of refs",
+        description="Manage collections: named, hand-curated sets of refs "
+                     "(files, sessions, or other collections) that point at "
+                     "things without moving them -- see the subcommands "
+                     "below.")
+    p.add_argument("archive", help="registered archive nickname, or a literal path")
     csub = p.add_subparsers(dest="collection_action", required=True)
     csub.add_parser("list", help="list collections")
     q = csub.add_parser("show", help="show a collection and everything under it")
-    q.add_argument("name")
+    q.add_argument("name", help="the collection's name")
     q = csub.add_parser("new", help="create an empty collection")
-    q.add_argument("name")
-    q.add_argument("--title")
+    q.add_argument("name", help="name for the new collection")
+    q.add_argument("--title", help="one-line description")
     q = csub.add_parser("rm", help="delete a collection (members are untouched)")
-    q.add_argument("name")
+    q.add_argument("name", help="the collection's name")
     q = csub.add_parser("rename", help="rename a collection (rewrites every "
                                        "collections/<old> ref that points at it)")
-    q.add_argument("name")
+    q.add_argument("name", help="the collection's current name")
     q.add_argument("new", nargs="?", help="the new name; omit to only set --title")
     q.add_argument("--title", help="one-line description (not a second name)")
     q.set_defaults(collection_action="rename")
 
     q = csub.add_parser("add", help="add refs -- files, sessions, or collections/<name>")
-    q.add_argument("name")
-    q.add_argument("refs", nargs="+")
-    q.add_argument("--note")
+    q.add_argument("name", help="the collection's name")
+    q.add_argument("refs", nargs="+", help="ref(s) to add, e.g. S-26-0012/raw.csv, "
+                                          "S-26-0012, or collections/other-name")
+    q.add_argument("--note", help="why this belongs here (optional)")
     q = csub.add_parser("remove", help="remove refs from a collection")
-    q.add_argument("name")
-    q.add_argument("refs", nargs="+")
+    q.add_argument("name", help="the collection's name")
+    q.add_argument("refs", nargs="+", help="ref(s) to remove, same spelling as 'add'")
     p.set_defaults(func=cmd_collection)
 
     p = sub.add_parser(
@@ -1600,7 +1730,7 @@ def main(argv=None):
                      "Remember to quote the whole query at the shell so its "
                      "own quotes survive, e.g. nebula search postdoc "
                      "\"tag:'twpa*'\".")
-    p.add_argument("archive", help="registered archive name, or a literal path")
+    p.add_argument("archive", help="registered archive nickname, or a literal path")
     p.add_argument("query", nargs="*", help="search query (see above); "
                    "multiple words are ANDed, same as one space-separated query")
     p.add_argument("--fields", help="comma-separated fields to search by default "
@@ -1616,29 +1746,38 @@ def main(argv=None):
     p.add_argument("--json", action="store_true", help="machine-readable output")
     p.set_defaults(func=cmd_search)
 
-    p = sub.add_parser("view", aliases=["saved-search"], help="saved searches")
-    p.add_argument("archive", help="registered archive name, or a literal path")
+    p = sub.add_parser(
+        "view", aliases=["saved-search"], help="saved searches",
+        description="Manage saved searches: a stored 'search' query under a "
+                     "name, so a search you run often does not need "
+                     "retyping. See the subcommands below.")
+    p.add_argument("archive", help="registered archive nickname, or a literal path")
     vsub = p.add_subparsers(dest="view_action", required=True)
     vsub.add_parser("list", help="list saved views")
     q = vsub.add_parser("save", help="create or overwrite a view")
-    q.add_argument("name")
+    q.add_argument("name", help="name for the saved view")
     q.add_argument("--query", help="search terms (ANDed)")
-    q.add_argument("--title")
+    q.add_argument("--title", help="one-line description")
     q.add_argument("--fields", help="comma-separated: filename,tags,origin,session,"
                                     "user_tags,comments")
     q.add_argument("--date-from", dest="date_from", metavar="YYYY-MM-DD")
     q.add_argument("--date-to", dest="date_to", metavar="YYYY-MM-DD")
     q = vsub.add_parser("rm", help="delete a view")
-    q.add_argument("name")
+    q.add_argument("name", help="the view's name")
     q = vsub.add_parser("run", help="run a view and list what it matches")
-    q.add_argument("name")
+    q.add_argument("name", help="the view's name")
     p.set_defaults(func=cmd_view)
 
     p = sub.add_parser(
         "annotate",
         help="show or edit user tags/comment on a session or file (mutable; "
-             "never touches sidecars)")
-    p.add_argument("archive", help="registered archive name, or a literal path")
+             "never touches sidecars)",
+        description="Show or edit the mutable user tags and comment on a "
+                     "session or one of its files -- the notes-you-add-later "
+                     "layer, kept apart from the sidecar's own immutable "
+                     "record of what happened. With no edit flags, just "
+                     "prints the current tags/comment.")
+    p.add_argument("archive", help="registered archive nickname, or a literal path")
     p.add_argument("run_id", type=_run_id_arg,
                    help="session id -- S-26-0012, or 0012 for the current year")
     p.add_argument("file", nargs="?",
@@ -1650,8 +1789,13 @@ def main(argv=None):
     p.add_argument("--comment", help="set the comment (empty string clears it)")
     p.set_defaults(func=cmd_annotate)
 
-    p = sub.add_parser("gc", help="delete captured source code nothing references")
-    p.add_argument("archive", help="registered archive name, or a literal path")
+    p = sub.add_parser(
+        "gc", help="delete captured source code nothing references",
+        description="Delete captured-source snapshots in <archive>/.code "
+                     "that no surviving artifact's sidecar references any "
+                     "more. Defaults to a dry run -- pass --delete to "
+                     "actually remove anything.")
+    p.add_argument("archive", help="registered archive nickname, or a literal path")
     p.add_argument("--delete", action="store_true",
                    help="actually delete (default is a dry run)")
     p.add_argument("--ignore-trash", action="store_true",
@@ -1662,8 +1806,12 @@ def main(argv=None):
     p = sub.add_parser(
         "hold",
         help="keep a session appendable past its start day (e.g. across midnight)",
+        description="Keep a session open for appending past the day it was "
+                     "created on -- normally a session is only writable on "
+                     "its start day. With no DURATION, holds indefinitely "
+                     "and blocks until Ctrl-C.",
     )
-    p.add_argument("archive", help="registered archive name, or a literal path")
+    p.add_argument("archive", help="registered archive nickname, or a literal path")
     p.add_argument("run_id", type=_run_id_arg, help="session id -- S-26-0012, or 0012 for the current year")
     p.add_argument(
         "duration",
@@ -1676,48 +1824,94 @@ def main(argv=None):
     p = sub.add_parser(
         "release", aliases=["close"],
         help="clear a hold placed with 'hold' (does not change open/closed status)",
+        description="Clear a hold placed with 'hold', so the session goes "
+                     "back to normal day-based write rules. Does not close "
+                     "the session itself.",
     )
-    p.add_argument("archive", help="registered archive name, or a literal path")
+    p.add_argument("archive", help="registered archive nickname, or a literal path")
     p.add_argument("run_id", type=_run_id_arg, help="session id -- S-26-0012, or 0012 for the current year")
     p.set_defaults(func=cmd_release)
 
-    p = sub.add_parser("upstream", help="what did this artifact depend on")
-    p.add_argument("archive", help="registered archive name, or a literal path")
+    p = sub.add_parser(
+        "upstream", help="what did this artifact depend on",
+        description="Trace one artifact's derived_from provenance backward: "
+                     "everything it was recorded as having come from.")
+    p.add_argument("archive", help="registered archive nickname, or a literal path")
     p.add_argument("run_id", type=_run_id_arg, help="session id -- S-26-0012, or 0012 for the current year")
-    p.add_argument("filename")
+    p.add_argument("filename", help="the artifact's filename")
     p.set_defaults(func=cmd_upstream)
 
-    p = sub.add_parser("downstream", help="what depends on this artifact")
-    p.add_argument("archive", help="registered archive name, or a literal path")
+    p = sub.add_parser(
+        "downstream", help="what depends on this artifact",
+        description="Trace one artifact's derived_from provenance forward: "
+                     "everything recorded as having come from it. Only "
+                     "searches this archive unless --also-search names "
+                     "others.")
+    p.add_argument("archive", help="registered archive nickname, or a literal path")
     p.add_argument("run_id", type=_run_id_arg, help="session id -- S-26-0012, or 0012 for the current year")
-    p.add_argument("filename")
-    p.add_argument("--also-search", nargs="*", help="other registered archive names to scan")
+    p.add_argument("filename", help="the artifact's filename")
+    p.add_argument("--also-search", nargs="*", help="other registered archive nicknames to scan")
     p.set_defaults(func=cmd_downstream)
 
-    p = sub.add_parser("index", help="index status and freshness")
-    p.add_argument("archive", help="registered archive name, or a literal path")
+    p = sub.add_parser(
+        "index", help="index status and freshness",
+        description="Show an archive's index.db status: whether it is "
+                     "stale relative to the sidecars on disk, and how many "
+                     "sessions/artifacts it knows about. Pass --rebuild to "
+                     "rebuild it from scratch instead of just reporting.")
+    p.add_argument("archive", help="registered archive nickname, or a literal path")
     p.add_argument("--rebuild", action="store_true", help="rebuild from scratch instead")
     p.set_defaults(func=cmd_index)
 
-    p = sub.add_parser("seal", help="declare a past year finished (sweeps skip it)")
-    p.add_argument("archive", help="registered archive name, or a literal path")
-    p.add_argument("year")
+    p = sub.add_parser(
+        "seal", help="declare a past year finished (sweeps skip it)",
+        description="Mark a year as finished, so freshness sweeps stop "
+                     "re-checking its sessions every time. Refuses the "
+                     "current year, or one with open sessions, unless "
+                     "--force.")
+    p.add_argument("archive", help="registered archive nickname, or a literal path")
+    p.add_argument("year", help="the year to seal, e.g. 2025")
     p.add_argument("--force", action="store_true",
                    help="seal even the current year, or one with open sessions")
     p.set_defaults(func=cmd_seal)
 
-    p = sub.add_parser("unseal", help="remove a year's seal")
-    p.add_argument("archive", help="registered archive name, or a literal path")
-    p.add_argument("year")
+    p = sub.add_parser(
+        "unseal", help="remove a year's seal",
+        description="Undo 'seal': the year goes back to being checked by "
+                     "every freshness sweep.")
+    p.add_argument("archive", help="registered archive nickname, or a literal path")
+    p.add_argument("year", help="the year to unseal, e.g. 2025")
     p.set_defaults(func=cmd_unseal)
 
-    p = sub.add_parser("stale", help="find sessions left open too long")
-    p.add_argument("archive", help="registered archive name, or a literal path")
-    p.add_argument("--hours", type=float, default=24.0)
+    p = sub.add_parser(
+        "stale", help="find sessions left open too long",
+        description="List sessions that have been open longer than "
+                     "--hours without being closed -- likely abandoned by a "
+                     "crashed or forgotten script.")
+    p.add_argument("archive", help="registered archive nickname, or a literal path")
+    p.add_argument("--hours", type=float, default=24.0,
+                   help="how long a session may stay open before it counts as stale (default 24)")
     p.set_defaults(func=cmd_stale)
 
-    p = sub.add_parser("archives", help="list registered archives and where they live")
-    p.add_argument("archive", nargs="?", help="archive to edit locations for")
+    p = sub.add_parser(
+        "archives",
+        help="list registered archives and where they live",
+        description="List every archive this machine's registry.yaml knows "
+                     "about, keyed by the name each archive declares for "
+                     "itself (its archive.yaml), with the location(s) it "
+                     "was found at last time and whether each is currently "
+                     "mounted. Pass an archive nickname with --add-location "
+                     "or --remove-location to edit its registered "
+                     "locations instead of listing.")
+    p.add_argument("archive", nargs="?",
+                   help="an archive's registry nickname, to edit its "
+                        "locations with --add-location/--remove-location "
+                        "(omit to just list every archive)")
+    p.add_argument("-l", "--long", action="store_true",
+                   help="also show each archive's kind, every nickname "
+                        "registered for it, and its archive.yaml settings "
+                        "(on_overwrite, capture_code, auto_index, "
+                        "asset_policy, git_org)")
     p.add_argument("--add-location", metavar="PATH_OR_URL",
                    help="record another place this archive lives (appended, "
                         "so it does not displace the working copy)")
@@ -1728,7 +1922,13 @@ def main(argv=None):
                    help="forget one location (the last one cannot be removed)")
     p.set_defaults(func=cmd_archives)
 
-    p = sub.add_parser("contacts", help="local petnames for people, and the ids they have used")
+    p = sub.add_parser(
+        "contacts", help="local petnames for people, and the ids they have used",
+        description="Manage local petnames (short, memorable names you "
+                     "choose) mapped to the identities -- e.g. "
+                     "orcid/github/email -- a person has used over time, so "
+                     "refs and archive ownership can be shown by a name you "
+                     "recognise. With no flags, lists every contact.")
     p.add_argument("petname", nargs="?", help="the local shorthand, e.g. grant")
     p.add_argument("--add", metavar="ID",
                    help="record an identity for this petname; appended, so it "
@@ -1740,10 +1940,18 @@ def main(argv=None):
                    help="print the current identity for a petname or an old id")
     p.set_defaults(func=cmd_contacts)
 
-    p = sub.add_parser("init", help="create an archive")
-    p.add_argument("root")
+    p = sub.add_parser(
+        "init", help="create an archive",
+        description="Create a new archive at ROOT: an archive.yaml "
+                     "declaring its name/owner/kind, plus empty data/ and "
+                     "code/ directories. Pass --register to also add it to "
+                     "this machine's registry.yaml in the same step.")
+    p.add_argument("root", help="directory to create the archive in (created if missing)")
     p.add_argument("--kind", choices=("standard", "intake", "fragment"),
-                   default="standard")
+                   default="standard",
+                   help="standard: a normal archive (default); intake: a "
+                        "temporary landing zone later merged into one; "
+                        "fragment: an excerpt received from someone else")
     p.add_argument("--name", help="the name it will carry in nebula:// URIs "
                                   "(default: the folder name)")
     p.add_argument("--user", help="who owns it (default: your local identity)")
@@ -1758,13 +1966,22 @@ def main(argv=None):
                    help="per-file ceiling for the code snapshot")
     p.set_defaults(func=cmd_init)
 
-    p = sub.add_parser("intake", help="create a timestamped intake archive")
+    p = sub.add_parser(
+        "intake", help="create a timestamped intake archive",
+        description="Create an intake archive: a temporary, timestamped "
+                     "landing zone (kind=intake) meant to later be merged "
+                     "into a standard archive with 'merge'.")
     p.add_argument("parent", help="where to create it")
     p.add_argument("--label", help="appended to the name, e.g. the instrument")
     p.set_defaults(func=cmd_intake)
 
-    p = sub.add_parser("export", help="write a fragment: an excerpt others can read")
-    p.add_argument("archive", help="registered archive name, or a literal path")
+    p = sub.add_parser(
+        "export", help="write a fragment: an excerpt others can read",
+        description="Write a fragment -- a self-contained excerpt of an "
+                     "archive (whole sessions, single refs, or a "
+                     "collection) that someone else can 'receive' or "
+                     "'adopt' into their own archive.")
+    p.add_argument("archive", help="registered archive nickname, or a literal path")
     p.add_argument("dest", help="directory to create")
     p.add_argument("--session", action="append", type=_run_id_arg,
                    help="a whole session (repeatable)")
@@ -1773,13 +1990,17 @@ def main(argv=None):
     p.add_argument("--collection", help="everything in a collection")
     p.add_argument("--exclude-foreign", action="store_true",
                    help="list, but do not embed, data belonging to other archives")
-    p.add_argument("--dry-run", action="store_true")
+    p.add_argument("--dry-run", action="store_true", help="show what would be written, without writing it")
     p.set_defaults(func=cmd_export)
 
-    p = sub.add_parser("merge", help="merge an intake archive into a standard one")
+    p = sub.add_parser(
+        "merge", help="merge an intake archive into a standard one",
+        description="Merge every session from an intake archive into a "
+                     "standard archive, then lock the intake archive "
+                     "against further writes (see 'unlock').")
     p.add_argument("source", help="the intake archive")
     p.add_argument("dest", help="the standard archive")
-    p.add_argument("--dry-run", action="store_true")
+    p.add_argument("--dry-run", action="store_true", help="show what would be merged, without merging it")
     p.add_argument("--no-verify", action="store_true",
                    help="skip re-hashing each file after copying")
     p.add_argument("--no-lock", action="store_true",
@@ -1789,40 +2010,74 @@ def main(argv=None):
                         "candidate (--dry-run first to see them)")
     p.set_defaults(func=cmd_merge)
 
-    p = sub.add_parser("adopt", help="copy sessions out of a fragment into your archive")
+    p = sub.add_parser(
+        "adopt", help="copy sessions out of a fragment into your archive",
+        description="Copy sessions from a received fragment into your own "
+                     "standard archive, the receiving-end counterpart to "
+                     "'export'.")
     p.add_argument("source", help="the fragment")
     p.add_argument("dest", help="your standard archive")
     p.add_argument("--session", action="append", help="only these sessions")
-    p.add_argument("--dry-run", action="store_true")
-    p.add_argument("--no-verify", action="store_true")
+    p.add_argument("--dry-run", action="store_true", help="show what would be adopted, without adopting it")
+    p.add_argument("--no-verify", action="store_true", help="skip re-hashing each file after copying")
     p.set_defaults(func=cmd_adopt)
 
-    p = sub.add_parser("receive", help="file a fragment someone sent you")
+    p = sub.add_parser(
+        "receive", help="file a fragment someone sent you",
+        description="File a fragment someone sent you into "
+                     "$NEBULA_HOME/fragments/<their-user>/<archive>, so it "
+                     "can be browsed or 'adopt'ed from a known place.")
     p.add_argument("source", help="the fragment directory")
     p.add_argument("--home", help="override NEBULA_HOME")
     p.add_argument("--overwrite-foreign", action="store_true",
                    help="replace differing copies instead of keeping what is here")
-    p.add_argument("--dry-run", action="store_true")
+    p.add_argument("--dry-run", action="store_true", help="show what would be filed, without filing it")
     p.set_defaults(func=cmd_receive)
 
-    p = sub.add_parser("prune", help="delete a merged intake archive")
-    p.add_argument("archive")
+    p = sub.add_parser(
+        "prune", help="delete a merged intake archive",
+        description="Delete an intake archive after it has been merged. "
+                     "Refuses if any session was never merged, unless "
+                     "--force.")
+    p.add_argument("archive", help="the intake archive to delete")
     p.add_argument("--force", action="store_true",
                    help="delete even if some sessions were never merged")
     p.set_defaults(func=cmd_prune)
 
-    p = sub.add_parser("unlock", help="let a merged intake archive be written to again")
-    p.add_argument("archive")
+    p = sub.add_parser(
+        "unlock", help="let a merged intake archive be written to again",
+        description="Undo the write-lock 'merge' placed on an intake "
+                     "archive after merging it, so it can be written to "
+                     "again. A second merge afterwards could feed the "
+                     "destination data the first merge never saw.")
+    p.add_argument("archive", help="the intake archive to unlock")
     p.set_defaults(func=cmd_unlock)
 
-    p = sub.add_parser("scan", help="discover archives under NEBULA_HOME")
+    p = sub.add_parser(
+        "scan", help="discover archives under NEBULA_HOME",
+        description="Scan $NEBULA_HOME (and its fragments/ subtree) for "
+                     "directories containing an archive.yaml, and register "
+                     "any that are not already known. Convention discovers; "
+                     "the registry still resolves.")
     p.add_argument("--home", help="override NEBULA_HOME for this scan")
     p.set_defaults(func=cmd_scan)
 
-    p = sub.add_parser("register", help="register an archive in ~/.nebula/registry.yaml")
-    p.add_argument("root")
-    p.add_argument("name", nargs="?", help="override the name it declares "
-                                           "(normally unnecessary)")
+    p = sub.add_parser(
+        "register", help="add an archive to this machine's registry.yaml",
+        description="Add an archive to this machine's registry "
+                     "(~/.nebula/registry.yaml), so it can be addressed by "
+                     "a short nickname instead of its full path. The "
+                     "registry entry is keyed by that nickname, which "
+                     "defaults to the name the archive declares for "
+                     "itself in its own archive.yaml.")
+    p.add_argument("root", help="the archive's directory (must contain an "
+                                "archive.yaml)")
+    p.add_argument("nickname", nargs="?",
+                   help="registry key to file it under, overriding the "
+                        "name it declares for itself (normally unnecessary "
+                        "-- only needed if that name is already taken by a "
+                        "different archive, or you would rather call it "
+                        "something else)")
     p.add_argument("--git-org", help="GitHub org/user hosting this archive's repos")
     p.add_argument("--user", help="who owns this archive, for nebula:// URIs "
                                   "(omit for your own archives)")
@@ -1831,15 +2086,24 @@ def main(argv=None):
     # Assets get a nested subparser rather than the flat `asset-commit`
     # spelling used elsewhere: there are enough verbs that flattening them
     # would double the top-level command list for one noun.
-    p = sub.add_parser("asset", help="manage mutable assets (files you keep editing)")
+    p = sub.add_parser(
+        "asset", help="manage mutable assets (files you keep editing)",
+        description="Manage assets: files you keep editing in place (unlike "
+                     "the append-only artifacts in a session) with their "
+                     "edit history snapshotted according to a size-based "
+                     "policy. See the subcommands below.")
     asub = p.add_subparsers(dest="asset_cmd", required=True)
 
-    def _asset_parser(name, help_text):
-        q = asub.add_parser(name, help=help_text)
-        q.add_argument("archive", help="registered archive name, or a literal path")
+    def _asset_parser(name, help_text, description=None):
+        q = asub.add_parser(name, help=help_text, description=description or help_text)
+        q.add_argument("archive", help="registered archive nickname, or a literal path")
         return q
 
-    q = _asset_parser("import", "bring file(s) under management as assets")
+    q = _asset_parser("import", "bring file(s) under management as assets",
+                      "Bring one or more existing files under asset "
+                      "management: they are copied in and get an id, a "
+                      "snapshot policy, and (going forward) versioned "
+                      "history.")
     q.add_argument("files", nargs="+", help="file(s) to import")
     q.add_argument("--as", dest="dest_name", help="store under a different name")
     q.add_argument("--policy", choices=ASSET_POLICIES,
@@ -1851,23 +2115,33 @@ def main(argv=None):
     q.add_argument("--move", action="store_true", help="move instead of copy")
     q.set_defaults(func=cmd_asset_import)
 
-    q = _asset_parser("ls", "list assets")
+    q = _asset_parser("ls", "list assets", "List every managed asset, its policy, size, and snapshot count.")
     q.add_argument("--policy", choices=ASSET_POLICIES,
                    help="only assets whose effective policy is this")
-    q.add_argument("--sort", choices=("recent", "name", "size"), default="recent")
+    q.add_argument("--sort", choices=("recent", "name", "size"), default="recent",
+                   help="sort order (default: recent)")
     q.set_defaults(func=cmd_asset_ls)
 
-    q = _asset_parser("show", "show one asset in full")
+    q = _asset_parser("show", "show one asset in full",
+                      "Show everything recorded about one asset: its "
+                      "policy, size, origin, and snapshot history.")
     q.add_argument("asset_id", type=_asset_id_arg,
                    help="asset id -- AF-26-0017, or 0017 for the current year")
     q.set_defaults(func=cmd_asset_show)
 
-    q = _asset_parser("path", "print an asset's path on disk (for opening it)")
-    q.add_argument("asset_id", type=_asset_id_arg)
+    q = _asset_parser("path", "print an asset's path on disk (for opening it)",
+                      "Print an asset's path on disk, so it can be piped "
+                      "into another command or opened directly.")
+    q.add_argument("asset_id", type=_asset_id_arg,
+                   help="asset id -- AF-26-0017, or 0017 for the current year")
     q.set_defaults(func=cmd_asset_path)
 
-    q = _asset_parser("commit", "save the asset's current bytes as a snapshot")
-    q.add_argument("asset_id", type=_asset_id_arg)
+    q = _asset_parser("commit", "save the asset's current bytes as a snapshot",
+                      "Save the asset's current bytes on disk as a new "
+                      "version in its history, regardless of the automatic "
+                      "snapshot policy.")
+    q.add_argument("asset_id", type=_asset_id_arg,
+                   help="asset id -- AF-26-0017, or 0017 for the current year")
     q.add_argument("-m", "--message", dest="note",
                    help="why this version is worth keeping")
     q.add_argument("--force", action="store_true",
@@ -1875,13 +2149,21 @@ def main(argv=None):
                         "bytes already stored")
     q.set_defaults(func=cmd_asset_commit)
 
-    q = _asset_parser("history", "list an asset's stored versions")
-    q.add_argument("asset_id", type=_asset_id_arg)
+    q = _asset_parser("history", "list an asset's stored versions",
+                      "List every version an asset has stored, most recent "
+                      "first.")
+    q.add_argument("asset_id", type=_asset_id_arg,
+                   help="asset id -- AF-26-0017, or 0017 for the current year")
     q.set_defaults(func=cmd_asset_history)
 
-    q = _asset_parser("policy", "show or change one asset's snapshot policy")
-    q.add_argument("asset_id", type=_asset_id_arg)
-    q.add_argument("policy", nargs="?", choices=ASSET_POLICIES)
+    q = _asset_parser("policy", "show or change one asset's snapshot policy",
+                      "Show, or override, one asset's snapshot policy and "
+                      "retention limits -- otherwise inherited from the "
+                      "archive's size-based defaults.")
+    q.add_argument("asset_id", type=_asset_id_arg,
+                   help="asset id -- AF-26-0017, or 0017 for the current year")
+    q.add_argument("policy", nargs="?", choices=ASSET_POLICIES,
+                   help="new policy to set (omit to just show the current one)")
     q.add_argument("--period-days", type=int,
                    help="gap between periodic snapshots (-1 to use the archive default)")
     q.add_argument("--max-snapshots", type=int,
@@ -1890,17 +2172,25 @@ def main(argv=None):
                    help="retained snapshot bytes (-1 to use the archive default)")
     q.set_defaults(func=cmd_asset_policy)
 
-    q = _asset_parser("scan", "reconcile assets with what is on disk")
+    q = _asset_parser("scan", "reconcile assets with what is on disk",
+                      "Reconcile one or every asset's record against the "
+                      "bytes actually on disk -- picks up hand-made edits "
+                      "and applies the snapshot policy to them.")
     q.add_argument("asset_id", nargs="?", type=_asset_id_arg,
                    help="limit to one asset (default: all)")
     q.set_defaults(func=cmd_asset_scan)
 
-    p = sub.add_parser("whoami", help="show or set your nebula user name (used in URIs)")
+    p = sub.add_parser(
+        "whoami", help="show or set your nebula user name (used in URIs)",
+        description="Show your local nebula user identity (the value@authority "
+                     "used as the owner segment of nebula:// URIs), or set "
+                     "it with --set.")
     p.add_argument("--set", dest="set_user", metavar="NAME",
                    help="set the local user name, as value@authority "
                         "(0000-0003-2885-4801@orcid.org, you@github.com, "
                         "you@your-institution.edu)")
     p.set_defaults(func=cmd_whoami)
+
 
     args = parser.parse_args(argv)
     args.func(args)

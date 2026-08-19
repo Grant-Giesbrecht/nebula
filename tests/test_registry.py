@@ -10,7 +10,7 @@ def test_register_and_get(tmp_path):
     reg.register("postdoc", tmp_path / "postdoc-data", git_org="grant-nist")
 
     cfg = reg.get("postdoc")
-    assert cfg.name == "postdoc"
+    assert cfg.nickname == "postdoc"
     assert cfg.root == tmp_path / "postdoc-data"
     assert cfg.git_org == "grant-nist"
 

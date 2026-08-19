@@ -560,7 +560,7 @@ def _rename_targets(archive_root: Path, archive_label: str, run_id: str,
         root = Path(cfg.root)
         if not root.is_dir() or root.resolve() == archive_root.resolve():
             continue
-        hits.extend(scan(root, cfg.name, foreign=True))
+        hits.extend(scan(root, cfg.nickname, foreign=True))
     return hits
 
 

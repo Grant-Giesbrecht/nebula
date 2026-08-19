@@ -32,7 +32,7 @@ depend on" months later without a rigid, ever-breaking folder taxonomy.
   silently rewrite last week's record by reflex.
 - **Multiple independent archives** (e.g. a postdoc data archive and a
   separate personal/startup archive) can cross-reference each other via a
-  small registry (`~/.nebula/archives.yaml`) and an `archive|session/file`
+  small registry (`~/.nebula/registry.yaml`) and an `archive|session/file`
   ref syntax.
 - **The SQLite index is disposable, and keeps itself current.** Every row
   is a copy of something in a `session.yaml` or `*.meta.json`; the
@@ -221,11 +221,13 @@ Every session call (`nebula.session`, `nebula.new`, `nebula.append_to`,
 `nebula.reopen`) takes an `archive` argument, and its **type** decides how
 it's resolved:
 
-- Pass a **`str`** and it's treated as a name registered in
-  `~/.nebula/archives.yaml` (or `$NEBULA_REGISTRY`) — looked up via
-  `nebula register <name> <root>`. Unknown names raise `KeyError`
-  immediately rather than silently creating a folder somewhere
-  unexpected.
+- Pass a **`str`** and it's treated as a nickname registered in
+  `~/.nebula/registry.yaml` (or `$NEBULA_REGISTRY`) — looked up via
+  `nebula register <root> [nickname]`. A nickname is purely local: it
+  lives only in that file, and is not the same thing as the archive's own
+  declared name in its `archive.yaml` (see "Where archives live" below).
+  Unknown nicknames raise `KeyError` immediately rather than silently
+  creating a folder somewhere unexpected.
 - Pass a **`Path`** and it's used as a literal filesystem root, no
   registry involved — useful for scratch/ad hoc archives you don't want
   to register.
@@ -272,7 +274,7 @@ current year. `26-0012` works too; a full `S-26-0012` is always accepted.
 ```
 src/nebula/
     refs.py       # Ref dataclass + parse_ref/format_ref (single canonical parser)
-    registry.py   # multi-archive registry (~/.nebula/archives.yaml)
+    registry.py   # multi-archive registry (~/.nebula/registry.yaml)
     sidecar.py    # atomic JSON sidecar I/O + session.yaml I/O
     session.py    # Session, new()/append_to()/reopen()/session() context manager
     index.py      # SQLite index rebuild (fully regeneratable)
@@ -430,12 +432,18 @@ nebula adopt ~/nebula/fragments/grant/postdoc mine --dry-run
 
 `$NEBULA_HOME` (default `~/nebula`) is scanned by `nebula scan` to discover
 archives and register what is new. The convention discovers; the registry
-still resolves, so an archive on a NAS registered by hand keeps the name and
-path you gave it. An archive's **name and owner live in its own
-`archive.yaml`** and travel with it — `nebula register` takes the name the
-archive declares rather than one you supply, because that is the name its
-author wrote into refs. Two archives claiming one name coexist as
-`<user>-<name>`.
+still resolves, so an archive on a NAS registered by hand keeps the
+nickname and path you gave it. An archive's **name and owner live in its
+own `archive.yaml`** and travel with it — `nebula register` keys its
+registry entry by that declared name by default, rather than one you
+supply, because that is the name its author wrote into refs. A nickname
+is a separate, purely local thing: it is how *this machine* addresses the
+archive (`nebula ls <nickname>`), and is never read from or written to
+the archive itself, so you can call the same archive whatever you like
+without disturbing what it calls itself. Two archives claiming one
+declared name coexist as `<user>-<name>`; run `nebula archives -l` to see
+every nickname registered for each archive, alongside its kind and
+settings.
 
 ## Refs and nebula URIs
 
@@ -687,8 +695,9 @@ nebula show <archive> <run_id>                     # full detail incl. derived_f
 nebula upstream <archive> <run_id> <file>          # trace an artifact back to its inputs
 nebula downstream <archive> <run_id> <file> [--also-search ARCHIVE ...]
 nebula stale <archive> [--hours N]                 # find abandoned "open" sessions
-nebula archives                                    # list registered archives
-nebula register <name> <root> [--git-org ORG] [--user WHO]
+nebula archives [-l]                               # list registered archives
+                                                   # (-l: kind, aliases, settings)
+nebula register <root> [nickname] [--git-org ORG] [--user WHO]
 nebula whoami [--set NAME]                         # your name in nebula:// URIs
 nebula collection <archive> list|show|new|rename|rm|add|remove
 nebula search <archive> [query...] [--fields F,F] [--date-from D] [--date-to D]
@@ -703,7 +712,7 @@ nebula check <archive> [--no-checksums]            # fsck, incl. dangling code r
 nebula gc <archive> [--delete] [--ignore-trash]    # sweep unreferenced captured code
 ```
 
-`<archive>` is either a registered name (see `nebula archives`) or a
+`<archive>` is either a registered nickname (see `nebula archives`) or a
 literal path.
 
 `downstream` only searches archives you tell it to (via `--also-search`),

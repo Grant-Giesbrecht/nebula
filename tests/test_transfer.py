@@ -462,7 +462,7 @@ def test_an_archive_is_registered_under_the_name_it_declares(tmp_path):
 
     archive = transfer.init_archive(tmp_path / "some-folder", name="postdoc")
     cfg = get_registry().register_archive(archive)
-    assert cfg.name == "postdoc"        # not "some-folder"
+    assert cfg.nickname == "postdoc"        # not "some-folder"
 
 
 def test_two_archives_with_the_same_name_can_coexist(tmp_path):
@@ -473,7 +473,7 @@ def test_two_archives_with_the_same_name_can_coexist(tmp_path):
     reg = get_registry()
     a = reg.register_archive(mine)
     b = reg.register_archive(theirs)
-    assert a.name == "postdoc" and b.name == "jane-postdoc"
+    assert a.nickname == "postdoc" and b.nickname == "jane-postdoc"
     assert reg.find("postdoc", "jane") is not None
 
 
@@ -486,7 +486,7 @@ def test_scanning_the_home_directory_finds_archives(tmp_path):
     transfer.init_archive(home / "audio", name="audio")
     (home / "not-an-archive").mkdir()
 
-    found = {cfg.name for cfg in get_registry().discover()}
+    found = {cfg.nickname for cfg in get_registry().discover()}
     assert found == {"postdoc", "audio"}
 
 
