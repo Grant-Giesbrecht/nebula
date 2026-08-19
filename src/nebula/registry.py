@@ -215,6 +215,25 @@ def _read_locations(name: str, cfg: Dict, path: Path) -> "tuple[Location, ...]":
         f"archive {name!r} in {path} has neither 'root' nor 'locations'")
 
 
+def _normalize_location(location: "Location") -> "Location":
+    """Resolve a path-kind location to an absolute path before it is
+    stored.
+
+    A relative root typed at `nebula init`/`nebula register` time used to
+    be written into registry.yaml verbatim. That looked fine immediately,
+    but every later resolution re-joins it against *whatever the calling
+    process's cwd happens to be* -- a script run from a different
+    directory silently resolves the same registered name to a different,
+    nonexistent location. Canonicalizing at write time removes the
+    ambiguity; url-kind locations are left untouched (there is nothing to
+    resolve).
+    """
+    if location.kind != "path" or not location.value:
+        return location
+    resolved = str(Path(os.path.expanduser(location.value)).resolve())
+    return location if resolved == location.value else replace(location, value=resolved)
+
+
 def _write_locations(cfg: "ArchiveConfig") -> Dict:
     """Serialise locations, staying terse in the common case.
 
@@ -301,6 +320,7 @@ class Registry:
             if root is None:
                 raise ValueError("register needs either root or locations")
             locations = [Location(kind="path", value=str(root))]
+        locations = [_normalize_location(loc) for loc in locations]
         self._archives[nickname] = ArchiveConfig(
             nickname=nickname, locations=tuple(locations), git_org=git_org, user=user,
             kind=kind, declared_name=declared_name or nickname)
@@ -316,6 +336,7 @@ class Registry:
         otherwise explicitly.
         """
         self._load()
+        location = _normalize_location(location)
         cfg = self.get(nickname)
         existing = [loc for loc in cfg.locations
                     if not (loc.kind == location.kind
@@ -340,6 +361,38 @@ class Registry:
         self._archives[nickname] = replace(cfg, locations=tuple(kept))
         self._save()
         return self._archives[nickname]
+
+    def unregister(self, nickname: str) -> ArchiveConfig:
+        """Remove one entry from the registry. Does not touch anything on
+        disk -- the archive itself is untouched, only this machine's
+        pointer to it is forgotten. Returns the removed entry."""
+        self._load()
+        cfg = self.get(nickname)   # raises KeyError with the same message as get()
+        del self._archives[nickname]
+        self._save()
+        return cfg
+
+    def prune(self) -> "list[tuple[str, ArchiveConfig]]":
+        """Drop every registered archive whose location(s) are no longer
+        on disk. Returns the (nickname, config) pairs removed.
+
+        Conservative on purpose: an entry is only pruned when *every*
+        location it lists is path-kind and missing. A url-kind location
+        can't be checked ("on disk") the way a directory listing can, so
+        any entry naming one is left alone rather than guessed at.
+        """
+        self._load()
+        gone: "list[tuple[str, ArchiveConfig]]" = []
+        for nickname, cfg in list(self._archives.items()):
+            if any(loc.kind != "path" for loc in cfg.locations):
+                continue
+            if any(loc.path is not None and loc.path.is_dir() for loc in cfg.locations):
+                continue
+            gone.append((nickname, cfg))
+            del self._archives[nickname]
+        if gone:
+            self._save()
+        return gone
 
     def migrate(self) -> Optional[Path]:
         """Move a legacy archives.yaml to registry.yaml. Returns the new
@@ -503,3 +556,45 @@ def resolve_archive(
         f"archive identifier must be a str (registered name) or Path "
         f"(literal root), got {type(identifier).__name__}"
     )
+
+
+class ArchiveNotInitialized(FileNotFoundError):
+    """Raised by validate_archive() when an identifier resolves to a path
+    with no archive.yaml -- i.e. nothing ever ran nebula init/intake
+    there, so nothing should be written there either."""
+
+
+def validate_archive(identifier, registry: Optional[Registry] = None) -> Path:
+    """Resolve `identifier` and confirm it names a real, initialized
+    archive. Raises instead of returning on any problem.
+
+    Meant to be called once, early, in an unattended script -- before any
+    measurement is taken -- so a typo'd or stale archive name aborts the
+    run immediately with a clear reason, rather than being discovered
+    later from wherever the data actually ended up. This is deliberately
+    stricter than new()/append_to()/session(): those write anyway (with a
+    loud warning) if the resolved location isn't an initialized archive,
+    because a script already mid-measurement should keep its data over
+    refusing to save it. validate_archive() is the opt-in preflight that
+    catches the same problem before that tradeoff is even in play.
+
+        if args.nebula:
+            nebula.validate_archive(ARCHIVE)   # abort now if this is wrong
+            ...
+
+    Raises KeyError if `identifier` is an unregistered name (same as
+    resolve_archive), or ArchiveNotInitialized if it resolves to a path
+    with no archive.yaml.
+    """
+    from nebula.config import ARCHIVE_CONFIG_FILE
+
+    root, name = resolve_archive(identifier, registry)
+    if not (root / ARCHIVE_CONFIG_FILE).is_file():
+        label = f"{name!r} " if name else ""
+        raise ArchiveNotInitialized(
+            f"archive {label}resolves to {root}, which is not an "
+            f"initialized archive (no {ARCHIVE_CONFIG_FILE} found there). "
+            f"Run 'nebula init' at that path, or check the registered "
+            f"location with 'nebula archives'."
+        )
+    return root

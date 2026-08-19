@@ -149,3 +149,55 @@ def test_input_tag_non_interactive_returns_initial(tmp_path, monkeypatch):
 
     monkeypatch.setattr(builtins, "input", eof_input)
     assert input_tag(archive, initial=["preset"]) == ["preset"]
+
+
+# ---------------------------------------------------------------------
+# Regression: a bare comma-separated string silently splitting into
+# single-character "tags" instead of being rejected. See annotations.py's
+# clean_tags()/add_tags()/remove_tags() and session.py's new() for the
+# other entry points with the same guard.
+# ---------------------------------------------------------------------
+
+def test_input_tag_initial_string_raises_instead_of_splitting_into_letters(tmp_path):
+    archive = tmp_path / "archive"
+    with pytest.raises(TypeError, match=r"list of tag strings"):
+        input_tag(archive, initial="ruby, twpa")
+
+
+def test_new_session_tags_string_raises_instead_of_splitting_into_letters(tmp_path):
+    archive = tmp_path / "archive"
+    with pytest.raises(TypeError, match=r"list of strings"):
+        nebula.new(archive, tags="ruby, twpa", description="t")
+
+
+def test_new_session_tags_list_is_unaffected(tmp_path):
+    archive = tmp_path / "archive"
+    s = nebula.new(archive, tags=["ruby", "twpa"], description="t")
+    assert s.meta.tags == ["ruby", "twpa"]
+
+
+def test_clean_tags_string_raises_instead_of_splitting_into_letters():
+    from nebula.annotations import clean_tags
+
+    with pytest.raises(TypeError, match=r"list of strings"):
+        clean_tags("ruby, twpa")
+
+
+def test_add_tags_string_raises_instead_of_splitting_into_letters(tmp_path):
+    from nebula.annotations import add_tags
+
+    archive = tmp_path / "archive"
+    s = nebula.new(archive, description="t")
+    s.close()
+    with pytest.raises(TypeError, match=r"list of strings"):
+        add_tags(s.path, None, "ruby, twpa")
+
+
+def test_remove_tags_string_raises_instead_of_splitting_into_letters(tmp_path):
+    from nebula.annotations import remove_tags
+
+    archive = tmp_path / "archive"
+    s = nebula.new(archive, description="t")
+    s.close()
+    with pytest.raises(TypeError, match=r"list of strings"):
+        remove_tags(s.path, None, "ruby, twpa")

@@ -751,10 +751,34 @@ def new(
     (e.g. to give an unregistered/ad hoc Path a friendly name); normally
     you don't need this -- a registered name resolves its own label.
     """
+    if isinstance(tags, str):
+        # A bare string ("ruby, twpa") looks like the comma-separated form
+        # nebula's own CLI takes for --tags, but here it would be stored
+        # on SessionMeta.tags and later iterated character by character
+        # (by collect_tags, the session picker, etc.) -- silently turning
+        # one typo into single-letter tags. Catch it here instead.
+        raise TypeError(
+            f"tags must be a list of strings, not a single string "
+            f"({tags!r}). Did you mean tags={tags.split(',')!r}? "
+            f"(strip whitespace from each item first if it matters to you)"
+        )
     archive_root, resolved_name = resolve_archive(archive)
     name = archive_name or resolved_name or "local"
 
-    from nebula.config import read_settings
+    from nebula.config import ARCHIVE_CONFIG_FILE, read_settings
+
+    if not (archive_root / ARCHIVE_CONFIG_FILE).is_file():
+        # Warn, don't raise: a script mid-measurement should keep its data
+        # over refusing to save it. But this is exactly the failure mode
+        # that silently strands data in the wrong place (e.g. a
+        # relatively-registered archive resolved against the wrong cwd),
+        # so make it impossible to miss. Callers that want a hard stop
+        # before this point should call nebula.validate_archive() first.
+        from nebula._termui import err
+        label = f"{resolved_name!r} " if resolved_name else ""
+        err(f"** archive {label}has no {ARCHIVE_CONFIG_FILE} at {archive_root} -- "
+            f"this is not a registered/initialized archive. Writing to this "
+            f"location anyway: {archive_root} **")
 
     settings = read_settings(archive_root, apply_env=False)
     _refuse_if_unwritable(archive_root, settings)

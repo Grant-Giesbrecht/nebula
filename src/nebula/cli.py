@@ -69,12 +69,35 @@ def _resolve_archive_cli(text: str):
     """Lenient resolution for CLI use: try the registry first (so
     `nebula ls postdoc` works), fall back to treating the argument as a
     literal filesystem path (so `nebula ls /some/scratch/dir` also works
-    for ad hoc/unregistered archives). Returns (root: Path, name: str)."""
+    for ad hoc/unregistered archives). Returns (root: Path, name: str).
+
+    Every caller goes on to read from (or write into) `root` as an
+    existing archive directory, so an argument that is neither a
+    registered nickname nor a directory that exists is a mistake worth
+    catching here -- with a message that names the problem -- rather than
+    letting it surface many frames down as a raw sqlite/OSError traceback
+    the next time something tries to open a database file under a
+    directory that was never created.
+
+    Deliberately does NOT require an archive.yaml: an ad hoc archive
+    created purely through the Python API (nebula.new()/session(), no
+    'nebula init') never gets one, and is a supported, tested way to use
+    an archive -- see session.new()'s own warn-don't-raise handling of
+    exactly that case. This check only rules out "there is nothing here
+    at all," which is a different problem.
+    """
     registry = get_registry()
     cfg = registry.try_get(text)
     if cfg is not None:
         return cfg.root, text
-    return Path(text), "local"
+    path = Path(text)
+    if not path.is_dir():
+        err(f"{text!r} is not a registered archive, and {path} does not "
+            f"exist as a directory either. Known archives: "
+            f"{sorted(registry.all()) or '(none registered)'} -- see "
+            f"{registry.path}.")
+        sys.exit(1)
+    return path, "local"
 
 
 def cmd_rebuild(args):
@@ -1257,10 +1280,40 @@ def cmd_register(args):
     it. The positional NICKNAME argument overrides the default, for the
     rare case where the declared name collides with one already
     registered, or you would just rather call it something else.
+
+    --remove NICKNAME drops one entry (files are untouched); --prune drops
+    every entry whose location no longer exists on disk. Either can be
+    combined with the other, and both skip the normal register flow (ROOT
+    is not required with either).
     """
+    reg = get_registry()
+
+    if args.prune:
+        gone = reg.prune()
+        if not gone:
+            print("nothing to prune -- every registered location still exists")
+        else:
+            for nickname, cfg in gone:
+                warn(f"pruned '{nickname}' -- {cfg.root} no longer exists")
+
+    if args.remove:
+        try:
+            cfg = reg.unregister(args.remove)
+        except KeyError as e:
+            err(str(e))
+            sys.exit(1)
+        print(f"removed '{hl(args.remove)}' from the registry "
+              f"(files at {cfg.root} untouched)")
+
+    if args.prune or args.remove:
+        return
+
+    if not args.root:
+        err("register needs ROOT (or --remove NICKNAME / --prune)")
+        sys.exit(1)
+
     from nebula.config import archive_identity
 
-    reg = get_registry()
     root = Path(args.root)
     if args.nickname and not root.exists() and Path(args.nickname).exists():
         root, args.nickname = Path(args.nickname), None   # tolerate reversed arguments
@@ -1328,7 +1381,13 @@ def cmd_init(args):
 def cmd_intake(args):
     """Create a timestamped intake archive for capturing data."""
     from nebula import transfer
-
+    
+    print(f"{Fore.YELLOW}WARNING:{Style.RESET_ALL} Intake archives should usually be created with `nebula intake` to ensure correct automatic naming. ")
+    usr_input = input(f"Continue? [Y/n]: ")
+    if usr_input.upper() != "Y":
+        print(f"Canceling operation.")
+        return
+    
     root = transfer.new_intake(Path(args.parent), label=args.label or "")
     print(f"created intake archive {root.name}")
     print(f"  {root}")
@@ -2070,8 +2129,9 @@ def main(argv=None):
                      "registry entry is keyed by that nickname, which "
                      "defaults to the name the archive declares for "
                      "itself in its own archive.yaml.")
-    p.add_argument("root", help="the archive's directory (must contain an "
-                                "archive.yaml)")
+    p.add_argument("root", nargs="?", help="the archive's directory (must "
+                                "contain an archive.yaml); omit with "
+                                "--remove/--prune")
     p.add_argument("nickname", nargs="?",
                    help="registry key to file it under, overriding the "
                         "name it declares for itself (normally unnecessary "
@@ -2081,6 +2141,12 @@ def main(argv=None):
     p.add_argument("--git-org", help="GitHub org/user hosting this archive's repos")
     p.add_argument("--user", help="who owns this archive, for nebula:// URIs "
                                   "(omit for your own archives)")
+    p.add_argument("--remove", metavar="NICKNAME",
+                   help="remove one archive from the registry (its files "
+                        "are untouched)")
+    p.add_argument("--prune", action="store_true",
+                   help="remove every registered archive whose location "
+                        "no longer exists on disk")
     p.set_defaults(func=cmd_register)
 
     # Assets get a nested subparser rather than the flat `asset-commit`

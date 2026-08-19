@@ -134,6 +134,19 @@ def input_tag(
     `initial` unchanged rather than an error, so the same script runs
     unattended.
     """
+    if isinstance(initial, str):
+        # A bare string is almost always a caller who typed
+        # initial="ruby, twpa" expecting the same comma-separated parsing
+        # the interactive prompt itself uses -- but dict.fromkeys() below
+        # would iterate it character by character instead, silently
+        # turning that into single-letter "tags". Loud beats silent here:
+        # the fix is trivial once it's visible.
+        raise TypeError(
+            f"initial must be a list of tag strings, not a single string "
+            f"({initial!r}). Split it first, e.g. "
+            f"initial={_split_tags(initial)!r}."
+        )
+
     existing = collect_tags(archive)
     # dict.fromkeys keeps insertion order while dropping duplicates.
     selected: List[str] = list(dict.fromkeys(initial or []))

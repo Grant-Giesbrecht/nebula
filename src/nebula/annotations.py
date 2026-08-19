@@ -78,6 +78,17 @@ def clean_tag(text: str) -> str:
 
 def clean_tags(tags) -> List[str]:
     """Normalise a list of tags, dropping duplicates but keeping order."""
+    if isinstance(tags, str):
+        # A bare string ("ruby, twpa") would otherwise be iterated
+        # character by character below, silently producing one single-
+        # letter tag per character instead of raising. split_tags() is the
+        # comma-separated entry point; this one takes an already-split
+        # list, so a string here is always a caller mistake.
+        raise TypeError(
+            f"tags must be a list of strings, not a single string "
+            f"({tags!r}). Use split_tags({tags!r}) to parse the "
+            f"comma-separated form, or pass a list directly."
+        )
     out: List[str] = []
     for tag in tags or []:
         cleaned = clean_tag(tag)
@@ -235,11 +246,26 @@ def set_annotation(session_dir, filename: Optional[str] = None, *,
 
 
 def add_tags(session_dir, filename: Optional[str], tags) -> Dict[str, Any]:
+    if isinstance(tags, str):
+        # list("ruby, twpa") below would split this into single
+        # characters before clean_tags() ever saw it as a string -- catch
+        # it here instead. See clean_tags() for the same guard elsewhere.
+        raise TypeError(
+            f"tags must be a list of strings, not a single string "
+            f"({tags!r}). Use split_tags({tags!r}) to parse the "
+            f"comma-separated form, or pass a list directly."
+        )
     current = get(session_dir, filename)["tags"]
     return set_annotation(session_dir, filename, tags=current + list(tags or []))
 
 
 def remove_tags(session_dir, filename: Optional[str], tags) -> Dict[str, Any]:
+    if isinstance(tags, str):
+        raise TypeError(
+            f"tags must be a list of strings, not a single string "
+            f"({tags!r}). Use split_tags({tags!r}) to parse the "
+            f"comma-separated form, or pass a list directly."
+        )
     drop = {clean_tag(t) for t in (tags or [])}
     current = get(session_dir, filename)["tags"]
     return set_annotation(session_dir, filename,

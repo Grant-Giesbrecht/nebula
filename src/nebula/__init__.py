@@ -13,7 +13,7 @@ Core ideas:
 """
 
 from nebula.refs import Ref, parse_ref, format_ref
-from nebula.registry import Registry, get_registry
+from nebula.registry import ArchiveNotInitialized, Registry, get_registry, validate_archive
 from nebula.session import (
     Session,
     MissingMetadataError,
@@ -47,6 +47,8 @@ __all__ = [
     "format_ref",
     "Registry",
     "get_registry",
+    "validate_archive",
+    "ArchiveNotInitialized",
     "Session",
     "MissingMetadataError",
     "MissingMetadataWarning",
