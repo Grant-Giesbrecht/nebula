@@ -31,6 +31,11 @@ import yaml
 
 DEFAULT_REGISTRY_PATH = Path(os.path.expanduser("~/.nebula/registry.yaml"))
 
+#: Overrides the file, for scripts and tests. Read by
+#: `default_registry_path`, so *every* way of getting a Registry honours it
+#: -- see that function on why that matters.
+REGISTRY_ENV = "NEBULA_REGISTRY"
+
 #: What the registry used to be called. Read when the new name is absent,
 #: so an existing install keeps working; `Registry.migrate` renames it.
 LEGACY_REGISTRY_PATH = Path(os.path.expanduser("~/.nebula/archives.yaml"))
@@ -53,6 +58,28 @@ HOME_ENV = "NEBULA_HOME"
 #: Foreign archives (fragments others sent you) live under this, one folder
 #: per user, mirroring the URI: nebula://jane/lab -> fragments/jane/lab.
 FRAGMENTS_DIR = "fragments"
+
+
+def default_registry_path() -> Path:
+    """Where the registry lives when a caller does not say.
+
+    ``$NEBULA_REGISTRY`` wins, and it has to be honoured *here* rather than
+    only in `get_registry`: a bare ``Registry()`` built anywhere else would
+    otherwise silently reach past the override and write to the real
+    ``~/.nebula/registry.yaml``. That is not a hypothetical -- it is how a
+    test run leaked its temporary archives into a developer's own registry,
+    because the env var the test suite sets was respected by one
+    constructor and not the other.
+
+    Failing that, prefer the new filename and fall back to the old one only
+    when it is the only one there, so an upgrade is invisible.
+    """
+    override = os.environ.get(REGISTRY_ENV)
+    if override and override.strip():
+        return Path(os.path.expanduser(override.strip()))
+    if not DEFAULT_REGISTRY_PATH.exists() and LEGACY_REGISTRY_PATH.exists():
+        return LEGACY_REGISTRY_PATH
+    return DEFAULT_REGISTRY_PATH
 
 
 def nebula_home() -> Path:
@@ -261,14 +288,7 @@ class Registry:
     """
 
     def __init__(self, path: Optional[Path] = None):
-        if path:
-            self.path = Path(path)
-        else:
-            # Prefer the new name; fall back to the old one only if it is
-            # the only one there, so an upgrade is invisible.
-            self.path = DEFAULT_REGISTRY_PATH
-            if not DEFAULT_REGISTRY_PATH.exists() and LEGACY_REGISTRY_PATH.exists():
-                self.path = LEGACY_REGISTRY_PATH
+        self.path = Path(path) if path else default_registry_path()
         self._archives: Dict[str, ArchiveConfig] = {}
         self._loaded = False
 
@@ -586,8 +606,7 @@ def get_registry() -> Registry:
     ~/.nebula/registry.yaml (or $NEBULA_REGISTRY if set)."""
     global _default_registry
     if _default_registry is None:
-        override = os.environ.get("NEBULA_REGISTRY")
-        _default_registry = Registry(Path(override) if override else None)
+        _default_registry = Registry()
     return _default_registry
 
 
