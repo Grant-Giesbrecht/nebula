@@ -54,7 +54,17 @@ INDEX_FILE = "index.db"
 
 #: Bumped whenever the schema changes shape. A mismatch triggers a full
 #: rebuild rather than a subtly-wrong query against old columns.
-SCHEMA_VERSION = 3
+#:
+#: 5 (2026-09-01) added ref_archive_id alongside it, when the archive
+#: segment of a URI became `label~id`: the id is what a ref identifies an
+#: archive by, and indexing only the label would lose that across a rename.
+#: 4 (2026-09-01) added ref_user to every ref-bearing table. Before it, a
+#: ref into somebody else's archive was indexed as if it named your own:
+#: the sidecar on disk kept the owner (sidecar._ref_to_dict has always
+#: written it) but the index dropped it, so two colleagues' "postdoc"
+#: collapsed into one. A rebuild is the migration -- every row is a copy
+#: of something still on disk.
+SCHEMA_VERSION = 5
 
 #: Written into data/<year>/ by seal_year().
 SEAL_FILE = ".year-seal.yaml"
@@ -81,7 +91,12 @@ CREATE TABLE IF NOT EXISTS sessions (
 
 CREATE TABLE IF NOT EXISTS related_runs (
     run_id TEXT NOT NULL,
-    ref_archive TEXT,
+    -- NULL means "the archive's own owner", exactly as NULL ref_archive
+    -- means "this archive". Storing it explicitly would bake the local
+    -- identity into a cache, and the identity can change.
+    ref_user TEXT,
+    ref_archive TEXT,          -- the readable label, for display
+    ref_archive_id TEXT,       -- what actually identifies the archive
     ref_session TEXT,
     ref_file TEXT
 );
@@ -105,7 +120,9 @@ CREATE TABLE IF NOT EXISTS artifacts (
 CREATE TABLE IF NOT EXISTS derived_from (
     run_id TEXT NOT NULL,
     filename TEXT NOT NULL,
-    ref_archive TEXT,
+    ref_user TEXT,              -- NULL = this archive's own owner
+    ref_archive TEXT,           -- the readable label, for display
+    ref_archive_id TEXT,        -- what actually identifies the archive
     ref_session TEXT,
     ref_file TEXT,
     ref_asset TEXT,             -- AF-... when this edge points at an asset
@@ -134,7 +151,9 @@ CREATE TABLE IF NOT EXISTS assets (
 
 CREATE TABLE IF NOT EXISTS asset_derived_from (
     asset_id TEXT NOT NULL,
-    ref_archive TEXT,
+    ref_user TEXT,              -- NULL = this archive's own owner
+    ref_archive TEXT,           -- the readable label, for display
+    ref_archive_id TEXT,        -- what actually identifies the archive
     ref_session TEXT,
     ref_file TEXT
 );
@@ -392,8 +411,9 @@ def _index_session(conn: sqlite3.Connection, archive_root: Path, session_dir: Pa
     conn.execute("DELETE FROM related_runs WHERE run_id = ?", (run_id,))
     for r in meta.related_runs:
         conn.execute(
-            "INSERT INTO related_runs VALUES (?, ?, ?, ?)",
-            (run_id, r.get("archive"), r.get("session"), r.get("file")),
+            "INSERT INTO related_runs VALUES (?, ?, ?, ?, ?, ?)",
+            (run_id, r.get("user"), r.get("archive"), r.get("archive_id"),
+             r.get("session"), r.get("file")),
         )
 
     # Clear both artifact tables for this session rather than relying on
@@ -430,10 +450,10 @@ def _index_session(conn: sqlite3.Connection, archive_root: Path, session_dir: Pa
         )
         for r in data.get("derived_from", []):
             conn.execute(
-                "INSERT INTO derived_from VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-                (run_id, filename, r.get("archive"), r.get("session"),
-                 r.get("file"), r.get("asset"), r.get("sha256"),
-                 r.get("fidelity")),
+                "INSERT INTO derived_from VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (run_id, filename, r.get("user"), r.get("archive"),
+                 r.get("archive_id"), r.get("session"), r.get("file"),
+                 r.get("asset"), r.get("sha256"), r.get("fidelity")),
             )
 
 
@@ -475,8 +495,9 @@ def _index_asset(conn: sqlite3.Connection, archive_root: Path,
     conn.execute("DELETE FROM asset_derived_from WHERE asset_id = ?", (meta.id,))
     for r in meta.derived_from:
         conn.execute(
-            "INSERT INTO asset_derived_from VALUES (?, ?, ?, ?)",
-            (meta.id, r.get("archive"), r.get("session"), r.get("file")),
+            "INSERT INTO asset_derived_from VALUES (?, ?, ?, ?, ?, ?)",
+            (meta.id, r.get("user"), r.get("archive"), r.get("archive_id"),
+             r.get("session"), r.get("file")),
         )
 
 

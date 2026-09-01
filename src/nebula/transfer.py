@@ -1059,7 +1059,7 @@ def plan_adopt(source, dest, *, sessions=None) -> TransferPlan:
             continue
         if wanted and meta.run_id not in wanted:
             continue
-        origin = f"nebula://{src_ident['user'] or 'unknown'}/{src_ident['name']}/{meta.run_id}"
+        origin = _session_origin(src_ident, meta.run_id)
         already = _already_adopted(dst_root, origin)
         if already:
             plan.skipped.append({"run_id": meta.run_id,
@@ -1128,11 +1128,29 @@ def adopt(source, dest, *, sessions=None, plan: Optional[TransferPlan] = None,
     return plan
 
 
+def _session_origin(src_ident: dict, run_id: str) -> str:
+    """Where an adopted session came from, as a URI.
+
+    Both the "have I already taken this one?" check and the history entry
+    written when it is taken have to spell this identically, or a second
+    adopt would not recognise the first. One function, one spelling, and it
+    goes through the shared formatter so the shape cannot drift from what
+    `refs` parses.
+
+    `allow_unknown` because a source archive that declares no owner still
+    has to be recorded as *something*: the alternative is an adoption whose
+    provenance says nothing at all.
+    """
+    from nebula import uris
+
+    return uris.mint(src_ident.get("user"), src_ident["name"],
+                     session=run_id, allow_unknown=True)
+
+
 def _record_adoption(session_dir: Path, sp: SessionPlan, src_ident: dict) -> None:
     from nebula import identity
 
-    origin = (f"nebula://{src_ident['user'] or 'unknown'}/{src_ident['name']}/"
-              f"{sp.run_id}")
+    origin = _session_origin(src_ident, sp.run_id)
     meta = read_session_yaml(session_dir)
     meta.history = list(meta.history or [])
     meta.history.append({"action": "adopted", "at": _now(),
@@ -1333,20 +1351,34 @@ def new_intake(parent, *, label: str = "", user: str = "",
 
 
 def init_archive(root, *, kind: str = "standard", name: str = "",
-                 user: str = "", settings: Optional[ArchiveSettings] = None) -> Path:
-    """Create an archive that knows its own name, owner and kind.
+                 user: str = "", settings: Optional[ArchiveSettings] = None,
+                 archive_id: str = "") -> Path:
+    """Create an archive that knows its own name, id, owner and kind.
 
     Lays out the whole skeleton -- ``archive.yaml``, ``data/`` and ``code/``
     -- rather than letting the directories appear on first write, so a fresh
     archive is recognisably an archive when you look at it, and so a sync
     tool has something to sync before any data exists.
+
+    The id is minted here, at the one moment the archive is definitely new
+    and definitely mine. `archive_id` overrides it, which is what an import
+    that must preserve someone else's id passes.
     """
+    from nebula import archive_id as archive_id_mod
     from nebula import identity
-    from nebula.config import KINDS
+    from nebula.config import KINDS, clean_archive_name, known_archive_ids
 
     if kind not in KINDS:
         raise TransferError(f"unknown kind {kind!r}; expected one of {', '.join(KINDS)}")
     root = Path(root)
+    if name:
+        # Checked before anything is created: a name that cannot appear in a
+        # URI should fail while the user is still looking at the command,
+        # not leave a half-built archive behind.
+        try:
+            name = clean_archive_name(name)
+        except ValueError as e:
+            raise TransferError(str(e)) from None
     if (root / ARCHIVE_CONFIG_FILE).is_file():
         raise TransferError(f"{root} is already an archive")
     if root.exists() and any(root.iterdir()):
@@ -1357,6 +1389,8 @@ def init_archive(root, *, kind: str = "standard", name: str = "",
     got = settings or ArchiveSettings()
     got.kind = kind
     got.name = name or root.name
+    got.id = (archive_id_mod.normalize_or_none(archive_id)
+              or archive_id_mod.mint(known_archive_ids()))
     got.user = user or identity.get_user() or ""
     got.created = _now()
     got.merged_at = got.merged_to = ""

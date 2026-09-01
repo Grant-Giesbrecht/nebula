@@ -603,3 +603,110 @@ def test_list_items_counts_derived_from(tmp_path):
     items = {i.name: i for i in model.list_items(s.path)}
     assert items["log.txt"].n_derived_from == 1
     assert items["raw.csv"].n_derived_from == 0
+
+
+# ---------------------------------------------------------------------
+# The `uri` op behind the GUI's "Get URI"
+# ---------------------------------------------------------------------
+
+def _owned_archive(root, *, name="postdoc", user="g@ncsu.edu"):
+    from nebula import transfer
+
+    transfer.init_archive(root, kind="standard", name=name, user=user)
+    return root
+
+
+def _seg(root):
+    """The archive segment a URI should carry: `label~id`."""
+    from nebula.config import read_settings
+
+    got = read_settings(root, apply_env=False)
+    return f"{got.name}~{got.id}" if got.id else got.name
+
+
+def test_uri_op_for_a_file(tmp_path):
+    from nebula.navigator import api
+
+    root = _owned_archive(tmp_path / "postdoc")
+    s = nebula.new(root, description="a run", announce=False)
+    with s.artifact("raw.csv") as fn:
+        fn.write_text("x")
+    s.close()
+
+    got = api.dispatch("uri", {"archive": str(root), "session": s.id,
+                               "file": "raw.csv"})
+    assert got["ok"] is True
+    assert got["uri"] == f"nebula://g@ncsu.edu/{_seg(root)}/{s.id}/raw.csv"
+    assert got["archive_id"] and got["archive"] == "postdoc"
+    assert got["kind"] == "file" and got["exists"] is True
+    assert got["unique"] is True and got["warnings"] == []
+    assert got["label"] == f"{s.id}/raw.csv"
+
+
+def test_uri_op_takes_a_stored_ref(tmp_path):
+    """A collection entry holds a ref string; parsing it here rather than in
+    JavaScript keeps one answer to "which part is the session"."""
+    from nebula.navigator import api
+
+    root = _owned_archive(tmp_path / "postdoc")
+    got = api.dispatch("uri", {"archive": str(root),
+                               "ref": "S-26-0152/diode.graf"})
+    assert got["uri"] == \
+        f"nebula://g@ncsu.edu/{_seg(root)}/S-26-0152/diode.graf"
+    # The target is not there, which is reported rather than refused.
+    assert got["exists"] is False
+
+
+def test_uri_op_for_a_collection_and_an_asset(tmp_path):
+    from nebula import assets, collection
+    from nebula.navigator import api
+
+    root = _owned_archive(tmp_path / "postdoc")
+    collection.create(root, "paper-2026")
+    src = tmp_path / "cal.json"
+    src.write_text("{}")
+    meta = assets.import_asset(root, src)
+
+    coll = api.dispatch("uri", {"archive": str(root), "collection": "paper-2026"})
+    assert coll["uri"] == \
+        f"nebula://g@ncsu.edu/{_seg(root)}/collections/paper-2026"
+    asset = api.dispatch("uri", {"archive": str(root), "asset": meta.id})
+    assert asset["uri"] == f"nebula://g@ncsu.edu/{_seg(root)}/assets/{meta.id}"
+    assert asset["kind"] == "asset"
+
+
+def test_uri_op_reports_a_caveat_rather_than_hiding_it(tmp_path):
+    from nebula.navigator import api
+
+    root = _owned_archive(tmp_path / "postdoc", user="grant")
+    got = api.dispatch("uri", {"archive": str(root)})
+    assert got["ok"] is True and got["uri"] == f"nebula://grant/{_seg(root)}"
+    assert got["unique"] is False
+    assert any("nowhere else" in w for w in got["warnings"])
+
+
+def test_uri_op_explains_itself_instead_of_raising(tmp_path, monkeypatch):
+    """The menu entry has to answer with something. A dialog saying why
+    there is no URI is more use to the user than an error toast."""
+    from nebula.config import read_settings, write_settings
+    from nebula.navigator import api
+
+    monkeypatch.delenv("NEBULA_USER", raising=False)
+    monkeypatch.setenv("NEBULA_IDENTITY", str(tmp_path / "absent.yaml"))
+    root = _owned_archive(tmp_path / "postdoc", user="")
+    settings = read_settings(root, apply_env=False)
+    settings.user = ""
+    write_settings(root, settings)
+
+    got = api.dispatch("uri", {"archive": str(root)})
+    assert got["ok"] is False and got["uri"] is None
+    assert "no owner" in got["error"]
+    assert got["warnings"]
+
+
+def test_uri_op_reports_a_malformed_ref_as_data(tmp_path):
+    from nebula.navigator import api
+
+    root = _owned_archive(tmp_path / "postdoc")
+    got = api.dispatch("uri", {"archive": str(root), "ref": "a|b|c"})
+    assert got["ok"] is False and got["error"]

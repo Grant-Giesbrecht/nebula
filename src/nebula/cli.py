@@ -35,6 +35,10 @@ Usage:
     nebula unseal <archive> <year>
     nebula archives
     nebula register <name> <root> [--git-org ORG]
+    nebula whoami [--set NAME]                  # your identity, for URIs
+    nebula uri <archive> [<run_id> [<file>]]    # the citable nebula:// URI
+    nebula uri <archive> --collection NAME | --asset ID
+    nebula uri nebula://<user>/<archive>/...    # ...or resolve one to a path
 """
 
 from __future__ import annotations
@@ -86,6 +90,22 @@ def _resolve_archive_cli(text: str):
     exactly that case. This check only rules out "there is nothing here
     at all," which is a different problem.
     """
+    from nebula import uris
+
+    if uris.is_uri(text):
+        # A full URI is a legal way to name an archive anywhere a nickname
+        # is: it is the spelling a colleague would have sent you, and
+        # making the user translate it back into whatever this machine
+        # happens to file it under is exactly the friction the registry
+        # exists to remove. Anything after the archive segment is ignored
+        # here -- callers that can use it (show) parse it themselves.
+        try:
+            root, ref = uris.resolve(text)
+        except uris.UriError as e:
+            err(str(e))
+            sys.exit(1)
+        return root, ref.archive
+
     registry = get_registry()
     cfg = registry.try_get(text)
     if cfg is not None:
@@ -192,12 +212,18 @@ def cmd_ls(args):
 
 def cmd_show(args):
     root, _ = _resolve_archive_cli(args.archive)
+    run_id = _run_id_from_target(args.archive, args.run_id)
+    if run_id is None:
+        err("no session given: pass a run id, or a URI that names one "
+            "(nebula://<user>/<archive>/S-26-0012)")
+        sys.exit(1)
+    args.run_id = run_id
     conn = index.open_fresh(root)
     session_row = conn.execute(
-        "SELECT * FROM sessions WHERE run_id = ?", (args.run_id,)
+        "SELECT * FROM sessions WHERE run_id = ?", (run_id,)
     ).fetchone()
     if session_row is None:
-        err(f"no session {args.run_id!r} in index")
+        err(f"no session {run_id!r} in index")
         sys.exit(1)
 
     print(f"{session_row['run_id']}  [{session_row['status']}]")
@@ -213,7 +239,8 @@ def cmd_show(args):
         print(f"  hold:        {when} ({state})")
 
     related = conn.execute(
-        "SELECT ref_archive, ref_session, ref_file FROM related_runs WHERE run_id = ?",
+        "SELECT ref_user, ref_archive, ref_archive_id, ref_session, ref_file "
+        "FROM related_runs WHERE run_id = ?",
         (args.run_id,),
     ).fetchall()
     if related:
@@ -237,8 +264,8 @@ def cmd_show(args):
             prov = f"{a['repo'] or '-'}@{commit_short or '-'}{dirty_flag}"
         print(f"    - {a['filename']:30} {prov}")
         derived = conn.execute(
-            "SELECT ref_archive, ref_session, ref_file FROM derived_from "
-            "WHERE run_id = ? AND filename = ?",
+            "SELECT ref_user, ref_archive, ref_archive_id, ref_session, "
+            "ref_file FROM derived_from WHERE run_id = ? AND filename = ?",
             (args.run_id, a["filename"]),
         ).fetchall()
         for d in derived:
@@ -386,10 +413,8 @@ def cmd_asset_show(args):
 
 
 def _fmt_ref_row_dict(d) -> str:
-    archive = d.get("archive") or "(local)"
-    sess = d.get("session") or "(same session)"
-    file = d.get("file") or "(whole session)"
-    return f"{archive}|{sess}/{file}"
+    return _fmt_ref_parts(d.get("user"), d.get("archive"), d.get("session"),
+                          d.get("file"), d.get("archive_id"))
 
 
 def cmd_asset_commit(args):
@@ -481,10 +506,31 @@ def cmd_asset_path(args):
 
 
 def _fmt_ref_row(row) -> str:
-    archive = row["ref_archive"] or "(local)"
-    sess = row["ref_session"] or "(same session)"
-    file = row["ref_file"] or "(whole session)"
-    return f"{archive}|{sess}/{file}"
+    return _fmt_ref_parts(row["ref_user"], row["ref_archive"],
+                          row["ref_session"], row["ref_file"],
+                          row["ref_archive_id"])
+
+
+def _fmt_ref_parts(user, archive, session, file, archive_id=None) -> str:
+    """One spelling for a stored ref, whichever table it came out of.
+
+    Built as a real ref in the current grammar, so a line in a provenance
+    dump can be copied straight back into a `derived_from`. Placeholders
+    stand in for the parts the ref deliberately left implicit -- "(same
+    session)" says *what was unsaid*, which is what a person reading the
+    dump needs to know, and is why this is not simply `format_ref`.
+    """
+    from nebula.refs import Ref, format_ref
+
+    ref = Ref(user=user, archive=archive, archive_id=archive_id,
+              session=session or "(same session)",
+              file=file or "(whole session)")
+    try:
+        return format_ref(ref)
+    except ValueError:
+        # Nothing nameable -- a row with neither a session nor a file. Say
+        # so rather than raising in the middle of printing a session.
+        return "(empty ref)"
 
 
 def cmd_import(args):
@@ -654,6 +700,39 @@ def _run_id_for(root, text: str) -> str:
         return text
 
 
+def _run_id_from_target(target: str, run_id):
+    """The session a command should act on, given both spellings.
+
+    An explicit run id always wins -- `nebula show nebula://.../S-26-0001
+    S-26-0002` is a contradiction the user should see resolved the way they
+    typed it last, not silently one way or the other. Otherwise a URI that
+    names a session supplies it, which is what makes a pasted URI a
+    complete command rather than half of one.
+    """
+    from nebula import uris
+
+    if run_id:
+        return run_id
+    if uris.is_uri(target):
+        try:
+            return uris.resolve(target)[1].session
+        except uris.UriError:
+            return None
+    return None
+
+
+def _archive_name_arg(text: str) -> str:
+    """argparse type for a new archive's name. Checked here so a name that
+    could never appear in a URI fails while the user is still looking at
+    the command, rather than after an archive has been created."""
+    from nebula.config import ConfigError, clean_archive_name
+
+    try:
+        return clean_archive_name(text)
+    except ConfigError as e:
+        raise argparse.ArgumentTypeError(str(e))
+
+
 def _bool_arg(text: str) -> bool:
     val = text.strip().lower()
     if val in ("true", "yes", "on", "1"):
@@ -674,8 +753,24 @@ def cmd_config(args):
         "code_max_file_bytes": args.max_file_bytes,
         "on_overwrite": args.on_overwrite,
         "auto_index": args.auto_index,
+        "name": args.name,
     }
     changes = {k: v for k, v in changes.items() if v is not None}
+
+    if "name" in changes:
+        # Renaming is now safe, and this says why in the one place someone
+        # is about to do it: refs resolve by the archive's id, so they keep
+        # working and only *display* the old label until something rewrites
+        # them. An archive with no id has nothing to fall back on, so say
+        # that instead of implying a guarantee it does not have.
+        ident = config_mod.ensure_archive_id(root)
+        if ident:
+            print(f"renaming to {changes['name']!r}; refs resolve by the "
+                  f"archive's id (~{ident}), so existing ones keep working")
+        else:
+            warn(f"warning: this archive has no id, so refs into it resolve "
+                 f"by name -- renaming it will break every ref already "
+                 f"written. Register it first to have one minted.")
 
     if changes:
         if not root.is_dir():
@@ -692,8 +787,9 @@ def cmd_config(args):
     on_disk = config_mod.read_settings(root, apply_env=False)
     effective = config_mod.read_settings(root)
     print(f"{path}{'' if path.exists() else '  (not present -- using defaults)'}")
-    for key in ("on_overwrite", "capture_code", "code_max_file_bytes", "auto_index"):
-        print(f"  {key}: {getattr(on_disk, key)}")
+    for key in ("name", "id", "on_overwrite", "capture_code",
+                "code_max_file_bytes", "auto_index"):
+        print(f"  {key}: {getattr(on_disk, key) or '(unset)'}")
 
     override = config_mod.env_override()
     if override is not None and override != on_disk.capture_code:
@@ -836,14 +932,28 @@ def cmd_release(args):
         print(f"{args.run_id} had no hold")
 
 
+def _local_context(root):
+    """`(owner, archive_id)` for the archive being queried, so a traversal
+    prints the shortest ref that still names each node from here -- bare
+    inside this archive, a URI once it crosses out of it."""
+    from nebula.config import read_settings
+
+    try:
+        settings = read_settings(root, apply_env=False)
+        return settings.user or None, settings.id or None
+    except Exception:       # noqa: BLE001 -- an odd archive.yaml is not fatal
+        return None, None
+
+
 def cmd_upstream(args):
     root, name = _resolve_archive_cli(args.archive)
     nodes = graph.upstream(root, args.run_id, args.filename, archive_name=name)
     if not nodes:
         print("(no upstream dependencies recorded)")
         return
+    mine, mine_id = _local_context(root)
     for n in nodes:
-        print(str(n))
+        print(n.describe(relative_to=mine, archive_id=mine_id))
 
 
 def cmd_downstream(args):
@@ -858,8 +968,9 @@ def cmd_downstream(args):
     if not nodes:
         print("(nothing downstream recorded)")
         return
+    mine, mine_id = _local_context(root)
     for n in nodes:
-        print(str(n))
+        print(n.describe(relative_to=mine, archive_id=mine_id))
 
 
 def cmd_stale(args):
@@ -903,6 +1014,16 @@ def cmd_archives(args):
         print(f"no archives registered in {reg.path}")
         return
 
+    # The one collision minting cannot prevent: two archives created where
+    # neither knew about the other. Reported here because this is where both
+    # are finally visible at once, and because two archives sharing an id are
+    # indistinguishable to every ref that names either.
+    for shared, nicknames in reg.find_id_collisions():
+        warn(f"warning: {' and '.join(nicknames)} both claim the archive id "
+             f"~{shared}. Refs naming it cannot tell them apart -- re-mint "
+             f"whichever has fewer refs pointing at it by clearing 'id:' in "
+             f"its archive.yaml and re-registering.")
+
     # More than one nickname can point at the same archive -- a manually
     # added alias, or the automatic <user>-<name> fallback for a name
     # collision -- so group entries by (owner, declared name) and show
@@ -940,7 +1061,10 @@ def cmd_archives(args):
             continue
 
         kind_note = f" [{primary.kind}]"
-        print(f"{hl(official)}{kind_note}")
+        # The id, because it is the durable half of every URI into this
+        # archive -- the name above it is a label that can change.
+        id_note = f"  ~{primary.archive_id}" if primary.archive_id else ""
+        print(f"{hl(official)}{id_note}{kind_note}")
         others = [n for n in nicknames if n != official]
         if others or nicknames == [official]:
             print(f"  aliases: {', '.join(nicknames)}")
@@ -1211,6 +1335,70 @@ def cmd_whoami(args):
     print(f"  authority: {where}", file=sys.stderr)
     print(f"  status:    {info['status']} (nebula does not check this yet)",
           file=sys.stderr)
+
+
+def cmd_uri(args):
+    """Print the fully-qualified nebula:// URI for something in an archive.
+
+    Two directions, one command:
+
+      nebula uri postdoc S-26-0152 diode.graf   -> mint a URI for it
+      nebula uri nebula://.../diode.graf        -> find it on this machine
+
+    The URI itself goes to stdout and everything else to stderr, so
+    `nebula uri arc 12 raw.csv` is usable in a script (`URI=$(nebula uri
+    ...)`) while a person at a terminal still sees the path and the
+    caveats. Same split as `nebula whoami`, for the same reason.
+    """
+    from nebula import uris
+
+    root, _ = _resolve_archive_cli(args.target)
+    session = _run_id_from_target(args.target, args.run_id)
+    file = args.file
+    collection = args.collection
+    asset = args.asset
+
+    if uris.is_uri(args.target):
+        # Re-mint from the parsed ref rather than echoing the input: that is
+        # what makes this a check and not a no-op. A URI that comes back
+        # unchanged resolved here; one that cannot be parsed never got this
+        # far. Anything typed explicitly still wins, so a URI plus arguments
+        # does what was typed rather than a confusing mixture.
+        _, ref = uris.resolve(args.target)
+        file = file or (ref.file if session == ref.session else None)
+        collection = collection or ref.collection
+        asset = asset or ref.asset
+
+    if session:
+        session = _run_id_for(root, session)
+
+    try:
+        info = uris.describe(root, session=session, file=file,
+                             collection=collection, asset=asset)
+    except uris.UriError as e:
+        err(str(e))
+        sys.exit(1)
+
+    if args.json:
+        print(json.dumps(info.to_dict(), indent=2))
+        return
+
+    print(info.uri)
+    sys.stdout.flush()
+    print(f"  kind:   {info.kind}", file=sys.stderr)
+    print(f"  owner:  {info.user}", file=sys.stderr)
+    if info.archive_id:
+        print(f"  archive: {info.archive} (id ~{info.archive_id}, which is "
+              f"what survives a rename)", file=sys.stderr)
+    else:
+        print(f"  archive: {info.archive} (no id -- this URI resolves by "
+              f"name, so renaming the archive would break it)",
+              file=sys.stderr)
+    if info.path:
+        state = "" if info.exists else "  (nothing there right now)"
+        print(f"  path:   {info.path}{state}", file=sys.stderr)
+    for warning in info.warnings:
+        warn(f"  warning: {warning}")
 
 
 def manual_rename_modes():
@@ -1620,8 +1808,11 @@ def main(argv=None):
         description="Show everything recorded about one session: status, "
                      "tags, description, and its files with their "
                      "derived_from provenance graph.")
-    p.add_argument("archive", help="registered archive nickname, or a literal path")
-    p.add_argument("run_id", type=_run_id_arg, help="session id -- S-26-0012, or 0012 for the current year")
+    p.add_argument("archive", help="registered archive nickname, a literal "
+                                   "path, or a nebula:// URI")
+    p.add_argument("run_id", nargs="?", type=_run_id_arg,
+                   help="session id -- S-26-0012, or 0012 for the current "
+                        "year; optional when the URI already names one")
     p.set_defaults(func=cmd_show)
 
     p = sub.add_parser(
@@ -1767,6 +1958,10 @@ def main(argv=None):
     p.add_argument("--auto-index", type=_bool_arg, metavar="true|false", dest="auto_index",
                    help="re-index a session in index.db as it closes "
                         "(off just means readers do that work instead)")
+    p.add_argument("--name", type=_archive_name_arg,
+                   help="rename the archive -- the label in its nebula:// "
+                        "URIs. Safe: refs resolve by the archive's immutable "
+                        "id, so existing ones keep working")
     p.set_defaults(func=cmd_config)
 
     p = sub.add_parser(
@@ -2041,8 +2236,10 @@ def main(argv=None):
                    help="standard: a normal archive (default); intake: a "
                         "temporary landing zone later merged into one; "
                         "fragment: an excerpt received from someone else")
-    p.add_argument("--name", help="the name it will carry in nebula:// URIs "
-                                  "(default: the folder name)")
+    p.add_argument("--name", type=_archive_name_arg,
+                   help="the label it will carry in nebula:// URIs "
+                        "(default: the folder name). An immutable id is "
+                        "minted alongside it, so this stays renameable")
     p.add_argument("--user", help="who owns it (default: your local identity)")
     p.add_argument("--register", action="store_true", help="also register it")
     p.add_argument("--on-overwrite", choices=OVERWRITE_POLICIES, dest="on_overwrite",
@@ -2292,6 +2489,30 @@ def main(argv=None):
                         "(0000-0003-2885-4801@orcid.org, you@github.com, "
                         "you@your-institution.edu)")
     p.set_defaults(func=cmd_whoami)
+
+    p = sub.add_parser(
+        "uri", help="print the nebula:// URI for a session, file, "
+                    "collection or asset",
+        description="Print the fully-qualified nebula:// URI for something "
+                     "in an archive -- the spelling to paste into a paper, "
+                     "an issue or a colleague's inbox. Given a URI instead "
+                     "of an archive, it resolves it against this machine "
+                     "and says where it landed. The URI goes to stdout and "
+                     "everything else to stderr, so it can be captured in a "
+                     "script.")
+    p.add_argument("target", help="archive nickname, a literal path, or a "
+                                  "nebula:// URI to resolve")
+    p.add_argument("run_id", nargs="?", type=_run_id_arg,
+                   help="session id -- S-26-0012, or 0012 for the current year")
+    p.add_argument("file", nargs="?",
+                   help="artifact filename within that session")
+    p.add_argument("--collection", metavar="NAME",
+                   help="a collection instead of a session")
+    p.add_argument("--asset", metavar="ID", type=_asset_id_arg,
+                   help="an asset instead of a session")
+    p.add_argument("--json", action="store_true",
+                   help="print the URI and its caveats as JSON")
+    p.set_defaults(func=cmd_uri)
 
 
     args = parser.parse_args(argv)

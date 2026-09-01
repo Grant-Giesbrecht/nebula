@@ -575,3 +575,137 @@ def test_session_info_survives_having_no_index(tmp_path):
     ix = model.session_info(s.path)["index"]
     assert ix["index_exists"] is False and ix["indexed"] is False
     assert ix["live_sig"]        # still tells you what is on disk
+
+
+# ---------------------------------------------------------------------
+# Refs keep their owner and their archive id
+# ---------------------------------------------------------------------
+# Before schema 4 the sidecar on disk kept a ref's owner and the index
+# dropped it, so two colleagues' "postdoc" collapsed into one row. Schema 5
+# added the archive id for the same reason one level down: indexing only the
+# label would lose the archive the moment somebody renamed it.
+
+def _uri_ref(user="jane@lab.edu", segment="shared~1a2", session="S-26-0002",
+             file="cal.json"):
+    return f"nebula://{user}/{segment}/{session}/{file}"
+
+
+def test_derived_from_keeps_the_refs_owner_and_id(tmp_path):
+    archive = tmp_path / "arc"
+    s = nebula.new(archive, description="cross-user", announce=False)
+    with s.artifact("fit.png", derived_from=[_uri_ref()]) as fn:
+        fn.write_text("z")
+    s.close()
+    index.rebuild(archive)
+
+    conn = index.open_index(archive)
+    row = conn.execute(
+        "SELECT ref_user, ref_archive, ref_archive_id, ref_session, ref_file "
+        "FROM derived_from WHERE run_id = ?", (s.id,)).fetchone()
+    conn.close()
+    assert row["ref_user"] == "jane@lab.edu"
+    assert row["ref_archive"] == "shared"
+    assert row["ref_archive_id"] == "1a2"
+    assert row["ref_session"] == "S-26-0002"
+    assert row["ref_file"] == "cal.json"
+
+
+def test_the_indexed_id_is_normalised(tmp_path):
+    """`~00FE` and `~fe` are one id, so they must not become two rows a
+    query has to know to match separately."""
+    archive = tmp_path / "arc"
+    s = nebula.new(archive, description="two spellings", announce=False)
+    with s.artifact("a.png", derived_from=[_uri_ref(segment="shared~00FE")]) as fn:
+        fn.write_text("z")
+    with s.artifact("b.png", derived_from=[_uri_ref(segment="shared~fe")]) as fn:
+        fn.write_text("z")
+    s.close()
+    index.rebuild(archive)
+
+    conn = index.open_index(archive)
+    ids = {r["ref_archive_id"] for r in conn.execute(
+        "SELECT ref_archive_id FROM derived_from WHERE run_id = ?", (s.id,))}
+    conn.close()
+    assert ids == {"0fe"}
+
+
+def test_a_same_archive_ref_records_neither(tmp_path):
+    """NULL means "this archive, this owner". Storing them explicitly would
+    bake into a cache facts that live in archive.yaml and can change."""
+    archive = tmp_path / "arc"
+    a = nebula.new(archive, description="raw", announce=False)
+    with a.artifact("raw.csv") as fn:
+        fn.write_text("x")
+    a.close()
+    b = nebula.new(archive, description="fit", announce=False)
+    with b.artifact("fit.png", derived_from=[f"{a.id}/raw.csv"]) as fn:
+        fn.write_text("z")
+    b.close()
+    index.rebuild(archive)
+
+    conn = index.open_index(archive)
+    row = conn.execute("SELECT ref_user, ref_archive, ref_archive_id "
+                       "FROM derived_from WHERE run_id = ?", (b.id,)).fetchone()
+    conn.close()
+    assert row["ref_user"] is None
+    assert row["ref_archive"] is None and row["ref_archive_id"] is None
+
+
+def test_related_runs_keeps_the_refs_owner_and_id(tmp_path):
+    archive = tmp_path / "arc"
+    s = nebula.new(archive, description="with a related run", announce=False)
+    s.add_related_run(_uri_ref())
+    s.close()
+    index.rebuild(archive)
+
+    conn = index.open_index(archive)
+    row = conn.execute("SELECT ref_user, ref_archive, ref_archive_id "
+                       "FROM related_runs WHERE run_id = ?", (s.id,)).fetchone()
+    conn.close()
+    assert row["ref_user"] == "jane@lab.edu"
+    assert row["ref_archive"] == "shared"
+    assert row["ref_archive_id"] == "1a2"
+
+
+def test_asset_derived_from_keeps_the_refs_owner_and_id(tmp_path):
+    from nebula import assets, transfer
+
+    archive = tmp_path / "arc"
+    transfer.init_archive(archive, name="arc", user="me@here.edu")
+    src = tmp_path / "cal.json"
+    src.write_text("{}")
+    meta = assets.import_asset(archive, src, derived_from=[_uri_ref()])
+    index.rebuild(archive)
+
+    conn = index.open_index(archive)
+    row = conn.execute("SELECT ref_user, ref_archive, ref_archive_id "
+                       "FROM asset_derived_from WHERE asset_id = ?",
+                       (meta.id,)).fetchone()
+    conn.close()
+    assert row["ref_user"] == "jane@lab.edu"
+    assert row["ref_archive_id"] == "1a2"
+
+
+def test_an_old_schema_is_rebuilt_rather_than_queried(tmp_path):
+    """The migration is a rebuild: every row is a copy of something still
+    on disk, so an index without the new columns is thrown away, not
+    patched."""
+    archive = tmp_path / "arc"
+    s = nebula.new(archive, description="cross-user", announce=False)
+    with s.artifact("fit.png", derived_from=[_uri_ref()]) as fn:
+        fn.write_text("z")
+    s.close()
+    index.rebuild(archive)
+
+    conn = index.open_index(archive)
+    conn.execute("UPDATE meta SET value = '4' WHERE key = 'schema_version'")
+    conn.commit()
+    conn.close()
+    assert index.status(archive)["usable"] is False
+
+    conn = index.open_fresh(archive)
+    row = conn.execute("SELECT ref_user, ref_archive_id FROM derived_from "
+                       "WHERE run_id = ?", (s.id,)).fetchone()
+    conn.close()
+    assert row["ref_user"] == "jane@lab.edu"
+    assert row["ref_archive_id"] == "1a2"

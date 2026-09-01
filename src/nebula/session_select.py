@@ -185,6 +185,7 @@ def select_session(
     description: str = "",
     archive_name: Optional[str] = None,
     on_missing_meta: str = _DEFAULT_MISSING_META,
+    announce: bool = True,
 ) -> Session:
     """Interactively choose a session to write into, returning an open
     Session. Used by nebula.session() when no run_id is given and the
@@ -203,6 +204,7 @@ def select_session(
             description=desc,
             archive_name=archive_name,
             on_missing_meta=on_missing_meta,
+            announce=announce,
         )
 
     if not is_interactive():
@@ -237,7 +239,8 @@ def select_session(
             if not line.startswith("/"):
                 # A bare token is a shortcut for /open <id>.
                 s = _try_open(archive, line.split()[0], color,
-                              archive_name=archive_name, on_missing_meta=on_missing_meta)
+                              announce=announce, archive_name=archive_name,
+                              on_missing_meta=on_missing_meta)
                 if s is not None:
                     return s
                 continue
@@ -284,12 +287,13 @@ def select_session(
                 if not rest:
                     print(paint("  usage: /open <run-id>", "yellow", color))
                     continue
-                s = _try_open(archive, rest[0], color,
-                              archive_name=archive_name, on_missing_meta=on_missing_meta)
+                s = _try_open(archive, rest[0], color, announce=announce,
+                              archive_name=archive_name,
+                              on_missing_meta=on_missing_meta)
                 if s is not None:
                     return s
             elif cmd == "/reopen":
-                s = _try_reopen(archive, rest, color,
+                s = _try_reopen(archive, rest, color, announce=announce,
                                 archive_name=archive_name, on_missing_meta=on_missing_meta)
                 if s is not None:
                     return s
@@ -301,11 +305,13 @@ def select_session(
         restore()
 
 
-def _try_open(archive, run_id, color, *, archive_name, on_missing_meta) -> Optional[Session]:
+def _try_open(archive, run_id, color, *, archive_name, on_missing_meta,
+              announce: bool = True) -> Optional[Session]:
     """Append to a same-day-or-open session, or explain why we can't."""
     try:
-        return append_to(archive, run_id, archive_name=archive_name,
-                          on_missing_meta=on_missing_meta)
+        return append_to(archive, run_id, announce=announce,
+                         archive_name=archive_name,
+                         on_missing_meta=on_missing_meta)
     except FileNotFoundError:
         print(paint(f"  no session {run_id!r} in this archive", "red", color))
     except RuntimeError:
@@ -316,7 +322,8 @@ def _try_open(archive, run_id, color, *, archive_name, on_missing_meta) -> Optio
     return None
 
 
-def _try_reopen(archive, tokens, color, *, archive_name, on_missing_meta) -> Optional[Session]:
+def _try_reopen(archive, tokens, color, *, archive_name, on_missing_meta,
+                announce: bool = True) -> Optional[Session]:
     """Force-reopen a closed session, gated behind --force or a typed
     confirmation so it can't happen by reflex."""
     forced = any(t in ("--force", "-f", "!") for t in tokens)
@@ -340,7 +347,8 @@ def _try_reopen(archive, tokens, color, *, archive_name, on_missing_meta) -> Opt
             return None
 
     try:
-        return reopen(archive, run_id, archive_name=archive_name,
+        return reopen(archive, run_id, announce=announce,
+                      archive_name=archive_name,
                       on_missing_meta=on_missing_meta)
     except FileNotFoundError:
         print(paint(f"  no session {run_id!r} in this archive", "red", color))

@@ -154,6 +154,11 @@ class ArchiveConfig:
     #: claim one name, the nickname is disambiguated and this is not,
     #: because refs written by their authors still say the plain name.
     declared_name: str = ""
+    #: The archive's immutable id, from its own archive.yaml. This is what a
+    #: ref identifies it by; `declared_name` is the label. Empty for an
+    #: archive that has none (one predating ids, or a foreign one we do not
+    #: mint into) -- such archives resolve by name, as they always have.
+    archive_id: str = ""
 
     @property
     def root(self) -> Path:
@@ -194,7 +199,7 @@ class ArchiveConfig:
     def key(self) -> "tuple[str, str]":
         """Archives are identified by owner *and* (declared) name: two
         colleagues can each have a 'postdoc', and both may be registered
-        here."""
+        here. Where an id is known it is better still -- see `find`."""
         return (self.user or "", self.uri_name)
 
 
@@ -283,6 +288,7 @@ class Registry:
                 user=cfg.get("user"),
                 kind=cfg.get("kind") or "standard",
                 declared_name=cfg.get("name") or nickname,
+                archive_id=str(cfg.get("id") or ""),
             )
 
     def get(self, nickname: str) -> ArchiveConfig:
@@ -308,7 +314,7 @@ class Registry:
 
     def register(self, nickname: str, root=None, git_org: Optional[str] = None,
                  user: Optional[str] = None, kind: str = "standard",
-                 declared_name: str = "",
+                 declared_name: str = "", archive_id: str = "",
                  locations: "Optional[list[Location]]" = None) -> None:
         """Add or update an archive entry and persist it to disk.
 
@@ -323,7 +329,8 @@ class Registry:
         locations = [_normalize_location(loc) for loc in locations]
         self._archives[nickname] = ArchiveConfig(
             nickname=nickname, locations=tuple(locations), git_org=git_org, user=user,
-            kind=kind, declared_name=declared_name or nickname)
+            kind=kind, declared_name=declared_name or nickname,
+            archive_id=archive_id)
         self._save()
 
     def add_location(self, nickname: str, location: Location, *,
@@ -417,9 +424,13 @@ class Registry:
         cited. Where that name is already taken by a *different* archive,
         the entry is keyed <user>-<name> so both can coexist.
         """
-        from nebula.config import archive_identity
+        from nebula.config import archive_identity, ensure_archive_id
 
         root = Path(root)
+        # Mint before reading the identity, so an archive of ours that
+        # predates ids acquires one the first time it is registered rather
+        # than being filed away without one forever.
+        ensure_archive_id(root, registry=self)
         ident = archive_identity(root)
         self._load()
         wanted = key or ident["name"]
@@ -428,7 +439,8 @@ class Registry:
             owner = ident["user"] or "unknown"
             wanted = f"{owner}-{ident['name']}"
         self.register(wanted, root, git_org=git_org, user=ident["user"] or None,
-                      kind=ident["kind"], declared_name=ident["name"])
+                      kind=ident["kind"], declared_name=ident["name"],
+                      archive_id=ident.get("id") or "")
         return self._archives[wanted]
 
     def discover(self, home: Optional[Path] = None) -> "list[ArchiveConfig]":
@@ -466,16 +478,41 @@ class Registry:
                 continue
         return found
 
-    def find(self, name: str, user: Optional[str] = None) -> Optional[ArchiveConfig]:
-        """Look up an archive by name and (optionally) owner.
+    def find(self, name: Optional[str] = None, user: Optional[str] = None,
+             archive_id: Optional[str] = None) -> Optional[ArchiveConfig]:
+        """Look up an archive by id, or failing that by name and owner.
 
-        `user=None` means "whoever, as long as the name matches" -- the
-        compact ref case. A named user must match the entry's `user`, or
-        the local identity when the entry does not name one: an archive
-        with no recorded owner is assumed to be mine.
+        **The id wins whenever both sides have one**, because the id is what
+        a ref identifies an archive by and the name is a label that may have
+        changed since the ref was written. Falling back to the name is what
+        keeps refs written before ids existed -- and refs into archives we
+        have never given an id -- resolving exactly as they did.
+
+        `user=None` means "whoever, as long as the name matches". A named
+        user must match the entry's `user`, or the local identity when the
+        entry does not name one: an archive with no recorded owner is
+        assumed to be mine.
         """
         self._load()
+        from nebula import archive_id as archive_id_mod
         from nebula.identity import get_user
+
+        if archive_id:
+            matches = [cfg for cfg in self._archives.values()
+                       if archive_id_mod.same_id(cfg.archive_id, archive_id)]
+            if matches:
+                # One archive can have several entries -- a hand-made alias,
+                # the <user>-<name> fallback, or a stale one left behind
+                # when it moved and was re-registered. They are all the same
+                # archive, so prefer whichever is actually on disk rather
+                # than reporting "not mounted" from a path nobody uses.
+                return next((cfg for cfg in matches if cfg.available),
+                            matches[0])
+            # Not a failure: an archive we have not seen yet, or one whose
+            # id we never recorded. Fall through and try the name.
+
+        if not name:
+            return None
 
         # Match the name an author would have written in a ref, which is the
         # name the archive declares -- not the registry nickname, which may
@@ -493,6 +530,31 @@ class Registry:
                 return cfg          # unowned entries are mine
         return None
 
+    def find_id_collisions(self) -> "list[tuple[str, list[str]]]":
+        """Ids claimed by more than one registered archive.
+
+        The one case minting cannot prevent: an archive created somewhere
+        that did not know about the others -- a lab PC, a fresh laptop, a
+        fragment adopted from a colleague. It surfaces here, the moment both
+        archives are known to one machine, rather than silently making two
+        archives indistinguishable to every ref that names either.
+        """
+        self._load()
+        from nebula import archive_id as archive_id_mod
+
+        # Grouped by *root*, not by entry: several nicknames for one
+        # directory are aliases, which is normal and not a collision. Two
+        # different directories claiming one id is the real thing.
+        seen: Dict[str, Dict[str, str]] = {}
+        for cfg in self._archives.values():
+            if not cfg.archive_id:
+                continue
+            key = archive_id_mod.normalize_or_none(cfg.archive_id)
+            roots = seen.setdefault(key, {})
+            roots.setdefault(str(Path(cfg.root).resolve()), cfg.nickname)
+        return sorted((k, sorted(v.values()))
+                      for k, v in seen.items() if len(v) > 1)
+
     def _save(self) -> None:
         self.path.parent.mkdir(parents=True, exist_ok=True)
         raw = {
@@ -508,6 +570,7 @@ class Registry:
                 # called that any more.
                 **({"name": cfg.declared_name}
                    if cfg.declared_name and cfg.declared_name != nickname else {}),
+                **({"id": cfg.archive_id} if cfg.archive_id else {}),
             }
             for nickname, cfg in self._archives.items()
         }

@@ -383,7 +383,8 @@ def _ref_dict(r: Ref) -> dict:
         text = format_ref(r)
     except ValueError:          # a ref with neither session nor file
         text = "(empty ref)"
-    return {"ref": text, "file": r.file, "session": r.session, "archive": r.archive}
+    return {"ref": text, "file": r.file, "session": r.session,
+            "archive": r.archive, "user": r.user, "archive_id": r.archive_id}
 
 
 def sidecar_info(sidecar_path) -> dict:
@@ -815,10 +816,12 @@ class _Lineage:
     # -- index-backed ----------------------------------------------------
     def _parents_indexed(self, run_id, filename):
         rows = self._conn.execute(
-            "SELECT ref_archive, ref_session, ref_file FROM derived_from "
-            "WHERE run_id = ? AND filename = ?", (run_id, filename)).fetchall()
+            "SELECT ref_user, ref_archive, ref_archive_id, ref_session, "
+            "ref_file FROM derived_from WHERE run_id = ? AND filename = ?",
+            (run_id, filename)).fetchall()
         return [{"archive": r["ref_archive"], "session": r["ref_session"],
-                 "file": r["ref_file"]} for r in rows]
+                 "file": r["ref_file"], "user": r["ref_user"],
+                 "archive_id": r["ref_archive_id"]} for r in rows]
 
     def _children_indexed(self, run_id, filename):
         # The reverse edge, which idx_derived_from_ref exists for. A child's
@@ -857,8 +860,53 @@ class _Lineage:
         return out
 
 
+def _declared_id(archive_root) -> Optional[str]:
+    """An archive's immutable id, or None. Read, never minted: drawing a
+    provenance tree is a query and should not write to archive.yaml."""
+    try:
+        from nebula.config import read_settings
+
+        return read_settings(Path(archive_root), apply_env=False).id or None
+    except Exception:           # noqa: BLE001
+        return None
+
+
+def _declared_owner(archive_root) -> Optional[str]:
+    """Who an archive says it belongs to, or None when it says nothing.
+
+    Deliberately not falling back to this machine's identity: an archive
+    that declares no owner has not made a claim, and a tree node that
+    quietly asserts one would be inventing the very fact the owner segment
+    exists to record.
+    """
+    try:
+        from nebula.config import read_settings
+
+        return read_settings(Path(archive_root), apply_env=False).user or None
+    except Exception:           # noqa: BLE001
+        return None
+
+
+def _walked(tree: dict) -> List[dict]:
+    """Every node in a finished provenance tree, roots included."""
+    out: List[dict] = []
+
+    def visit(node):
+        out.append(node)
+        for child in node.get("children") or []:
+            visit(child)
+
+    for branch in tree.get("branches") or []:
+        visit(branch["item"])
+        for node in list(branch.get("upstream") or []) + list(
+                branch.get("downstream") or []):
+            visit(node)
+    return out
+
+
 def _tree_node(archive_root: Path, label: str, run_id: str, filename: str,
-               *, note=None, resolved=True) -> dict:
+               *, note=None, resolved=True, user=None,
+               archive_id=None) -> dict:
     """One artefact as the tree renders it: what it is, where it is, and
     whether it is actually there."""
     session_dir = _find_session_dir(archive_root, run_id) if resolved else None
@@ -866,6 +914,12 @@ def _tree_node(archive_root: Path, label: str, run_id: str, filename: str,
     return {
         "ref": f"{run_id}/{filename}" if filename else run_id,
         "run_id": run_id, "filename": filename, "archive": label,
+        # Who owns `archive`, and which archive it actually is. Two
+        # colleagues can each have a "postdoc", and one person can rename
+        # theirs, so the label alone identifies nothing -- see the walk's
+        # node key.
+        "user": user,
+        "archive_id": archive_id,
         # Where that archive lives, so a walk that crosses into it can open
         # its index. None when we could not reach it at all.
         "root": str(archive_root) if resolved else None,
@@ -875,6 +929,48 @@ def _tree_node(archive_root: Path, label: str, run_id: str, filename: str,
         "resolved": resolved, "note": note,
         "children": [], "truncated": False, "seen": False,
     }
+
+
+def uri_for(archive, *, session: Optional[str] = None,
+            file: Optional[str] = None, collection: Optional[str] = None,
+            asset: Optional[str] = None, ref: Optional[str] = None) -> dict:
+    """The fully-qualified nebula:// URI for one thing, for the GUI's
+    "Get URI" action.
+
+    `ref` is an alternative to naming the parts: a stored ref string, as a
+    collection entry holds it. It is parsed here rather than in the
+    front-end so that "which part of `S-26-0001/raw.csv` is the session"
+    keeps exactly one answer, the one in :mod:`nebula.refs`.
+
+    Returns the URI together with the reasons it might not be unique, and
+    never raises for the ordinary "this archive has no owner yet" case:
+    the menu entry has to answer with *something*, and a dialog that says
+    why there is no URI is more use than an error toast. `ok` tells the
+    two apart.
+    """
+    from nebula import uris
+    from nebula.refs import parse_ref
+
+    root, label = resolve(archive)
+    if ref and not (session or file or collection or asset):
+        try:
+            parsed = parse_ref(ref)
+        except ValueError as e:
+            return {"ok": False, "uri": None, "error": str(e),
+                    "archive": label, "warnings": [str(e)]}
+        session, file = parsed.session, parsed.file
+        collection, asset = parsed.collection, parsed.asset
+    try:
+        info = uris.describe(root, session=session, file=file,
+                             collection=collection, asset=asset)
+    except uris.UriError as e:
+        return {"ok": False, "uri": None, "error": str(e),
+                "archive": label, "warnings": [str(e)]}
+    out = info.to_dict()
+    out["ok"] = True
+    out["error"] = None
+    out["label"] = uris.label_for(info.ref)
+    return out
 
 
 def provenance_tree(archive, run_id: str, filename: Optional[str] = None, *,
@@ -894,19 +990,23 @@ def provenance_tree(archive, run_id: str, filename: Optional[str] = None, *,
     at least admit to one.
     """
     archive_root, label = resolve(archive)
+    local_user = _declared_owner(archive_root)
+    local_id = _declared_id(archive_root)
     # One _Lineage per archive the walk reaches, opened lazily. Upstream
     # edges may name another archive, and stopping at the boundary would
-    # draw a chain that looks finished when it is not.
-    lineages: Dict[str, _Lineage] = {label: _Lineage(archive_root)}
-    lin = lineages[label]
+    # draw a chain that looks finished when it is not. Keyed by root rather
+    # than by name, since two owners' archives can share a name.
+    lineages: Dict[str, _Lineage] = {str(archive_root): _Lineage(archive_root)}
+    lin = lineages[str(archive_root)]
 
-    def lineage_for(node_label: str, node_root: Path) -> Optional[_Lineage]:
-        if node_label not in lineages:
+    def lineage_for(node_root: Path) -> Optional[_Lineage]:
+        key = str(node_root)
+        if key not in lineages:
             try:
-                lineages[node_label] = _Lineage(node_root)
+                lineages[key] = _Lineage(node_root)
             except Exception:   # noqa: BLE001 -- unreadable is "cannot follow"
                 return None
-        return lineages[node_label]
+        return lineages[key]
 
     try:
         def walk(node: dict, direction: str, left: int, seen: set) -> None:
@@ -915,17 +1015,20 @@ def provenance_tree(archive, run_id: str, filename: Optional[str] = None, *,
             # indented tree cannot show that two paths reconverge, so the
             # second appearance is marked instead of being expanded again --
             # which additionally stops a wide DAG from blowing up.
-            # Keyed by archive too: two archives can hold the same session
-            # id, and treating them as one node would silently merge two
+            # Keyed by owner and archive too: two archives can hold the
+            # same session id, and two *people* can hold the same archive
+            # name -- treating either as one node would silently merge two
             # people's data into one chain.
-            key = (node["archive"], node["run_id"], node["filename"])
+            key = (node.get("user"),
+                   node.get("archive_id") or node["archive"],
+                   node["run_id"], node["filename"])
             if key in seen:
                 node["seen"] = True
                 return
             seen.add(key)
 
             node_root = Path(node["root"]) if node.get("root") else archive_root
-            here = lineage_for(node["archive"], node_root)
+            here = lineage_for(node_root)
             if here is None:
                 node["truncated"] = True
                 node["note"] = node.get("note") or "archive could not be read"
@@ -939,6 +1042,8 @@ def provenance_tree(archive, run_id: str, filename: Optional[str] = None, *,
             if direction == "up":
                 for ref in here.parents(*edge_key):
                     child = _parent_node(node_root, node["archive"],
+                                         node.get("user"),
+                                         node.get("archive_id"),
                                          node["run_id"], ref)
                     node["children"].append(child)
                     if child["filename"] and child["resolved"]:
@@ -953,8 +1058,12 @@ def provenance_tree(archive, run_id: str, filename: Optional[str] = None, *,
                 # records back-links, so another archive's dependents are
                 # not discoverable from here. See `lineage`.
                 for edge in here.children(*edge_key):
+                    # Downstream never crosses an archive, so the child
+                    # inherits this node's owner rather than being looked up.
                     child = _tree_node(node_root, node["archive"],
-                                       edge["run_id"], edge["filename"])
+                                       edge["run_id"], edge["filename"],
+                                       user=node.get("user"),
+                                       archive_id=node.get("archive_id"))
                     node["children"].append(child)
                     walk(child, "down", left - 1, seen)
 
@@ -971,15 +1080,19 @@ def provenance_tree(archive, run_id: str, filename: Optional[str] = None, *,
                "filename": filename, "direction": direction, "depth": depth,
                "source": lin.source, "branches": []}
         for name in roots:
-            branch = {"item": _tree_node(archive_root, label, run_id, name),
+            branch = {"item": _tree_node(archive_root, label, run_id, name,
+                                         user=local_user,
+                                         archive_id=local_id),
                       "upstream": [], "downstream": []}
             if direction in ("up", "both"):
-                up = _tree_node(archive_root, label, run_id, name)
+                up = _tree_node(archive_root, label, run_id, name,
+                                user=local_user, archive_id=local_id)
                 walk(up, "up", depth, set())
                 branch["upstream"] = up["children"]
                 branch["item"]["truncated_up"] = up["truncated"]
             if direction in ("down", "both"):
-                down = _tree_node(archive_root, label, run_id, name)
+                down = _tree_node(archive_root, label, run_id, name,
+                                  user=local_user, archive_id=local_id)
                 walk(down, "down", depth, set())
                 branch["downstream"] = down["children"]
                 branch["item"]["truncated_down"] = down["truncated"]
@@ -987,30 +1100,66 @@ def provenance_tree(archive, run_id: str, filename: Optional[str] = None, *,
         out["session"] = _session_summary(archive_root, run_id)
         # Which archives the walk actually entered, so a view can say "this
         # chain crosses into someone else's archive" without re-deriving it.
-        out["archives"] = sorted(lineages)
+        # Names, not the roots the lineages are now keyed by -- this is what
+        # the view shows, and a filesystem path is not that.
+        out["archives"] = sorted({b["archive"] for b in _walked(out)})
         return out
     finally:
         for opened in lineages.values():
             opened.close()
 
 
-def _parent_node(archive_root: Path, label: str, from_run: str, ref: dict) -> dict:
+def _is_same_archive(name, ident, local_name, local_id) -> bool:
+    """Whether a ref's archive is the one being walked. By id when both
+    sides have one -- a label may be a rename out of date."""
+    from nebula import archive_id as archive_id_mod
+
+    if name is None and ident is None:
+        return True
+    if ident and local_id:
+        return archive_id_mod.same_id(ident, local_id)
+    return name == local_name or name is None
+
+
+def _parent_node(archive_root: Path, label: str, label_user, label_id,
+                 from_run: str, ref: dict) -> dict:
     """An upstream edge, which -- unlike a downstream one -- may point into
-    another archive, and so may not be resolvable at all."""
+    another archive, and so may not be resolvable at all.
+
+    Resolution is by owner *and* declared name (`Registry.find`), not by
+    registry nickname: the name in the ref is the one its author wrote, and
+    the nickname is whatever this machine happens to file that archive
+    under. The two are usually equal and occasionally not, and when they
+    are not, matching on the nickname answers with the wrong archive.
+    """
+    from nebula import archive_id as archive_id_mod
+
     target_run = ref.get("session") or from_run
     other = ref.get("archive")
-    if other is not None and other != label:
-        cfg = get_registry().try_get(other)
+    other_id = ref.get("archive_id")
+    owner = ref.get("user") or (label_user if other is None else None)
+    same_archive = _is_same_archive(other, other_id, label, label_id)
+    crosses = (not same_archive) or (
+        ref.get("user") is not None and label_user is not None
+        and ref["user"] != label_user)
+    if crosses:
+        other = other or label
+        cfg = get_registry().find(other, ref.get("user"), archive_id=other_id)
+        whose = f" owned by {ref['user']}" if ref.get("user") else ""
+        which = f"{other!r} ({other_id})" if other_id else repr(other)
         if cfg is None or not Path(cfg.root).is_dir():
             node = _tree_node(archive_root, other, target_run, ref.get("file"),
-                              resolved=False,
-                              note=(f"archive {other!r} is not registered here"
-                                    if cfg is None else
-                                    f"archive {other!r} is not mounted"))
+                              resolved=False, user=owner, archive_id=other_id,
+                              note=(f"archive {which}{whose} is not "
+                                    f"registered here" if cfg is None else
+                                    f"archive {which}{whose} is not mounted"))
             return node
-        node = _tree_node(Path(cfg.root), other, target_run, ref.get("file"))
+        node = _tree_node(Path(cfg.root), cfg.uri_name, target_run,
+                          ref.get("file"), user=cfg.user or owner,
+                          archive_id=cfg.archive_id or other_id)
         return node
-    node = _tree_node(archive_root, label, target_run, ref.get("file"))
+    node = _tree_node(archive_root, label, target_run, ref.get("file"),
+                      user=owner, archive_id=label_id)
     if not node["session_path"]:
         node["note"] = f"session {target_run} not found"
     elif not node["exists"]:

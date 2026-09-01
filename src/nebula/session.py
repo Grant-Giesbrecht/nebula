@@ -26,13 +26,15 @@ import inspect
 import os
 import re
 import subprocess
+import sys
 import threading
 import warnings
 from pathlib import Path
 from typing import Dict, List, Optional
 
 from nebula.annotations import ANNOTATIONS_FILE
-from nebula.refs import Ref, format_ref, parse_ref, SESSION_PREFIX
+from nebula.refs import (Ref, URI_SCHEME, format_ref, parse_ref,
+                         SESSION_PREFIX)
 from nebula.registry import Registry, resolve_archive
 from nebula.sidecar import (
     ProducedBy,
@@ -63,6 +65,119 @@ _NEBULA_DIR = os.path.dirname(os.path.abspath(__file__))
 #   "raise"     -- fail the close() loudly.
 _MISSING_META_POLICIES = ("stub+warn", "stub", "warn", "raise")
 _DEFAULT_MISSING_META = "stub+warn"
+
+# Whether saving an artifact prints a short report of what was saved.
+#
+# On by default, and the default is the argument: a measurement script's
+# whole job is to put data somewhere, and the two things its author needs
+# afterwards -- where it went, and what to call it in a paper -- were
+# previously discoverable only by going and looking. Printing the URI at
+# the moment it is minted is also what makes the URI system usable at all;
+# an identifier nobody is ever shown may as well not exist.
+#
+# It goes to *stdout* because it is the script's own output about its own
+# work, not a diagnostic. Scripts that pipe data on stdout, or that save
+# thousands of artifacts in a loop, turn it off -- per artifact, per
+# session, or process-wide via NEBULA_ANNOUNCE=0.
+ANNOUNCE_ENV = "NEBULA_ANNOUNCE"
+_DEFAULT_ANNOUNCE = True
+
+#: Said once per process, not once per artifact: a script saving in a loop
+#: should not be nagged 500 times about one archive's missing owner.
+_announced_no_owner: set = set()
+
+
+def announce_enabled(default: bool = _DEFAULT_ANNOUNCE) -> bool:
+    """Whether to print save reports, honouring NEBULA_ANNOUNCE.
+
+    The env var is the escape hatch for a script you cannot edit -- a
+    colleague's, or one being driven by a lab automation system -- so it
+    overrides the code rather than the other way round.
+    """
+    raw = os.environ.get(ANNOUNCE_ENV)
+    if raw is None or not raw.strip():
+        return default
+    return raw.strip().lower() not in ("0", "false", "no", "off")
+
+
+def _fmt_size(n: Optional[int]) -> str:
+    if n is None:
+        return "-"
+    size = float(n)
+    for unit in ("B", "KB", "MB", "GB", "TB"):
+        if size < 1024 or unit == "TB":
+            return f"{size:.0f} {unit}" if unit == "B" else f"{size:.1f} {unit}"
+        size /= 1024.0
+    return str(n)
+
+
+def announce_artifact(session: "Session", path: Path,
+                      meta: "SidecarMeta") -> None:
+    """Print what was just saved, and what to call it elsewhere.
+
+    Never raises. This runs immediately after a measurement has been
+    written to disk, and there is no failure here -- an unreadable
+    archive.yaml, a closed stdout, a stat that fails on a network share --
+    worth turning a completed save into a traceback.
+    """
+    try:
+        from nebula._termui import color_enabled, hl, paint, warn
+
+        uri, note = _artifact_uri(session, path)
+        try:
+            size = path.stat().st_size
+        except OSError:
+            size = None
+        tint = color_enabled(sys.stdout)
+
+        lines = [f"{paint('saved', 'green', tint)} {hl(path.name)}"]
+        # "uri" only when it is one. A compact ref labelled as a URI would
+        # be the exact overclaim this subsystem exists to avoid, and it is
+        # what someone would then paste into a paper.
+        label = "uri" if uri.startswith(URI_SCHEME) else "ref"
+        lines.append(f"  {label + ':':11} {uri}")
+        lines.append(f"  path:       {path}")
+        detail = _fmt_size(size)
+        if meta.sha256:
+            detail += f"   sha256 {meta.sha256[:12]}…"
+        lines.append(f"  size:       {detail}")
+
+        described = session.meta.description or "(no description)"
+        lines.append(f"  session:    {session.id} — {described}")
+        if session.meta.tags:
+            lines.append(f"  tags:       {', '.join(session.meta.tags)}")
+        parents = [format_ref(r) for r in meta.derived_from_refs()]
+        if parents:
+            lines.append(f"  derived from: {', '.join(parents)}")
+        if meta.inputs:
+            lines.append("  inputs:     "
+                         + ", ".join(f"{k}={v}" for k, v in meta.inputs.items()))
+        print("\n".join(lines))
+        sys.stdout.flush()
+
+        # The caveat, if any, is a diagnostic about the *identifier* rather
+        # than about the save, so it goes to stderr and is said once.
+        if note and note not in _announced_no_owner:
+            _announced_no_owner.add(note)
+            warn(f"  note: {note}")
+    except Exception:           # noqa: BLE001 -- reporting must never cost data
+        pass
+
+
+def _artifact_uri(session: "Session", path: Path) -> "tuple[str, Optional[str]]":
+    """(what to show, caveat). A real URI when the archive has an owner;
+    otherwise the compact ref plus one line saying why that is all there
+    is -- rather than a URI with a fabricated owner in it."""
+    from nebula import uris
+
+    try:
+        info = uris.describe(session.archive_root, session=session.id,
+                             file=path.name)
+        return info.uri, (info.warnings[0] if info.warnings else None)
+    except Exception as e:      # noqa: BLE001 -- no owner, or an odd archive
+        local = format_ref(Ref(session=session.id, file=path.name,
+                               archive=session.archive))
+        return local, str(e)
 
 
 class MissingMetadataError(RuntimeError):
@@ -373,10 +488,14 @@ class Session:
         meta: SessionMeta,
         archive: Optional[str] = None,
         on_missing_meta: str = _DEFAULT_MISSING_META,
+        announce: bool = _DEFAULT_ANNOUNCE,
     ):
         self.path = Path(path)
         self.meta = meta
         self.archive = archive
+        #: Print a short report as each artifact is saved. See
+        #: `announce_artifact`; NEBULA_ANNOUNCE overrides this.
+        self.announce = announce
         if on_missing_meta not in _MISSING_META_POLICIES:
             raise ValueError(
                 f"on_missing_meta must be one of {_MISSING_META_POLICIES!r}, "
@@ -454,6 +573,7 @@ class Session:
         *,
         derived_from: Optional[List["str | Ref"]] = None,
         inputs: Optional[Dict] = None,
+        announce: Optional[bool] = None,
         **extra,
     ) -> "_ArtifactWriter":
         """Context manager that pairs writing an artifact with writing its
@@ -472,6 +592,10 @@ class Session:
         This is the preferred front door; artifact_path() +
         write_meta_for() remain as a lower-level escape hatch (and the
         close() audit still covers anything written that way).
+
+        `announce` overrides this session's setting for this one artifact
+        -- False for the thousandth file of a sweep, True for the one
+        result the run is actually about.
         """
         # Capture provenance now, while the user script is the direct
         # caller (fixed depth 2), rather than at block-exit time where the
@@ -492,6 +616,7 @@ class Session:
             inputs=inputs or {},
             extra=extra,
             caller_file=caller_file,
+            announce=self.announce if announce is None else announce,
         )
 
     def write_meta_for(
@@ -501,6 +626,7 @@ class Session:
         derived_from: Optional[List["str | Ref"]] = None,
         inputs: Optional[Dict] = None,
         caller_frame_depth: int = 2,
+        announce: Optional[bool] = None,
         **extra,
     ) -> Path:
         """Write the sidecar for one artifact this session just produced.
@@ -519,7 +645,14 @@ class Session:
         for ref in derived_from or []:
             self._add_derived_from(meta, ref)
         self._attach_code(meta, caller_file)
-        return write_sidecar(self.artifact_path(artifact_filename), meta)
+        path = self.artifact_path(artifact_filename)
+        written = write_sidecar(path, meta)
+        # After the sidecar, not before: the report quotes the checksum,
+        # and write_sidecar is what computes it.
+        if (self.announce if announce is None else announce) \
+                and announce_enabled():
+            announce_artifact(self, path, meta)
+        return written
 
     def _note_write(self, requested: str, actual: str) -> None:
         self._written[requested] = actual
@@ -690,9 +823,11 @@ class _ArtifactWriter:
         caller_file: Optional[str] = None,
         original_name: Optional[str] = None,
         duplicate_index: Optional[int] = None,
+        announce: bool = _DEFAULT_ANNOUNCE,
     ):
         self._session = session
         self.path = path
+        self._announce = announce
         self._original_name = original_name
         self._duplicate_index = duplicate_index
         self._produced_by = produced_by
@@ -725,6 +860,8 @@ class _ArtifactWriter:
             self._session._add_derived_from(meta, ref)
         self._session._attach_code(meta, self._caller_file)
         write_sidecar(self.path, meta)
+        if self._announce and announce_enabled():
+            announce_artifact(self._session, self.path, meta)
         return None
 
 
@@ -739,6 +876,7 @@ def new(
     description: str = "",
     archive_name: Optional[str] = None,
     on_missing_meta: str = _DEFAULT_MISSING_META,
+    announce: bool = _DEFAULT_ANNOUNCE,
 ) -> Session:
     """Create a brand-new session folder and return an open Session.
 
@@ -750,6 +888,10 @@ def new(
     archive_name overrides the label recorded on the returned Session
     (e.g. to give an unregistered/ad hoc Path a friendly name); normally
     you don't need this -- a registered name resolves its own label.
+
+    announce=False silences the per-artifact save report (see
+    `announce_artifact`), for scripts whose stdout is data or that save in
+    a tight loop.
     """
     if isinstance(tags, str):
         # A bare string ("ruby, twpa") looks like the comma-separated form
@@ -810,7 +952,8 @@ def new(
         description=description,
     )
     write_session_yaml(session_dir, meta)
-    return Session(session_dir, meta, archive=name, on_missing_meta=on_missing_meta)
+    return Session(session_dir, meta, archive=name,
+                   on_missing_meta=on_missing_meta, announce=announce)
 
 
 class ArchiveNotWritable(PermissionError):
@@ -952,6 +1095,7 @@ def append_to(
     *,
     archive_name: Optional[str] = None,
     on_missing_meta: str = _DEFAULT_MISSING_META,
+    announce: bool = _DEFAULT_ANNOUNCE,
 ) -> Session:
     """Reattach to a session to write more artifacts into it, so several
     related measurements can share one folder.
@@ -984,7 +1128,8 @@ def append_to(
         # honestly rather than leaving a folder that claims to be done.
         meta.status = "open"
         write_session_yaml(session_dir, meta)
-    return Session(session_dir, meta, archive=name, on_missing_meta=on_missing_meta)
+    return Session(session_dir, meta, archive=name,
+                   on_missing_meta=on_missing_meta, announce=announce)
 
 
 def reopen(
@@ -993,6 +1138,7 @@ def reopen(
     *,
     archive_name: Optional[str] = None,
     on_missing_meta: str = _DEFAULT_MISSING_META,
+    announce: bool = _DEFAULT_ANNOUNCE,
 ) -> Session:
     """Explicitly reopen a session regardless of its current status (e.g.
     a crashed session resuming from a checkpoint after a machine reboot).
@@ -1005,7 +1151,8 @@ def reopen(
     meta = read_session_yaml(session_dir)
     meta.status = "open"
     write_session_yaml(session_dir, meta)
-    return Session(session_dir, meta, archive=name, on_missing_meta=on_missing_meta)
+    return Session(session_dir, meta, archive=name,
+                   on_missing_meta=on_missing_meta, announce=announce)
 
 
 @contextlib.contextmanager
@@ -1018,6 +1165,7 @@ def session(
     description: str = "",
     archive_name: Optional[str] = None,
     on_missing_meta: str = _DEFAULT_MISSING_META,
+    announce: bool = _DEFAULT_ANNOUNCE,
 ):
     """Convenience context manager. Closes/marks crashed automatically on
     exit.
@@ -1047,6 +1195,7 @@ def session(
             run_id,
             archive_name=archive_name,
             on_missing_meta=on_missing_meta,
+            announce=announce,
         )
     elif new_session:
         s = new(
@@ -1055,6 +1204,7 @@ def session(
             description=description,
             archive_name=archive_name,
             on_missing_meta=on_missing_meta,
+            announce=announce,
         )
     else:
         # Imported lazily: select_session imports back from this module, and
@@ -1067,6 +1217,7 @@ def session(
             description=description,
             archive_name=archive_name,
             on_missing_meta=on_missing_meta,
+            announce=announce,
         )
     try:
         yield s

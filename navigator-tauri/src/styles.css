@@ -457,6 +457,22 @@ body.resizing *, body.resizing-y * { pointer-events:none; }
 .issue-w { font-size:11.5px; color:var(--text-faint); margin-left:6px; }
 .issue-d { font-size:12px; color:var(--text-dim); }
 .issue-f { font-size:11.5px; color:var(--accent); margin-top:2px; }
+/* "Get URI" dialog. The URI itself is a real input, not a <div>: it has to
+   be selectable and copyable with the keyboard even when the Copy button
+   cannot reach the clipboard (a webview without permission). */
+.uri-what { font-size:12.5px; color:var(--text-dim); }
+.uri-what b { color:var(--text); }
+.uri-box { width:100%; box-sizing:border-box; height:34px; padding:0 10px;
+           font-family:var(--mono); font-size:12.5px; color:var(--text);
+           background:var(--panel); border:1px solid var(--border-strong);
+           border-radius:7px; }
+.uri-box:focus { outline:2px solid var(--accent); outline-offset:-1px; }
+.uri-meta { font-size:11.5px; color:var(--text-faint); font-family:var(--mono);
+            word-break:break-all; line-height:1.5; }
+.uri-warn { font-size:12px; color:var(--text-dim); line-height:1.5;
+            border-left:3px solid var(--warn); padding-left:9px; }
+.uri-warn.hidden { display:none; }
+
 .cfm-body { font-size:13px; color:var(--text-dim); line-height:1.5; }
 .cfm-body b { color:var(--text); }
 .cfm-body .mono { font-family:var(--mono); font-size:12px; }

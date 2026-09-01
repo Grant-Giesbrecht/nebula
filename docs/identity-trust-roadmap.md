@@ -376,10 +376,108 @@ URI, and the property to hold the whole design to.
    version, which needs a hub — the local file is only ever your own
    belief.
 
+## URIs reach the surface — **BUILT** 2026-09-01
+
+Until now `refs.format_uri`/`parse_uri` had **no callers outside their own
+module** and no tests. The grammar was settled and nothing spoke it: there
+was no way to *get* the URI for a session, nothing accepted one as input,
+and the index threw the owner away on the way in. An identifier nobody is
+ever shown may as well not exist.
+
+Five things, which together are what "start using URIs" needed:
+
+- **`nebula.uris`** — the one place that answers "what is this called?" and
+  "where does that land here?". `refs` keeps the grammar and stays free of
+  `config`/`registry`; `uris` reads the archive's declared owner and name,
+  mints the URI, and resolves one back to a path. `describe()` returns the
+  URI *together with the reasons it might not be unique*, and every caller
+  shows them — see below.
+- **`nebula uri`** — mints the URI for a session, artifact, collection or
+  asset, and resolves a URI back to a local path. The URI alone goes to
+  stdout so `URI=$(nebula uri ...)` works; kind, path and caveats go to
+  stderr, the same split as `nebula whoami`. `show` and `ls` accept a URI
+  wherever they accept an archive.
+- **`ref_user` in the index** (schema 4). The sidecar on disk had always
+  kept a ref's owner (`sidecar._ref_to_dict`); the index dropped it, so two
+  colleagues' `postdoc` collapsed into one row. Every ref-bearing table now
+  carries it, NULL meaning "this archive's own owner". The migration is a
+  rebuild, which costs nothing — the index is a cache.
+- **Resolution by owner + declared name.** `graph` and the Navigator's
+  provenance tree both looked archives up by registry *nickname*, which is
+  local to one laptop, and both keyed nodes by archive name alone, which
+  two people can share. Both now use `Registry.find(name, user)` and carry
+  the owner through the walk. An owner that cannot be placed is reported as
+  an unresolved node naming *whose* archive it is, rather than silently
+  answering with a same-named archive that happens to be mounted here.
+- **A save says what it saved.** `Session.artifact` prints the artifact's
+  URI, path, size, checksum, session, tags and inputs to stdout as it
+  writes it (`announce`, on by default; `announce=False` per session or per
+  artifact, `NEBULA_ANNOUNCE=0` process-wide). This is the moment the URI
+  is minted, and the moment its author needs it.
+
+**The honesty rule, applied everywhere.** A URI is unique only as far as
+its owner is, so nothing anywhere says "here is your permanent identifier"
+over an unqualified name. `uris.describe` returns the caveats as data;
+`nebula uri` warns on stderr, the Navigator dialog shows them beside the
+URI, and a save with no owner at all prints the *compact ref* and says why
+rather than minting `nebula://unknown/...`. The only place `unknown` is
+still written is a transferred session's recorded `origin`, where the
+alternative is recording nothing (`uris.mint(..., allow_unknown=True)`).
+
+Fixed on the way: `transfer` built two URIs with f-strings, bypassing the
+single formatter. Both now go through `uris.mint` via one `_session_origin`
+helper — the "have I already adopted this?" check and the history entry
+have to spell it identically, or a second adopt would not recognise the
+first.
+
+Coverage: `tests/test_refs.py` (the URI grammar, previously untested),
+`tests/test_uris.py`, `tests/test_cli_uri.py`, `tests/test_announce.py`,
+plus additions to `test_index.py`, `test_graph.py`, `test_cross_archive.py`
+and `test_navigator.py`. The Navigator's menus are covered by a jsdom
+harness at `navigator-tauri/tests/uri-ui.test.js` (`npm test`) — what those
+menus copy is a permanent identifier, and a wrong one is not a visual bug
+someone notices, it is a wrong string in a paper.
+
+## The archive name in a URI is mutable — **SETTLED** 2026-09-01
+
+Raised 2026-09-01 while wiring the URI surface above, argued through and
+built the same day. The design and its reasoning are in
+**`docs/uri-grammar.md`**; the short version:
+
+An archive now carries an **immutable id** minted once and never changed,
+and the readable name rides alongside it in the same URI segment:
+
+    nebula://grant@github.com/postdoc~0fe/S-26-1234/artifact.tome
+
+The id is authoritative and the label is decorative — never compared, never
+resolved on. Rename the archive and every ref already written still finds
+it; ask for the URI again and you get today's label. The slug pattern, as
+Stack Overflow and Notion use it.
+
+The id is a *number* written in hex with optional leading zeros, so `0fe`
+and `00fe` are one id and normalising needs no registry. That is also why
+"start with 3 characters and grow later" costs nothing: `0fe` and `1a2b3c`
+were always in one namespace, so no id is ever lengthened and none ever
+changes. Minting draws at random from the narrowest range still under a
+0.5 load factor, computed rather than discovered by failing.
+
+`nebula config <archive> --name <new>` is the supported way to rename, and
+says what it is safe to assume while you are doing it.
+
+What it does *not* fix, and is still open: the **owner** segment. Move from
+`@ncsu.edu` to `@orcid.org` and every URI still dangles for anyone whose
+`contacts.yaml` lacks your succession trail. An archive id is orthogonal to
+that; see "Petnames and identity trails" above, and question 6.
+
 ## Nearest-term step
 
-Options 1 and the `value@authority` convention are both complete — see the
-BUILT markers above. Nothing further here is scheduled.
+Option 1, the `value@authority` convention, the URI surface above and
+archive ids are all complete — see the BUILT markers, and
+`docs/uri-grammar.md` for the grammar.
+
+The nearest thing still open is **owner** stability: an id keeps an archive
+findable across a rename, and nothing yet keeps a *person* findable across a
+change of authority except the local, unauthenticated contacts trail.
 
 Keys, hub, and tiers B and C still wait for real answers to questions 1
 and 5. Until those are answered, the honest position is the one now

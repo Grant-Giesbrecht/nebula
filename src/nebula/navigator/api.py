@@ -615,6 +615,19 @@ def op_get_item(args: Dict[str, Any]) -> Dict[str, Any]:
     raise FileNotFoundError(f"no artifact {name!r} in {session_path}")
 
 
+def op_uri(args: Dict[str, Any]) -> Dict[str, Any]:
+    """The nebula:// URI for a session, artifact, collection or asset.
+
+    One op for every kind of thing the front-end can right-click, because
+    they are one question ("what do I call this outside nebula?") and
+    splitting it per noun would let four menu entries drift apart.
+    """
+    return model.uri_for(args["archive"], session=args.get("session"),
+                         file=args.get("file"),
+                         collection=args.get("collection"),
+                         asset=args.get("asset"), ref=args.get("ref"))
+
+
 def op_collection_tree(args: Dict[str, Any]) -> Dict[str, Any]:
     from nebula import collection as collection_mod
 
@@ -1008,6 +1021,7 @@ OPS = {
     "open_path": op_open_path,
     "reveal_path": op_reveal_path,
     "file_manager_name": op_file_manager_name,
+    "uri": op_uri,
 }
 
 

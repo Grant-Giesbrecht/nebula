@@ -131,5 +131,11 @@ Larger questions live in their own documents:
   self-asserted and unverified. Settles the identifier *shape*
   (`value@authority`, so ORCID / GitHub / email / hub ids coexist) and why
   hub names stay out of the URI. Also covers ref repair on intake import
-  and the three hosting tiers. Nearest-term step is adopting the convention
-  plus honest labelling.
+  and the three hosting tiers. The URI surface (`nebula uri`, `ref_user` in
+  the index, owner-aware resolution, the save report, the Navigator's "Get
+  URI") shipped 2026-09-01, and archive ids settled URI stability under
+  rename the same day. Still open: **owner** stability across a change of
+  authority.
+- `uri-grammar.md` — the ref grammar as it now stands: one `/`-separated
+  form with a droppable prefix, and `label~id` archive segments whose id is
+  a number, not a token. Both the argument and the specification.

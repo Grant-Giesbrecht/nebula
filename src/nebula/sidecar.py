@@ -38,6 +38,13 @@ def _ref_to_dict(ref: Ref) -> Dict[str, Any]:
                            "file": ref.file}
     if ref.user:
         out["user"] = ref.user
+    # The id, when the ref carries one. Written alongside the archive name
+    # rather than instead of it: the id is what resolves, the name is what a
+    # human reads in the file -- the same split assets already use for their
+    # opaque ids. Omitted when absent so a same-archive ref keeps exactly the
+    # shape it has always had on disk.
+    if ref.archive_id:
+        out["archive_id"] = ref.archive_id
     # Sibling namespaces, written only when used, for the same reason as
     # `user`: an ordinary session ref keeps exactly the shape it has
     # always had on disk. An asset ref keeps `file` alongside the id --
@@ -50,9 +57,12 @@ def _ref_to_dict(ref: Ref) -> Dict[str, Any]:
 
 
 def _ref_from_dict(d: Dict[str, Any]) -> Ref:
+    from nebula.archive_id import normalize_or_none
+
     return Ref(file=d.get("file"), session=d.get("session"),
                archive=d.get("archive"), user=d.get("user"),
-               collection=d.get("collection"), asset=d.get("asset"))
+               collection=d.get("collection"), asset=d.get("asset"),
+               archive_id=normalize_or_none(d.get("archive_id")))
 
 
 def _now_iso() -> str:
@@ -274,7 +284,11 @@ class SessionMeta:
         if isinstance(ref, str):
             ref = parse_ref(ref)
         entry = _ref_to_dict(ref)
-        if entry not in self.related_runs:
+        # Compared by what the refs *mean*, not by the dicts: two entries
+        # naming one archive under two labels (renamed between writes) are
+        # one related run, and storing both would claim two.
+        if not any(_ref_from_dict(e).same_target(ref)
+                   for e in self.related_runs):
             self.related_runs.append(entry)
 
     def add_history(

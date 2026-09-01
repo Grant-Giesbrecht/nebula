@@ -275,7 +275,8 @@ def add(archive_root, name: str, ref: str, *, note: str = "") -> Collection:
     parsed = parse_ref(ref)                    # raises ValueError if malformed
     canonical = format_ref(parsed)
 
-    if parsed.kind == "collection" and parsed.archive is None and parsed.user is None:
+    if (parsed.kind == "collection" and parsed.archive is None
+            and parsed.archive_id is None and parsed.user is None):
         if parsed.collection == coll.name:
             raise CollectionError(f"a collection cannot contain itself ({coll.name!r})")
         if _reaches(archive_root, parsed.collection, coll.name):
@@ -283,7 +284,10 @@ def add(archive_root, name: str, ref: str, *, note: str = "") -> Collection:
                 f"adding {parsed.collection!r} to {coll.name!r} would make a cycle "
                 f"({parsed.collection!r} already contains {coll.name!r})")
 
-    if any(format_ref(e.parsed) == canonical for e in coll.entries
+    # Compared by what the refs *mean*, not by their text: an archive
+    # renamed between two adds gives one target two spellings, and storing
+    # both would claim two members.
+    if any(e.parsed.same_target(parsed) for e in coll.entries
            if e.kind != "invalid"):
         raise CollectionError(f"{canonical} is already in {coll.name!r}")
 
@@ -299,10 +303,15 @@ def remove(archive_root, name: str, ref: str) -> Collection:
     except ValueError:
         canonical = ref.strip()
     before = len(coll.entries)
+    try:
+        wanted = parse_ref(ref)
+    except ValueError:
+        wanted = None
     coll.entries = [
         e for e in coll.entries
         if not (e.ref == canonical
-                or (e.kind != "invalid" and format_ref(e.parsed) == canonical))
+                or (e.kind != "invalid" and wanted is not None
+                    and e.parsed.same_target(wanted)))
     ]
     if len(coll.entries) == before:
         raise CollectionError(f"{ref} is not in {coll.name!r}")
@@ -368,7 +377,8 @@ def rename(archive_root, old: str, new: Optional[str] = None, *,
                 if entry.kind != "collection":
                     continue
                 ref = entry.parsed
-                if ref.archive or ref.user or ref.collection != old_name:
+                if (ref.archive or ref.archive_id or ref.user
+                        or ref.collection != old_name):
                     continue
                 entry.ref = f"{COLLECTIONS_SEGMENT}/{new}"
                 changed = True
@@ -405,6 +415,29 @@ def _reaches(archive_root, start: str, target: str, _seen=None) -> bool:
 # resolution
 # ---------------------------------------------------------------------
 
+def _is_this_archive(ref, archive_root, local_archive) -> bool:
+    """Whether a ref naming an archive names *this* one.
+
+    By id when the ref carries one and this archive has one, since a label
+    the ref was written with may be a rename out of date. By name otherwise,
+    which is how every ref written before ids resolves.
+    """
+    from nebula import archive_id as archive_id_mod
+
+    if ref.archive is None and ref.archive_id is None:
+        return True
+    if ref.archive_id:
+        try:
+            from nebula.config import read_settings
+
+            mine = read_settings(Path(archive_root), apply_env=False).id
+        except Exception:       # noqa: BLE001
+            mine = None
+        if mine:
+            return archive_id_mod.same_id(mine, ref.archive_id)
+    return ref.archive == local_archive
+
+
 def resolve_entry(archive_root, entry: Entry, *, local_user=None,
                   local_archive=None) -> dict:
     """Where an entry points and whether it is actually there.
@@ -427,11 +460,12 @@ def resolve_entry(archive_root, entry: Entry, *, local_user=None,
         from nebula.registry import get_registry
 
         mine = (ref.user is None or ref.user == (local_user or get_user()))
-        same_archive = (ref.archive is None or ref.archive == local_archive)
+        same_archive = _is_this_archive(ref, archive_root, local_archive)
         if not (mine and same_archive):
             out["foreign"] = True
-            cfg = (get_registry().find(ref.archive, ref.user)
-                   if ref.archive else None)
+            cfg = (get_registry().find(ref.archive, ref.user,
+                                       archive_id=ref.archive_id)
+                   if (ref.archive or ref.archive_id) else None)
             if cfg is None or not Path(cfg.root).is_dir():
                 out.update({"resolved": False,
                             "note_error": f"archive {ref.archive!r} is not "

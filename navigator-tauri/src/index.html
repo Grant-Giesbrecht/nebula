@@ -700,6 +700,26 @@
     </div>
   </div>
 
+  <!-- "Get URI": the citable name of whatever was right-clicked. A dialog
+       rather than a toast because the string is long, worth reading before
+       it is pasted somewhere permanent, and may come with caveats about
+       whether it is actually unique. -->
+  <div class="scrim" id="uriScrim">
+    <div class="dialog" role="dialog" aria-modal="true" aria-labelledby="uriHead">
+      <div class="dlg-head" id="uriHead">Nebula URI</div>
+      <div class="dlg-body">
+        <div class="uri-what" id="uriWhat"></div>
+        <input class="uri-box" id="uriText" readonly spellcheck="false">
+        <div class="uri-meta" id="uriMeta"></div>
+        <div class="uri-warn hidden" id="uriWarn"></div>
+      </div>
+      <div class="dlg-actions">
+        <button class="dbtn ghost" id="uriClose">Close</button>
+        <button class="dbtn fill" id="uriCopy">Copy</button>
+      </div>
+    </div>
+  </div>
+
   <div class="ctxmenu hidden" id="ctxMenu"></div>
 
   <div class="toast" id="toast"></div>

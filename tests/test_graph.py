@@ -2,7 +2,7 @@ import pytest
 
 import nebula
 from nebula import graph, index
-from nebula.registry import Registry
+from nebula.registry import Registry, get_registry
 
 
 def _make_chain(archive):
@@ -182,3 +182,299 @@ def test_upstream_by_registered_name(tmp_path, monkeypatch):
     assert nodes[0].filename == "raw.csv"
 
     registry_mod._default_registry = None
+
+
+# ---------------------------------------------------------------------
+# Owners and ids: an archive is (user, id), never a name alone
+# ---------------------------------------------------------------------
+
+def _owned(root, name, user):
+    from nebula import transfer
+
+    transfer.init_archive(root, kind="standard", name=name, user=user)
+    return root
+
+
+def _seg(root):
+    """`label~id` for an archive, read from disk -- the id is random."""
+    from nebula.config import read_settings
+
+    got = read_settings(root, apply_env=False)
+    return f"{got.name}~{got.id}" if got.id else got.name
+
+
+def _id_of(root):
+    from nebula.config import read_settings
+
+    return read_settings(root, apply_env=False).id or None
+
+
+def test_nodes_carry_the_archives_owner(tmp_path):
+    root = _owned(tmp_path / "postdoc", "postdoc", "g@ncsu.edu")
+    s1, s2, s3 = _make_chain(root)
+
+    nodes = graph.upstream(root, s3.id, "fit.png", archive_name="postdoc")
+    assert nodes and all(n.user == "g@ncsu.edu" for n in nodes)
+    assert nodes[0].uri == (
+        f"nebula://g@ncsu.edu/{_seg(root)}/{s2.id}/processed.graf")
+    assert all(n.archive_id == _id_of(root) for n in nodes)
+
+
+def test_an_archive_with_no_declared_owner_claims_none(tmp_path):
+    """None, not the local identity: "mine" and "unknown" are different
+    claims, and stamping this machine's name onto an archive that never
+    said so is how a colleague's data starts looking like yours."""
+    archive = tmp_path / "scratch"
+    s1, s2, s3 = _make_chain(archive)
+    nodes = graph.upstream(archive, s3.id, "fit.png", archive_name="local")
+    assert nodes and all(n.user is None for n in nodes)
+    assert nodes[0].uri is None
+
+
+def test_two_owners_one_archive_name_are_not_the_same_node(tmp_path):
+    """Both colleagues call their archive "shared"; a ref naming one must
+    not resolve to the other."""
+    mine = _owned(tmp_path / "mine", "shared", "me@here.edu")
+    theirs = _owned(tmp_path / "theirs", "shared", "jane@lab.edu")
+    local = _owned(tmp_path / "local", "local", "me@here.edu")
+    get_registry().register_archive(mine)
+    get_registry().register_archive(theirs)
+
+    for root in (mine, theirs):
+        with nebula.session(root, new_session=True, description="raw") as s:
+            (s.path / "raw.csv").write_text("x")
+            s.write_meta_for("raw.csv")
+        index.rebuild(root)
+    src = index.open_index(mine).execute(
+        "SELECT run_id FROM sessions").fetchone()["run_id"]
+
+    with nebula.session(local, new_session=True, description="fit") as f:
+        (f.path / "fit.png").write_text("z")
+        f.write_meta_for(
+            "fit.png",
+            derived_from=[f"nebula://jane@lab.edu/{_seg(theirs)}/{src}/raw.csv"])
+    index.rebuild(local)
+
+    nodes = graph.upstream(local, f.id, "fit.png", archive_name="local")
+    assert len(nodes) == 1
+    assert nodes[0].user == "jane@lab.edu"
+    # ...and it resolved to *their* directory, not the same-named one here.
+    assert str(theirs) in (nodes[0].path or "")
+    assert str(mine) not in (nodes[0].path or "")
+
+
+def test_an_unregistered_owners_archive_is_unresolved_not_wrong(tmp_path):
+    """Better to say the chain continues and we cannot follow it than to
+    answer with a same-named archive that happens to be here."""
+    mine = _owned(tmp_path / "mine", "shared", "me@here.edu")
+    local = _owned(tmp_path / "local", "local", "me@here.edu")
+    get_registry().register_archive(mine)
+
+    with nebula.session(local, new_session=True, description="fit") as f:
+        (f.path / "fit.png").write_text("z")
+        f.write_meta_for(
+            "fit.png",
+            derived_from=["nebula://jane@lab.edu/shared~999/S-26-0001/raw.csv"])
+    index.rebuild(local)
+
+    nodes = graph.upstream(local, f.id, "fit.png", archive_name="local")
+    assert len(nodes) == 1
+    assert nodes[0].unresolved is True
+    assert nodes[0].user == "jane@lab.edu"
+
+
+def test_downstream_does_not_claim_another_owners_child(tmp_path):
+    """A dependent in *my* shared archive is not a dependent of *theirs*,
+    even though the archive name and session id match."""
+    mine = _owned(tmp_path / "mine", "shared", "me@here.edu")
+    get_registry().register_archive(mine)
+
+    with nebula.session(mine, new_session=True, description="raw") as raw:
+        (raw.path / "raw.csv").write_text("x")
+        raw.write_meta_for("raw.csv")
+    with nebula.session(mine, new_session=True, description="fit") as fit:
+        (fit.path / "fit.png").write_text("z")
+        fit.write_meta_for(
+            "fit.png",
+            derived_from=[f"nebula://jane@lab.edu/shared~999/{raw.id}/raw.csv"])
+    index.rebuild(mine)
+
+    nodes = graph.downstream(mine, raw.id, "raw.csv", archive_name="shared")
+    assert nodes == []
+
+
+def test_a_ref_naming_my_own_owner_still_resolves(tmp_path):
+    """Writing your own identity out in full is legal and common -- it is
+    what `nebula uri` hands you -- so it must resolve exactly as the bare
+    spelling does."""
+    mine = _owned(tmp_path / "mine", "shared", "me@here.edu")
+    get_registry().register_archive(mine)
+
+    with nebula.session(mine, new_session=True, description="raw") as raw:
+        (raw.path / "raw.csv").write_text("x")
+        raw.write_meta_for("raw.csv")
+    with nebula.session(mine, new_session=True, description="fit") as fit:
+        (fit.path / "fit.png").write_text("z")
+        fit.write_meta_for(
+            "fit.png",
+            derived_from=[f"nebula://me@here.edu/{_seg(mine)}/{raw.id}/raw.csv"])
+    index.rebuild(mine)
+
+    up = graph.upstream(mine, fit.id, "fit.png", archive_name="shared")
+    assert [(n.run_id, n.filename) for n in up] == [(raw.id, "raw.csv")]
+    assert up[0].unresolved is False
+
+    down = graph.downstream(mine, raw.id, "raw.csv", archive_name="shared")
+    assert [(n.run_id, n.filename) for n in down] == [(fit.id, "fit.png")]
+
+
+def test_resolution_uses_the_declared_name_not_the_registry_nickname(tmp_path):
+    """A nickname is local to one laptop. A ref written by the archive's
+    author names what the archive calls itself, and that is what has to
+    match."""
+    other = _owned(tmp_path / "other", "measurements", "jane@lab.edu")
+    local = _owned(tmp_path / "local", "local", "me@here.edu")
+    # Filed here under a name nobody else has ever seen.
+    get_registry().register_archive(other, key="janes-drive")
+
+    with nebula.session(other, new_session=True, description="raw") as raw:
+        (raw.path / "raw.csv").write_text("x")
+        raw.write_meta_for("raw.csv")
+    index.rebuild(other)
+
+    with nebula.session(local, new_session=True, description="fit") as fit:
+        (fit.path / "fit.png").write_text("z")
+        fit.write_meta_for(
+            "fit.png",
+            derived_from=[f"nebula://jane@lab.edu/{_seg(other)}/{raw.id}/raw.csv"])
+    index.rebuild(local)
+
+    nodes = graph.upstream(local, fit.id, "fit.png", archive_name="local")
+    assert len(nodes) == 1
+    assert nodes[0].unresolved is False
+    assert str(other) in (nodes[0].path or "")
+
+
+# ---------------------------------------------------------------------
+# Naming a node to a reader, and surviving a rename
+# ---------------------------------------------------------------------
+
+def test_describe_is_bare_at_home_and_a_uri_abroad(tmp_path):
+    """The "shortest spelling that still says what it means" rule, applied
+    to traversal output: a walk that never leaves home would otherwise
+    print a fully-qualified owner on every line, burying the handful that
+    genuinely cross a boundary."""
+    mine = _owned(tmp_path / "mine", "postdoc", "me@here.edu")
+    theirs = _owned(tmp_path / "theirs", "shared", "jane@lab.edu")
+    get_registry().register_archive(theirs)
+
+    src = nebula.new(theirs, description="raw", announce=False)
+    with src.artifact("cal.json") as fn:
+        fn.write_text("{}")
+    src.close()
+
+    local = nebula.new(mine, description="raw", announce=False)
+    with local.artifact("raw.csv") as fn:
+        fn.write_text("x")
+    local.close()
+
+    fit = nebula.new(mine, description="fit", announce=False)
+    with fit.artifact("fit.png", derived_from=[
+            f"{local.id}/raw.csv",
+            f"nebula://jane@lab.edu/{_seg(theirs)}/{src.id}/cal.json"]) as fn:
+        fn.write_text("z")
+    fit.close()
+    index.rebuild(mine)
+
+    lines = {n.describe(relative_to="me@here.edu", archive_id=_id_of(mine))
+             for n in graph.upstream(mine, fit.id, "fit.png",
+                                     archive_name="postdoc")}
+    # Inside this archive: a bare relative ref, exactly as you would type it.
+    assert f"{local.id}/raw.csv" in lines
+    # Out of it: a URI naming whose archive, and which one.
+    assert f"nebula://jane@lab.edu/{_seg(theirs)}/{src.id}/cal.json" in lines
+    # Everything printed is a ref in the current grammar, so it can be
+    # pasted straight back into a derived_from.
+    from nebula.refs import format_ref, parse_ref
+    for line in lines:
+        assert format_ref(parse_ref(line)) == line
+
+
+def test_a_node_names_itself_relative_to_the_reader(tmp_path):
+    """`describe` drops whatever the reader already has: their own owner,
+    their own archive."""
+    node = graph.ArtifactNode(archive="shared", run_id="S-26-0001",
+                              filename="cal.json", user="jane@lab.edu",
+                              archive_id="c73")
+
+    # A reader somewhere else: everything spelled out.
+    assert node.describe() == "nebula://jane@lab.edu/shared~c73/S-26-0001/cal.json"
+    assert node.uri == node.describe()
+
+    # Jane, looking at another of her archives: her name is redundant.
+    assert node.describe(relative_to="jane@lab.edu") == \
+        "nebula://shared~c73/S-26-0001/cal.json"
+
+    # Jane, looking at this archive: so is the archive.
+    assert node.describe(relative_to="jane@lab.edu", archive_id="c73") == \
+        "S-26-0001/cal.json"
+    # ...and the id is a number, so its spelling does not matter.
+    assert node.describe(relative_to="jane@lab.edu", archive_id="0c73") == \
+        "S-26-0001/cal.json"
+
+
+def test_an_unresolved_node_says_so(tmp_path):
+    node = graph.ArtifactNode(archive="shared", run_id="S-26-0001",
+                              filename="cal.json", user="jane@lab.edu",
+                              archive_id="c73", unresolved=True)
+    assert node.describe().endswith(" (unresolved)")
+    assert node.describe(relative_to="jane@lab.edu",
+                         archive_id="c73").startswith("S-26-0001/cal.json")
+
+
+def test_traversal_follows_a_ref_whose_archive_was_renamed(tmp_path):
+    """The payoff, at the graph level: a `derived_from` written before a
+    rename still finds the archive afterwards, because it named the id."""
+    other = _owned(tmp_path / "other", "measurements", "jane@lab.edu")
+    local = _owned(tmp_path / "local", "local", "me@here.edu")
+    get_registry().register_archive(other)
+
+    raw = nebula.new(other, description="raw", announce=False)
+    with raw.artifact("raw.csv") as fn:
+        fn.write_text("x")
+    raw.close()
+    index.rebuild(other)
+
+    fit = nebula.new(local, description="fit", announce=False)
+    with fit.artifact("fit.png", derived_from=[
+            f"nebula://jane@lab.edu/{_seg(other)}/{raw.id}/raw.csv"]) as fn:
+        fn.write_text("z")
+    fit.close()
+    index.rebuild(local)
+
+    # Jane renames her archive. The ref on disk still says "measurements".
+    from nebula.config import read_settings, write_settings
+    settings = read_settings(other, apply_env=False)
+    settings.name = "phd-data"
+    write_settings(other, settings)
+    get_registry().register_archive(other)
+
+    nodes = graph.upstream(local, fit.id, "fit.png", archive_name="local")
+    assert len(nodes) == 1
+    assert nodes[0].unresolved is False
+    assert str(other) in (nodes[0].path or "")
+
+
+def test_two_labels_for_one_archive_are_one_node(tmp_path):
+    """Node identity is on the id, so an artifact reached by an old label
+    and a new one is one node, not two."""
+    a = graph.ArtifactNode(archive="postdoc", run_id="S-26-0001",
+                           filename="raw.csv", user="g@x.edu", archive_id="0fe")
+    b = graph.ArtifactNode(archive="thesis", run_id="S-26-0001",
+                           filename="raw.csv", user="g@x.edu", archive_id="0fe")
+    assert a.key() == b.key()
+
+    other = graph.ArtifactNode(archive="postdoc", run_id="S-26-0001",
+                               filename="raw.csv", user="g@x.edu",
+                               archive_id="1a2")
+    assert a.key() != other.key()

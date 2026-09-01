@@ -3615,6 +3615,11 @@ function showItemMenu(x, y) {
     { label: "Show relations", disabled: many || !it,
       action: () => openRelationsTab(it && it.run_id ? it.run_id
                                      : (curSession && curSession.run_id), it && it.name) },
+    { label: many ? `Get URIs (${picked.length})` : "Get URI…", disabled: !it,
+      action: () => (many
+        ? copyUris(picked.map((p) => ({ session: itemRunId(p), file: p.name })), label)
+        : showUri({ session: itemRunId(it), file: it.name },
+                  `${itemRunId(it)}/${it.name}`)) },
     { separator: true },
     { label: "Open", disabled: many || !(it && it.has_artifact),
       action: () => call("open_path", { path: it.artifact_path }) },
@@ -3638,6 +3643,7 @@ function showSessionMenu(x, y, s) {
     { label: "Open in new tab", action: () => openSessionInNewTab(s) },
     { label: "Show relations", action: () => openRelationsTab(s.run_id, null) },
     { label: "Show in index", action: () => openIndexTab(s.run_id) },
+    { label: "Get URI…", action: () => showUri({ session: s.run_id }, s.run_id) },
     { label: "Export as a fragment…",
       action: () => exportSelection({ sessions: [s.run_id], label: s.run_id }) },
     { separator: true },
@@ -3652,6 +3658,8 @@ function showCollectionMenu(x, y, name) {
     { label: "New folder inside…", action: () => newNestedCollection(name) },
     { label: "Open", action: () => showCollection(name) },
     { label: "Open in new tab", action: () => openCollectionInNewTab(name) },
+    { label: "Get URI…",
+      action: () => showUri({ collection: name }, collLabel(name)) },
     { label: "Export as a fragment…",
       action: () => exportSelection({ collection: name, label: name }) },
     { label: "Rename…", action: () => renameCollection(name) },
@@ -3674,6 +3682,10 @@ function showEntryMenu(x, y, entry) {
     ] : []),
     { label: "Add to collection…", disabled: !entry.exists,
       action: () => openCollectionPicker([entry.ref], entry.ref) },
+    // Sent as the stored ref string: the backend parses it, so "which part
+    // of S-26-0001/raw.csv is the session" keeps one answer, in refs.py.
+    { label: "Get URI…", disabled: entry.kind === "invalid",
+      action: () => showUri({ ref: entry.ref }, entry.ref) },
     { label: `Reveal in ${fileManagerName}`, disabled: !isFile,
       action: () => call("reveal_path", { path: entry.path }) },
     { separator: true },
@@ -3764,6 +3776,12 @@ function selectedRef() {
 
 // Every highlighted artefact as a ref. Each carries its own session, so a
 // multi-selection from search results spanning sessions still works.
+function itemRunId(it) {
+  // A search result carries its own session; a row in the open session's
+  // file list does not, and inherits it.
+  return (it && it.run_id) || (curSession && curSession.run_id) || null;
+}
+
 function selectedRefs() {
   const fallback = curSession && curSession.run_id;
   return picked
@@ -4029,6 +4047,68 @@ async function deleteSession() {
     await reload();
   } catch (e) {
     toast(`Delete failed: ${e}`);
+  }
+}
+
+// ---- "Get URI" ----------------------------------------------------------
+// Every right-clickable thing that a nebula URI can name -- a session, an
+// artifact, a collection, an asset, a collection entry -- offers this, and
+// all of them come through one function so the four menus cannot drift
+// into disagreeing about what something is called.
+//
+// The URI is minted by the backend (`uri` op -> nebula.uris), never
+// assembled here: the owner comes from the archive's own archive.yaml, and
+// a front-end that guessed it would put the wrong name into whatever the
+// user pastes it into.
+
+async function showUri(spec, what) {
+  if (!archive) { toast("Open an archive first"); return; }
+  let info;
+  try {
+    info = await call("uri", Object.assign({ archive }, spec));
+  } catch (e) {
+    toast(/unknown op/.test(String(e))
+      ? "This build's Python sidecar predates URIs — rebuild it with ./build-sidecar.sh"
+      : String(e));
+    return;
+  }
+
+  $("uriWhat").innerHTML = `The nebula URI for <b>${escapeHtml(what || info.label || "")}</b>`;
+  const box = $("uriText");
+  box.value = info.uri || "";
+  $("uriMeta").textContent = info.ok
+    ? (info.path || "") + (info.path && !info.exists ? "  (nothing there right now)" : "")
+    : "";
+  const warn = $("uriWarn");
+  const notes = info.warnings || [];
+  warn.classList.toggle("hidden", !notes.length);
+  warn.innerHTML = notes.map((w) => escapeHtml(w)).join("<br><br>");
+  $("uriCopy").disabled = !info.uri;
+  showDialog("uriScrim");
+  // Selected on open, so Cmd-C works without touching the mouse and
+  // without depending on the clipboard API being available at all.
+  box.focus();
+  box.select();
+}
+
+// A whole selection at once. Copies rather than opening the dialog: there
+// is no single string to show, and a list of twenty is something you paste
+// somewhere, not something you read in a modal.
+async function copyUris(specs, label) {
+  if (!archive || !specs.length) return;
+  const lines = [];
+  for (const spec of specs) {
+    try {
+      const info = await call("uri", Object.assign({ archive }, spec));
+      if (info.uri) lines.push(info.uri);
+    } catch (e) { /* skip the ones that cannot be named */ }
+  }
+  if (!lines.length) { toast("No URI could be written for those"); return; }
+  try {
+    await navigator.clipboard.writeText(lines.join("\n"));
+    toast(`Copied ${lines.length} URI${lines.length === 1 ? "" : "s"}`);
+  } catch (e) {
+    toast("Could not reach the clipboard");
   }
 }
 
@@ -5415,7 +5495,14 @@ function initShortcuts() {
     .catch(() => {});
 
   document.addEventListener("keydown", (e) => {
-    if (e.key === "Escape") { closePops(null); return; }
+    if (e.key === "Escape") {
+      if ($("uriScrim").classList.contains("show")) {
+        $("uriScrim").classList.remove("show");
+        return;
+      }
+      closePops(null);
+      return;
+    }
     // Cmd/Ctrl-Enter commits: the open dialog's primary action, or the notes
     // editor you are typing in. Plain Enter is left alone -- it inserts a
     // newline in a comment box, which is a thing people do.
@@ -5562,6 +5649,29 @@ $("arcBrowse").onclick = async () => {
   const dir = await pickFolder("Where should the archive live?");
   if (dir) $("arcPath").value = dir;
 };
+// "Get URI". Closing is wired the same three ways every other dialog is
+// (button, backdrop, Escape) -- and Cmd-Enter reaches Copy for free via
+// confirmOpenDialog, which clicks the last enabled action.
+$("uriClose").onclick = () => $("uriScrim").classList.remove("show");
+$("uriScrim").onclick = (e) => {
+  if (e.target === $("uriScrim")) $("uriScrim").classList.remove("show");
+};
+$("uriCopy").onclick = async () => {
+  const text = $("uriText").value;
+  if (!text) return;
+  try {
+    await navigator.clipboard.writeText(text);
+    toast("URI copied");
+    $("uriScrim").classList.remove("show");
+  } catch (e) {
+    // No clipboard permission in this webview. The field is selected and
+    // focused already, so say the thing that still works rather than
+    // failing silently.
+    $("uriText").select();
+    toast("Could not reach the clipboard — press Cmd/Ctrl-C to copy");
+  }
+};
+
 $("xferClose").onclick = () => $("xferScrim").classList.remove("show");
 $("xferCancel").onclick = () => $("xferScrim").classList.remove("show");
 $("xferOk").onclick = runTransfer;
@@ -6022,6 +6132,10 @@ function assetContextMenu(x, y, id) {
       action: () => call("asset_reveal", { archive, asset_id: id }) },
     { separator: true },
     { label: "Save version…", action: () => openAssetCommit(a) },
+    { separator: true },
+    { label: "Get URI…", action: () => showUri({ asset: id }, a.name || id) },
+    // The compact form stays on the menu beside it: inside one archive it
+    // is what you actually want in a derived_from, and it is shorter.
     { label: "Copy reference", action: async () => {
         try {
           await navigator.clipboard.writeText(`assets/${id}`);

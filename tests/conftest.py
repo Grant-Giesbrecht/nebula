@@ -47,3 +47,21 @@ def isolated_registry(tmp_path_factory, monkeypatch):
     monkeypatch.setattr(registry_mod, "_default_registry", None)
     yield
     registry_mod._default_registry = None
+
+
+@pytest.fixture(autouse=True)
+def quiet_saves(monkeypatch):
+    """Silence the per-artifact save report for the whole suite.
+
+    `Session.artifact` prints what it saved -- URI, path, size, tags -- to
+    stdout by default, which is the right behaviour for a measurement
+    script and the wrong one inside a test that asserts on captured output.
+    Turned off here rather than in each fixture that happens to write an
+    artifact, because the tests that build one as *setup* are exactly the
+    ones that would not think to.
+
+    The announce tests set NEBULA_ANNOUNCE themselves; a later monkeypatch
+    in a test wins over this one. This is also the knob a user wants in
+    their own pytest suite, for the same reason.
+    """
+    monkeypatch.setenv("NEBULA_ANNOUNCE", "0")

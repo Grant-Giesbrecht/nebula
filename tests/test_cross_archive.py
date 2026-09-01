@@ -130,3 +130,77 @@ def test_downstream_stays_within_the_archive(two):
     nodes = _flatten(tree["branches"][0]["downstream"])
     assert nodes                                   # there is a chain to walk
     assert all(n["archive"] == tree["archive"] for n in nodes)
+
+
+# ---------------------------------------------------------------------
+# Owners in the tree
+# ---------------------------------------------------------------------
+# Same defect as in `graph`, in the GUI's own walk: it resolved a
+# cross-archive edge by registry *nickname*, which is machine-local, and
+# keyed nodes by archive name alone, which two people can share.
+
+def test_tree_nodes_carry_the_owner(two):
+    up_root, down_root = two
+    get_registry().register_archive(up_root)
+    a, b, c = _chain(up_root, down_root)
+
+    tree = model.provenance_tree(down_root, c.id, "fit.png",
+                                 direction="up", depth=5)
+    nodes = _flatten(tree["branches"][0]["upstream"])
+    assert nodes and all(n["user"] == "g@ncsu.edu" for n in nodes)
+    assert tree["branches"][0]["item"]["user"] == "g@ncsu.edu"
+
+
+def test_tree_follows_an_edge_into_someone_elses_archive(tmp_path):
+    """The URI names jane's archive; only her copy should be opened, even
+    though one of the same name is registered here."""
+    mine = tmp_path / "mine"
+    transfer.init_archive(mine, kind="standard", name="shared",
+                          user="me@here.edu")
+    theirs = tmp_path / "theirs"
+    transfer.init_archive(theirs, kind="standard", name="shared",
+                          user="jane@lab.edu")
+    local = tmp_path / "local"
+    transfer.init_archive(local, kind="standard", name="local",
+                          user="me@here.edu")
+    get_registry().register_archive(mine)
+    get_registry().register_archive(theirs)
+
+    src = nebula.new(theirs, description="raw", announce=False)
+    with src.artifact("raw.csv") as fn:
+        fn.write_text("x")
+    src.close()
+
+    fit = nebula.new(local, description="fit", announce=False)
+    with fit.artifact(
+            "fit.png",
+            derived_from=[f"nebula://jane@lab.edu/shared/{src.id}/raw.csv"]) as fn:
+        fn.write_text("z")
+    fit.close()
+
+    tree = model.provenance_tree(local, fit.id, "fit.png",
+                                 direction="up", depth=5)
+    node = _flatten(tree["branches"][0]["upstream"])[0]
+    assert node["user"] == "jane@lab.edu"
+    assert node["resolved"] is True
+    assert node["root"] == str(theirs)
+
+
+def test_a_foreign_archive_that_is_not_here_names_its_owner(tmp_path):
+    """"Not registered" is more useful when it says whose."""
+    local = tmp_path / "local"
+    transfer.init_archive(local, kind="standard", name="local",
+                          user="me@here.edu")
+    fit = nebula.new(local, description="fit", announce=False)
+    with fit.artifact(
+            "fit.png",
+            derived_from=["nebula://jane@lab.edu/shared/S-26-0001/raw.csv"]) as fn:
+        fn.write_text("z")
+    fit.close()
+
+    tree = model.provenance_tree(local, fit.id, "fit.png",
+                                 direction="up", depth=5)
+    node = _flatten(tree["branches"][0]["upstream"])[0]
+    assert node["resolved"] is False
+    assert node["user"] == "jane@lab.edu"
+    assert "jane@lab.edu" in node["note"] and "not registered" in node["note"]

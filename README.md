@@ -282,6 +282,8 @@ src/nebula/
     collection.py # nestable collections (<archive>/collections/*.yaml)
     views.py      # saved searches (<archive>/saved-searches/*.yaml)
     identity.py   # who you are, for nebula:// URIs
+    uris.py       # minting and resolving fully-qualified nebula:// URIs
+    archive_id.py # immutable archive ids: the durable half of a URI
     annotations.py # mutable user tags/comments (<session>/annotations.yaml)
     config.py     # per-archive settings (<archive>/archive.yaml)
     graph.py      # upstream()/downstream() provenance traversal, cross-archive aware
@@ -447,37 +449,133 @@ settings.
 
 ## Refs and nebula URIs
 
-A ref points at an artifact, a session, an archive or a collection. Two
-spellings, one meaning — and anything that accepts a ref accepts both,
-because `refs.py` is the only parser:
+A ref points at an artifact, a session, an archive, a collection or an
+asset. There is **one grammar**: `/`-separated segments, where you may drop
+a prefix of them and the missing ones mean "here" — an absolute path versus
+a relative one:
 
 ```
-raw.csv                                   same-session file
-S-26-0152                                 whole session, same archive
-S-26-0152/raw.csv                         session + file
-postdoc|S-26-0152/raw.csv                 another archive of your own
-collections/paper-2026                    a collection
-nebula://kai@lab/shared/S-26-0152/cal.json    someone else's archive
+raw.csv                                          this session
+S-26-0152                                        this archive
+S-26-0152/raw.csv                                this archive
+collections/paper-2026                           this archive
+assets/AF-26-0017                                this archive
+nebula://postdoc~0fe/S-26-0152/raw.csv           another archive of mine
+nebula://kai@lab/shared~1a2/S-26-0152/cal.json   someone else's
 ```
 
-The **user** segment exists because archive names are not globally unique:
-two colleagues can each keep a `measurements` archive, and without an owner
-a ref between them is ambiguous. Set yours once:
+The scheme marks where the path starts:
+
+> `nebula://` whenever you name an archive or a user. Bare when you are
+> inside this archive.
+
+Filesystems don't make you write `file:///` for a relative path, and neither
+does this — the commonest ref by far is a bare filename in a `derived_from`.
+Anything that accepts a ref accepts every spelling, because `refs.py` is the
+only parser.
+
+### `label~id`: why a rename doesn't break anything
+
+The archive segment carries a readable **label** and an immutable **id**:
+
+```
+nebula://grant@github.com/postdoc~0fe/S-26-1234/artifact.tome
+                          ^^^^^^^ ^^^
+                          label   id
+```
+
+The id is minted once and never changes. **It is what identifies the
+archive; the label is decorative and is never compared or resolved on.** So
+renaming an archive doesn't dangle a single ref ever written into it — the
+old URI still resolves, and asking for the URI again gives you today's
+label. Same idea as a Stack Overflow or Notion URL, where the slug is
+cosmetic and the id does the work.
+
+```
+nebula config postdoc --name thesis    # safe; existing refs keep resolving
+```
+
+An id is a *number* in hex with optional leading zeros, so `0fe`, `00fe` and
+`fe` are one id — normalising needs no lookup, and comparing two refs never
+touches the disk. It also means ids never have to be lengthened: `0fe` and
+`1a2b3c` were always in the same namespace. New archives get 3 characters
+and drift wider only if you accumulate thousands. See
+`docs/uri-grammar.md`.
+
+Archive names may not contain `~` (or `/ \ | : * ? " < >`, whitespace, or
+control characters) — checked when you pick one, never when reading an
+archive that predates the rule.
+
+### The user segment
+
+Archive names are not globally unique: two colleagues can each keep a
+`measurements` archive, and without an owner a ref between them is
+ambiguous. Set yours once:
 
 ```
 nebula whoami --set grant@ncsu.edu        # stored in ~/.nebula/identity.yaml
-nebula register shared /Volumes/kai/arc --user kai@lab
+nebula register /Volumes/kai/arc --user kai@lab
 ```
 
 `/` separates segments rather than `.` because filenames are full of dots
 (`run.2026-07-31.tar.gz`) — a dot could not tell the last two components
-apart. Segments therefore may not contain `/`, which is enforced at parse
-time.
+apart. Segments therefore may not contain `/`, enforced at parse time.
 
 Full URIs work in **every** relational context: `derived_from`,
-`related_runs`, and collection entries. A cross-user ref keeps its owner on
-disk (`user:` in the stored ref) instead of being flattened to an archive
-name.
+`related_runs`, and collection entries. A cross-archive ref keeps its owner
+and its id all the way down — in the stored ref, in the index, and through
+provenance traversal.
+
+Refs written in the old `postdoc|S-26-0152/raw.csv` spelling are still read,
+and rewritten to the new form the next time anything reformats them.
+
+### Getting one
+
+`nebula uri` mints the URI for anything an archive holds, and resolves one
+back to a path on this machine:
+
+```
+nebula uri postdoc S-26-0152 raw.csv   # -> nebula://grant@ncsu.edu/postdoc~0fe/S-26-0152/raw.csv
+nebula uri postdoc S-26-0152           # the whole session
+nebula uri postdoc --collection paper-2026
+nebula uri postdoc --asset AF-26-0017
+nebula uri nebula://kai@lab/shared~1a2/S-26-0152/cal.json   # where did that land here?
+```
+
+The URI alone goes to **stdout** and everything else (kind, path, caveats)
+to **stderr**, so it can be captured: `URI=$(nebula uri postdoc 152 raw.csv)`.
+`nebula show` and `nebula ls` also take a URI wherever they take an archive.
+
+In the Navigator, right-click any session, artifact, collection or asset →
+**Get URI**.
+
+And a script tells you as it saves:
+
+```
+saved raw.csv
+  uri:        nebula://grant@ncsu.edu/postdoc~0fe/S-26-0152/raw.csv
+  path:       ~/nebula/postdoc/data/2026/S-26-0152/raw.csv
+  size:       2.4 MB   sha256 81bf9fa83c6f…
+  session:    S-26-0152 — gain vs pump power
+  tags:       ruby, twpa
+  inputs:     gain=10, pump_dBm=-12
+```
+
+Turn it off per artifact (`s.artifact("x.csv", announce=False)`), per
+session (`nebula.session(..., announce=False)`), or process-wide with
+`NEBULA_ANNOUNCE=0` — worth setting in your own test suite.
+
+### How unique is it, really?
+
+Exactly as unique as its **owner**. `grant@local` — or a bare `grant`, which
+reads as the same thing — is a name two people can both have, so nebula says
+so rather than implying otherwise: `nebula uri` warns on stderr, the
+Navigator dialog shows the caveat beside the URI, and a save in an archive
+with no owner at all prints the *compact ref* instead of inventing one.
+Picking a real authority (`--set 0000-0003-2885-4801@orcid.org`,
+`--set you@github.com`, `--set you@your-institution.edu`) is what makes the
+warnings go away, and nothing else does. Nebula still verifies nothing —
+see `docs/identity-trust-roadmap.md`.
 
 ## Collections and saved searches
 
@@ -504,7 +602,7 @@ entries:
     note: the good warm-up run
   - ref: S-26-0034
   - ref: collections/rp23d-campaign      # names may contain spaces
-  - ref: nebula://kai@lab/shared/S-26-0002/cal.json
+  - ref: nebula://kai@lab/shared~1a2/S-26-0002/cal.json
 ```
 
 Nesting is by *reference*, so one collection can sit in several parents —
@@ -699,6 +797,10 @@ nebula archives [-l]                               # list registered archives
                                                    # (-l: kind, aliases, settings)
 nebula register <root> [nickname] [--git-org ORG] [--user WHO]
 nebula whoami [--set NAME]                         # your name in nebula:// URIs
+nebula uri <archive> [<run_id> [<file>]]           # the citable nebula:// URI
+nebula uri <archive> --collection NAME | --asset ID
+nebula uri nebula://<user>/<archive~id>/...        # ...or resolve one to a path
+nebula config <archive> --name NEW                 # rename; refs keep resolving
 nebula collection <archive> list|show|new|rename|rm|add|remove
 nebula search <archive> [query...] [--fields F,F] [--date-from D] [--date-to D]
                         [--sources script|external|unrecorded ...] [--json]
