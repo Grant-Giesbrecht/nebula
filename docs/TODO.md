@@ -78,6 +78,13 @@ in `main.js`, around the existing panels) covering the seven settings:
 - `cap_action: drop` discards snapshot *records*, which is not recoverable.
   Worth a confirmation rather than a bare dropdown.
 
+## Cleanup
+
+ - `nebula -h` order in which commands are listed seems arbitrary. Change order to something like alphabetical.
+ - `nebula archives` prints a `note: ...`. We're still developing the standard and have not deployed, so do not include any notes about prior unreleased versions.
+
+ - It is possibel (although you're not supposed to) to write to an intake session that has been imported. If you then unlock and re-import that intake, the now modified session is skipped and the added files are missed. This is a real gap, although admittedly someone would have gone out of their way to misuse the intake system.
+
 ---
 
 # Quality of life

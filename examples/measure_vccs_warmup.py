@@ -4,9 +4,10 @@ from stardust.tome import dict_to_tome
 from stardust.algorithm import randrange
 from pathlib import Path
 import nebula
+from nebula.cli import AUTO_INTAKE_NICKNAME
 
-ARCHIVE = "spielplatz"
-nebula.validate_archive(ARCHIVE) # Will raise and error if the archive cannot be
+ARCHIVE = AUTO_INTAKE_NICKNAME
+nebula.validate_archive(ARCHIVE) # Will raise and error if the archive cannot be resolved
 
 log = plf.LogPile()
 
@@ -16,7 +17,7 @@ log = plf.LogPile()
 # 	exit()
 # else:
 # 	log.info(f"DMM online.")
-# 
+#
 # # Configure DMM
 # dmm.set_measurement(DigitalMultimeter.MEAS_CURR_DC)
 # dmm.set_trigger_type(DigitalMultimeter.TRIG_SINGLE)
@@ -29,6 +30,7 @@ user_notes = input("What is the set voltage? how long has the DUT been powered o
 # Enter on an empty line when done.
 tags = nebula.input_tag(ARCHIVE)
 
+
 # nebula.session() with no run_id pops an interactive picker: it lists the
 # sessions you could append to (opened today, or still OPEN from before) so
 # you can add to a run in progress instead of spraying data across many
@@ -38,10 +40,10 @@ tags = nebula.input_tag(ARCHIVE)
 # if an exception propagates out of the with-block, so a script you Ctrl+C
 # out of leaves an honest record rather than a folder claiming to be done.
 with nebula.session(ARCHIVE, tags=tags, description="VCCS warm-up measurement") as s:
-
+	
 	fn = s.artifact_path("vccs_warm_up.tome")
 	lfn = fn.with_suffix(".log")
-
+	
 	t0 = datetime.datetime.now()
 	data = {"user_notes":user_notes, "timestamps":[], "dc_current_A": [], "t_s":[], "start_time":str(t0)}
 
@@ -68,9 +70,9 @@ with nebula.session(ARCHIVE, tags=tags, description="VCCS warm-up measurement") 
 			data['timestamps'].append(tss)
 			data['t_s'].append((ts-t0).total_seconds())
 			data['dc_current_A'].append(val)
-		
-		
-			
+	
+	
+	
 	# s.artifact() is the safe way to save: it hands you the path to write
 	# to, then writes the sidecar for you when the with-block exits -- so
 	# there's no separate write_meta_for() call to forget, and the inputs
@@ -83,12 +85,12 @@ with nebula.session(ARCHIVE, tags=tags, description="VCCS warm-up measurement") 
 		inputs={"user_notes": user_notes, "program_notes":"This is dummy data generated to test nebula, it is NOT real measured data."},
 	) as data_path:
 		dict_to_tome(data, data_path)
-
+	
 	# The log is a separate artifact derived from the same acquisition.
 	log.info(f'Saving log to file: {lfn}')
 	with s.artifact(lfn.name, derived_from=[fn.name]) as log_path:
 		log.save_plflog(log_path)
-
+	
 	# Anything you write with plain artifact_path() and forget to document
 	# still gets caught: on clean close the session auto-writes a
 	# provenance-only sidecar for any orphan file AND prints a warning
