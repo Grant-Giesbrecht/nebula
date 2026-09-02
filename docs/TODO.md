@@ -195,6 +195,45 @@ aliases can be applied retroactively — waiting costs nothing.
 
 ---
 
+## Google-style docstrings across the repo
+
+`src/nebula/tags.py` was converted 2026-09-02: every function there now has
+a summary line, the existing prose, and `Args:` / `Returns:` / `Raises:`
+sections. The rest of the package has not been touched, so the convention
+is currently one file deep.
+
+Where it stands across `src/nebula` (29 files, 809 functions/classes):
+
+- **336 have no docstring at all** — worst offenders `api.py` (57),
+  `cli.py` (44), `model.py` (25), `transfer.py` (20), `session.py` (19),
+  `assets.py` (18).
+- **456 more have prose but no `Args:` section**, which is the bulk of the
+  work: the description usually exists and is good, it just needs the
+  parameters, return value and raised exceptions broken out.
+
+Worth keeping in mind when it's picked up:
+
+- The prose is the valuable part and should survive. The conversion is
+  *addition* — summary line, keep the existing explanation as the body,
+  then the sections. Do not compress a paragraph that explains *why* into
+  a one-line `Args:` entry.
+- Private helpers count. `tags.py` documented `_split_tags` and
+  `_format_prompt` alongside the public surface; a reader picking up a
+  module cold needs those most.
+- Tests were deliberately left alone — the names carry the intent and most
+  of the suite has no docstrings today.
+- Sensible order is by reader value, not by count: `session.py` and
+  `api.py` are what a user meets first; `cli.py` is largely argparse
+  wiring where a one-liner is often the honest answer.
+- Nothing enforces this. If it should stay true, that is a separate
+  question (a lint rule such as pydocstyle/ruff `D`) and should be decided
+  once the bulk conversion is done, not before.
+
+Not urgent: no behaviour depends on it, and it does not get harder by
+waiting.
+
+---
+
 ## Index
 
 Larger questions live in their own documents:

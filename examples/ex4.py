@@ -27,7 +27,7 @@ with nebula.session(ARCHIVE, artifact_tags=art_tags) as sess:
 		
 		x_ = data_x[-1]
 		y_ = data_y[-1]
-		plf.info(f"Added x={x_}, y={y_}")
+		log.info(f"Added x={x_}, y={y_}")
 	
 	# Write one artifact
 	with sess.artifact("test.tome", tags="bulk_data") as art:
