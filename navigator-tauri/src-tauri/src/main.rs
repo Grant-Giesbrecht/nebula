@@ -352,6 +352,9 @@ fn install_menu(app: &tauri::App) -> tauri::Result<()> {
         .build(app)?;
     let archive = MenuItemBuilder::with_id("menu:archive", "Archive Management…")
         .build(app)?;
+    let code_store = MenuItemBuilder::with_id("menu:code-store", "Browse Code Store…")
+        .accelerator("F5")
+        .build(app)?;
     let reload = MenuItemBuilder::with_id("menu:reload", "Reload Archive")
         .accelerator("CmdOrCtrl+R")
         .build(app)?;
@@ -447,6 +450,7 @@ fn install_menu(app: &tauri::App) -> tauri::Result<()> {
         .item(&relations)
         .separator()
         .item(&archive)
+        .item(&code_store)
         .item(&index_item)
         .separator()
         .item(&reload)

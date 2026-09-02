@@ -5860,6 +5860,7 @@ const MENU_ACTIONS = {
   "tab-searches": () => setRailTab("views"),
   session: toggleSessionPanel,
   archive: openArchivePanel,
+  "code-store": openCodeStore,
   reload: refreshAll,
   import: startImport,
   open: openSelectedExternally,
@@ -5917,6 +5918,14 @@ function initShortcuts() {
     if (e.ctrlKey && e.key === "Tab") {
       e.preventDefault();
       cycleTab(e.shiftKey ? -1 : 1);
+      return;
+    }
+    // F5 carries no modifier, so it has to be read before the gate below.
+    // On macOS the menu item owns this accelerator and AppKit takes the key
+    // first; everywhere else this is the path that runs.
+    if (e.key === "F5" && !hasMod(e) && !e.altKey && !e.shiftKey) {
+      e.preventDefault();
+      runAction("code-store");
       return;
     }
     if (!hasMod(e) || e.altKey) return;
@@ -6180,6 +6189,7 @@ $("bulkTagRemove").oninput = () => {
   });
 };
 $("arcBtn").onclick = openArchivePanel;
+$("codeStoreBtn").onclick = openCodeStore;
 $("arcClose").onclick = () => $("arcScrim").classList.remove("show");
 $("arcScrim").onclick = (e) => { if (e.target === $("arcScrim")) $("arcScrim").classList.remove("show"); };
 $("cfmCancel").onclick = () => closeConfirm(false);

@@ -131,6 +131,22 @@ async function main() {
   ok(!$("codeStoreScrim").classList.contains("show"), "no dialog without an archive");
   ok(toasts.join(" ").includes("Open an archive"), "and it says why");
 
+  console.log("three ways in: toolbar button, F5, and the menu action");
+  run('archive = "postdoc";');
+  ok($("codeStoreBtn"), "the toolbar has a Code button");
+  await $("codeStoreBtn").onclick();
+  ok($("codeStoreScrim").classList.contains("show"), "the toolbar button opens it");
+  $("storeClose").onclick();
+  win.document.dispatchEvent(new win.KeyboardEvent("keydown", { key: "F5", bubbles: true }));
+  await tick();
+  ok($("codeStoreScrim").classList.contains("show"), "F5 opens it");
+  $("storeClose").onclick();
+  // The macOS menu item emits this id; it must stay in step with main.rs.
+  win.runAction("code-store");
+  await tick();
+  ok($("codeStoreScrim").classList.contains("show"), "the menu action opens it");
+  $("storeClose").onclick();
+
   console.log("openCodeStore renders repos, collapsed to paths");
   run('archive = "postdoc";');
   await win.openCodeStore();
