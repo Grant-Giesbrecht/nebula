@@ -1007,3 +1007,47 @@ body.panel-window .p-follow { -webkit-app-region:no-drag; }
 .id-status.good { color:var(--text-dim); }
 .id-status.warn { color:var(--warn); }
 .id-status.bad  { color:var(--err); }
+
+/* ---- captured-source viewer --------------------------------------------
+   Two panes: the snapshot's file tree, and the bytes of whichever file is
+   selected. Wider than the other dialogs because the content is code --
+   an 80-column line that wraps is a line you have to read twice. */
+.dialog.xwide { width:1040px; max-width:96vw; }
+.cv { display:flex; height:62vh; min-height:280px; border-top:1px solid var(--border);
+      border-bottom:1px solid var(--border); margin-top:10px; }
+.cv-tree { flex:0 0 300px; overflow:auto; padding:8px 4px 10px 8px; background:var(--panel-2);
+           border-right:1px solid var(--border); }
+.cv-pane { flex:1 1 auto; display:flex; flex-direction:column; min-width:0; }
+.cv-fhead { flex:0 0 auto; padding:8px 14px; border-bottom:1px solid var(--border);
+            display:flex; align-items:center; gap:8px; flex-wrap:wrap; font-size:12px;
+            color:var(--text-dim); }
+.cv-fhead .p { font-family:var(--mono); color:var(--text); overflow-wrap:anywhere; }
+.cv-fbody { flex:1 1 auto; overflow:auto; }
+
+/* Tree rows. Directories collapse; files select. Depth is padding, not
+   nesting, so a deep path never pushes its own name out of view. */
+.cv-row { display:flex; align-items:center; gap:5px; height:22px; border-radius:5px;
+          padding-right:6px; cursor:pointer; font-size:12px; color:var(--text-dim);
+          white-space:nowrap; }
+.cv-row:hover { background:var(--rail); }
+.cv-row.sel { background:var(--sel-bg); color:var(--sel); }
+.cv-row.dir { color:var(--text); font-weight:600; }
+.cv-row.repo { color:var(--text); font-weight:700; }
+.cv-row.gone { color:var(--miss); cursor:default; }
+.cv-row.gone:hover { background:transparent; }
+.cv-row .n { overflow:hidden; text-overflow:ellipsis; }
+.cv-tw { flex:0 0 12px; text-align:center; font-size:9px; color:var(--text-faint); }
+.cv-badge { font-size:9.5px; font-weight:700; letter-spacing:.04em; text-transform:uppercase;
+            padding:1px 5px; border-radius:4px; background:var(--accent-soft); color:var(--accent); }
+.cv-row.gone .cv-badge { background:var(--miss-bg); color:var(--miss); }
+
+/* The file itself: gutter and text scroll as one block, so the numbers
+   cannot drift out of step with the lines they number. */
+.cv-code { display:flex; align-items:flex-start; min-height:100%; }
+.cv-code pre { margin:0; font-family:var(--mono); font-size:12px; line-height:1.55; }
+.cv-nums { flex:0 0 auto; padding:10px 10px 14px 14px; text-align:right; color:var(--text-faint);
+           background:var(--panel-2); border-right:1px solid var(--border); user-select:none;
+           font-variant-numeric:tabular-nums; position:sticky; left:0; }
+.cv-text { flex:1 1 auto; padding:10px 16px 14px 12px; color:var(--text); white-space:pre; }
+.cv-empty { padding:22px 16px; font-size:12.5px; color:var(--text-faint); }
+.cv-note { margin-right:auto; font-size:11.5px; color:var(--text-faint); }

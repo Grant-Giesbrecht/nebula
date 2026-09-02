@@ -30,9 +30,9 @@ with nebula.session(ARCHIVE, artifact_tags=art_tags) as sess:
 		log.info(f"Added x={x_}, y={y_}")
 	
 	# Write one artifact
-	with sess.artifact("test.tome", tags="bulk_data") as art:
+	with sess.artifact("test.tome", tags=["bulk_data"]) as art:
 		dict_to_tome({"x":data_x, "y":data_y}, art)
 	
-	with sess.artifact("test.pylog", tags) as art:
+	with sess.artifact("test.pylog", tags=["log"]) as art:
 		log.save_plflog(art)
 	

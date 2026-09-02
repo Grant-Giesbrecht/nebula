@@ -720,6 +720,33 @@
     </div>
   </div>
 
+  <!-- "View files": a read-only look inside a captured-source snapshot.
+       Restoring writes a whole tree to disk to answer questions that are
+       usually about one line of one file; this answers them in place.
+       Deliberately shows no path into code/blobs -- those bytes are the
+       archive's only copy of what ran, and telling anyone where they live
+       is inviting an edit that nothing would catch. -->
+  <div class="scrim" id="codeScrim">
+    <div class="dialog xwide" role="dialog" aria-modal="true" aria-labelledby="codeHead">
+      <div class="dlg-head row" id="codeHead">
+        <span id="codeTitle">Captured source</span>
+        <button class="p-btn" id="codeX" title="Close">✕</button>
+      </div>
+      <div class="cv">
+        <div class="cv-tree" id="codeTree"></div>
+        <div class="cv-pane">
+          <div class="cv-fhead" id="codeFileHead"></div>
+          <div class="cv-fbody" id="codeFileBody"></div>
+        </div>
+      </div>
+      <div class="dlg-actions">
+        <span class="cv-note" id="codeNote"></span>
+        <button class="dbtn ghost" id="codeClose">Close</button>
+        <button class="dbtn fill" id="codeCopy">Copy file</button>
+      </div>
+    </div>
+  </div>
+
   <div class="ctxmenu hidden" id="ctxMenu"></div>
 
   <div class="toast" id="toast"></div>

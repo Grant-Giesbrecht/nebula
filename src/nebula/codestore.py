@@ -50,6 +50,11 @@ MANIFESTS = "manifests"
 #: module with a giant embedded table turning every run into a big write.
 DEFAULT_MAX_FILE_BYTES = 1 << 20
 
+#: How much of a stored file :func:`read_file` will hand back. Capture
+#: already refuses anything larger, so in practice this bounds only what a
+#: hand-edited manifest could ask a reader to pull into memory.
+VIEW_MAX_BYTES = 1 << 20
+
 
 # -- paths ----------------------------------------------------------------
 
@@ -392,20 +397,76 @@ def manifest_stats(archive_root, digest: str) -> Optional[dict]:
     for key in files:
         repos[key.split("/")[0]] = repos.get(key.split("/")[0], 0) + 1
 
-    present = sum(1 for blob in set(files.values())
-                  if blob_path(archive_root, blob).is_file())
+    # Which blobs are actually on disk, so the caller can both count them
+    # and say *which* files it cannot offer -- a viewer needs the names,
+    # not just the tally.
+    present_blobs = {blob for blob in set(files.values())
+                     if blob_path(archive_root, blob).is_file()}
+    missing = sorted(k for k, blob in files.items() if blob not in present_blobs)
     return {
         "id": digest,
         "short": digest[:12],
         "entry": manifest.get("entry"),
         "n_files": len(files),
         "n_blobs": len(set(files.values())),
-        "blobs_present": present,
+        "blobs_present": len(present_blobs),
+        "missing": missing,
         "repos": dict(sorted(repos.items(), key=lambda kv: (-kv[1], kv[0]))),
         "shared": shared,
         "unique": len(files) - shared,
         "files": dict(sorted(files.items())),
     }
+
+
+def read_file(archive_root, digest: str, key: str) -> dict:
+    """One file out of a snapshot, decoded for *reading*.
+
+    This is the "peek" half of the store: unlike :func:`restore` it writes
+    nothing and hands back no path into ``code/blobs``. The blob is the
+    only copy of those bytes the archive has, and a reader who can find it
+    is a reader who can edit it -- so callers get the content, not its
+    location.
+
+    `key` must be a literal path in this manifest's file list. Nothing here
+    joins it onto a directory, but taking only known keys keeps the op from
+    being steered into reading some other part of the archive.
+
+    Binary files are reported as such rather than decoded into mojibake:
+    the store holds source, but nothing stops a repo from containing a
+    .png, and a viewer showing 40kB of replacement characters is worse
+    than one saying "not text".
+    """
+    archive_root = Path(archive_root)
+    manifest = read_manifest(archive_root, digest)
+    if manifest is None:
+        raise FileNotFoundError(f"no code manifest {digest} in this archive")
+    files = manifest.get("files") or {}
+    if key not in files:
+        raise KeyError(f"{key!r} is not in snapshot {digest[:12]}")
+
+    blob = files[key]
+    out = {"ok": False, "path": key, "blob": blob, "entry": manifest.get("entry"),
+           "size": None, "binary": False, "truncated": False, "text": None,
+           "error": None}
+    path = blob_path(archive_root, blob)
+    if not path.is_file():
+        out["error"] = "this file's bytes are missing from the store"
+        return out
+
+    out["size"] = path.stat().st_size
+    with open(path, "rb") as f:
+        data = f.read(VIEW_MAX_BYTES)
+    out["truncated"] = out["size"] > len(data)
+    out["ok"] = True
+    # A NUL is the cheap, reliable tell; a decode failure is the rest.
+    if b"\0" in data:
+        out["binary"] = True
+        return out
+    try:
+        out["text"] = data.decode("utf-8")
+    except UnicodeDecodeError:
+        out["binary"] = True
+    return out
 
 
 def _safe_relpath(key: str) -> Optional[Path]:

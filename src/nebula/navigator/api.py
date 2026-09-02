@@ -374,6 +374,10 @@ def op_open_url(args: Dict[str, Any]) -> Dict[str, Any]:
     return {"dispatched": osutil.open_url(args["url"])}
 
 
+def op_code_file(args: Dict[str, Any]) -> Dict[str, Any]:
+    return model.code_file(args["archive"], args["code"], args["path"])
+
+
 def op_restore_code(args: Dict[str, Any]) -> Dict[str, Any]:
     return model.restore_code(args["archive"], args["code"], args["dest_parent"])
 
@@ -981,6 +985,7 @@ OPS = {
     "index_sweep": op_index_sweep,
     "resolve_refs": op_resolve_refs,
     "code_info": op_code_info,
+    "code_file": op_code_file,
     "restore_code": op_restore_code,
     "list_collections": op_list_collections,
     "collection_tree": op_collection_tree,

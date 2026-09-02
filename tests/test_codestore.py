@@ -633,3 +633,102 @@ def test_restore_rejects_path_traversal_in_a_manifest(tmp_path):
 def test_restore_unknown_snapshot_raises(tmp_path):
     with pytest.raises(FileNotFoundError):
         codestore.restore(tmp_path, "0" * 64, tmp_path / "out")
+
+
+# ---------------------------------------------------------------------
+# peeking: reading one file out of a snapshot without restoring it
+# ---------------------------------------------------------------------
+
+def test_read_file_returns_the_captured_text(tmp_path):
+    from nebula.navigator import model
+
+    archive = tmp_path / "archive"
+    run_id = _run_script(tmp_path / "repo", archive)
+    code = _sidecar(archive, run_id).produced_by.code
+
+    got = model.code_file(archive, code, "repo/helper.py")
+    assert got["ok"] and not got["binary"] and not got["truncated"]
+    assert "def helper()" in got["text"]
+    assert got["path"] == "repo/helper.py"
+    assert got["size"] == len(got["text"].encode())
+
+
+def test_read_file_sees_each_version_separately(tmp_path):
+    """Two snapshots of the same path hold different bytes, and reading is
+    per-snapshot -- otherwise the viewer would show the newest edit as if
+    it were what ran."""
+    archive = tmp_path / "archive"
+    repo = tmp_path / "repo"
+    first = _run_script(repo, archive)
+    (repo / "helper.py").write_text("VALUE = 99\n\ndef helper():\n    return VALUE\n")
+    second = _run_script(repo, archive)
+
+    old = codestore.read_file(archive, _sidecar(archive, first).produced_by.code,
+                              "repo/helper.py")
+    new = codestore.read_file(archive, _sidecar(archive, second).produced_by.code,
+                              "repo/helper.py")
+    assert "VALUE = 1\n" in old["text"] and "VALUE = 99" in new["text"]
+    assert old["blob"] != new["blob"]
+
+
+def test_read_file_reports_a_missing_blob(tmp_path):
+    archive = tmp_path / "archive"
+    run_id = _run_script(tmp_path / "repo", archive)
+    code = _sidecar(archive, run_id).produced_by.code
+    stats = codestore.manifest_stats(archive, code)
+    codestore.blob_path(archive, stats["files"]["repo/helper.py"]).unlink()
+
+    got = codestore.read_file(archive, code, "repo/helper.py")
+    assert got["ok"] is False and "missing from the store" in got["error"]
+    assert got["text"] is None
+
+
+def test_read_file_refuses_a_path_the_manifest_does_not_list(tmp_path):
+    """The key is the whole authorization: nothing outside this snapshot's
+    file list is readable through it."""
+    archive = tmp_path / "archive"
+    blob = codestore.store_blob(archive, b"print(1)\n")
+    code = codestore.store_manifest(archive, "r/a.py", {"r/a.py": blob})
+
+    with pytest.raises(KeyError):
+        codestore.read_file(archive, code, "r/b.py")
+    with pytest.raises(KeyError):
+        codestore.read_file(archive, code, "../../etc/passwd")
+
+
+def test_read_file_flags_binary_rather_than_mangling_it(tmp_path):
+    archive = tmp_path / "archive"
+    blob = codestore.store_blob(archive, b"\x89PNG\r\n\x1a\n\x00\x00sneaky")
+    code = codestore.store_manifest(archive, None, {"r/logo.png": blob})
+
+    got = codestore.read_file(archive, code, "r/logo.png")
+    assert got["ok"] and got["binary"] and got["text"] is None
+
+
+def test_read_file_truncates_an_oversized_blob(tmp_path, monkeypatch):
+    archive = tmp_path / "archive"
+    monkeypatch.setattr(codestore, "VIEW_MAX_BYTES", 16)
+    blob = codestore.store_blob(archive, b"a" * 100)
+    code = codestore.store_manifest(archive, None, {"r/big.py": blob})
+
+    got = codestore.read_file(archive, code, "r/big.py")
+    assert got["ok"] and got["truncated"]
+    assert got["size"] == 100 and len(got["text"]) == 16
+
+
+def test_read_file_unknown_snapshot_raises(tmp_path):
+    with pytest.raises(FileNotFoundError):
+        codestore.read_file(tmp_path, "0" * 64, "r/a.py")
+
+
+def test_manifest_stats_names_the_files_it_cannot_offer(tmp_path):
+    archive = tmp_path / "archive"
+    run_id = _run_script(tmp_path / "repo", archive)
+    code = _sidecar(archive, run_id).produced_by.code
+    stats = codestore.manifest_stats(archive, code)
+    assert stats["missing"] == []
+
+    codestore.blob_path(archive, stats["files"]["repo/helper.py"]).unlink()
+    stats = codestore.manifest_stats(archive, code)
+    assert stats["missing"] == ["repo/helper.py"]
+    assert stats["blobs_present"] == stats["n_blobs"] - 1

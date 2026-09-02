@@ -972,10 +972,19 @@ def _merge_tags(*groups) -> List[str]:
         if not group:
             continue
         if isinstance(group, str):
+            # Name the replacement rather than the API: the commonest
+            # form of this mistake is a *single* tag written as a string
+            # (tags="bulk_data"), where being pointed at split_tags()
+            # reads as "your one tag needs parsing" and buries the actual
+            # one-character fix. split_tags() still earns its mention for
+            # the case it is for -- a comma-separated string from a
+            # config file or an argv.
             raise TypeError(
                 f"tags must be a list of strings, not a single string "
-                f"({group!r}). Use nebula.annotations.split_tags({group!r}) "
-                f"to parse the comma-separated form, or pass a list."
+                f"({group!r}). Pass a list: tags="
+                f"{annotations.split_tags(group)!r}. (For a string that "
+                f"arrives comma-separated at runtime, "
+                f"nebula.annotations.split_tags() is what parses it.)"
             )
         merged.extend(group)
     return annotations.clean_tags(merged) if merged else []

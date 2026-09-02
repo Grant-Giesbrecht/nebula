@@ -3363,6 +3363,9 @@ function renderSidecarPanel() {
   body.querySelectorAll("[data-restore]").forEach((n) => {
     n.onclick = (ev) => { ev.stopPropagation(); restoreCode(n.getAttribute("data-restore")); };
   });
+  body.querySelectorAll("[data-view-code]").forEach((n) => {
+    n.onclick = (ev) => { ev.stopPropagation(); viewCode(n.getAttribute("data-view-code")); };
+  });
   if (selected) {
     const sessionPath = selected.session_path || (curSession && curSession.path);
     wireNotes("sc", sessionPath, selected.name, (saved) => {
@@ -4802,8 +4805,10 @@ function codeHTML(info) {
     (repoChips ? `<div class="chips">${repoChips}</div>` : "") +
     row("Storage", `${ci.shared} kept (already stored) · ${ci.unique} only in this snapshot`) +
     (missing > 0 ? noteBox("err", `${missing} file(s) listed by this snapshot are missing from the store`) : "") +
-    `<div class="grp-actions"><button class="dbtn ghost" data-restore="${escapeHtml(pb.code)}">
-       Restore files…</button></div>`);
+    `<div class="grp-actions">
+       <button class="dbtn ghost" data-view-code="${escapeHtml(pb.code)}">View files…</button>
+       <button class="dbtn ghost" data-restore="${escapeHtml(pb.code)}">Restore files…</button>
+     </div>`);
 }
 
 // Write the snapshot back out as real files, at their original paths, so
@@ -4820,6 +4825,178 @@ async function restoreCode(code) {
     toast(bits.join(" — "));
   } catch (e) {
     toast(`Restore failed: ${e}`);
+  }
+}
+
+// ---- reading a snapshot in place ----------------------------------------
+// Restoring answers "give me the tree back". Most questions are smaller
+// than that -- what did this line say, was this constant already wrong --
+// and this answers those without writing anything to disk.
+//
+// What it deliberately does not offer is the blob's location. The store
+// holds the only copy of the bytes that ran; anyone who can open that path
+// can edit it, and nothing in the archive would ever notice. So the viewer
+// hands out content, and restoring stays the way to get an editable tree.
+let codeView = null;
+
+async function viewCode(code) {
+  // The sidecar panel already fetched this snapshot's stats, and they
+  // carry the file list -- reuse them rather than making the dialog wait
+  // on a scan that just ran.
+  const cached = scInfo && scInfo.codeInfo;
+  let info = cached && cached.ok && cached.id === code ? cached : null;
+  if (!info) {
+    try {
+      info = await call("code_info", { archive, code });
+    } catch (e) {
+      toast(`Could not read the snapshot: ${e}`);
+      return;
+    }
+  }
+  if (!info.ok) { toast(info.error || "This snapshot is not in the archive"); return; }
+
+  codeView = {
+    code,
+    entry: info.entry || null,
+    files: Object.keys(info.files || {}).sort(),
+    missing: new Set(info.missing || []),
+    collapsed: new Set(),
+    sel: null,
+    file: null,
+  };
+  $("codeTitle").textContent = `Captured source — ${code.slice(0, 12)}`;
+  $("codeNote").textContent = `${codeView.files.length} file(s) — read-only`;
+  $("codeFileHead").innerHTML = "";
+  $("codeFileBody").innerHTML = `<div class="cv-empty">Choose a file.</div>`;
+  showDialog("codeScrim");
+  renderCodeTree();
+  // Open on the entry point: it is the file someone came here to read.
+  const first = codeView.files.includes(codeView.entry)
+    ? codeView.entry
+    : codeView.files.find((f) => !codeView.missing.has(f));
+  if (first) openCodeFile(first);
+}
+
+// Paths are flat strings in the manifest ("repo/src/mod.py"); this is the
+// only place that gives them back their shape.
+function codeTree(paths) {
+  const root = { dirs: new Map(), files: [] };
+  for (const p of paths) {
+    const parts = p.split("/");
+    let node = root;
+    for (const part of parts.slice(0, -1)) {
+      if (!node.dirs.has(part)) node.dirs.set(part, { dirs: new Map(), files: [] });
+      node = node.dirs.get(part);
+    }
+    node.files.push({ name: parts[parts.length - 1], path: p });
+  }
+  return root;
+}
+
+function renderCodeTree() {
+  const v = codeView;
+  if (!v) return;
+  const out = [];
+
+  const walk = (node, prefix, depth) => {
+    for (const [name, child] of [...node.dirs.entries()].sort((a, b) => a[0].localeCompare(b[0]))) {
+      const path = prefix ? `${prefix}/${name}` : name;
+      const shut = v.collapsed.has(path);
+      // The first segment is the repo the file came from, which is a
+      // different kind of thing from a directory inside it.
+      const cls = depth === 0 ? "repo" : "dir";
+      out.push(`<div class="cv-row ${cls}" data-cv-dir="${escapeHtml(path)}"
+          style="padding-left:${6 + depth * 13}px">
+          <span class="cv-tw">${shut ? "▶" : "▼"}</span>
+          <span class="n">${escapeHtml(name)}</span></div>`);
+      if (!shut) walk(child, path, depth + 1);
+    }
+    // The entry point sorts first among its siblings: it is the one file
+    // in a snapshot that is not there because something imported it.
+    const files = node.files.slice().sort((a, b) =>
+      (a.path === v.entry ? -1 : b.path === v.entry ? 1 : a.name.localeCompare(b.name)));
+    for (const f of files) {
+      const gone = v.missing.has(f.path);
+      const badge = f.path === v.entry ? `<span class="cv-badge">entry</span>`
+        : gone ? `<span class="cv-badge">missing</span>` : "";
+      out.push(`<div class="cv-row${gone ? " gone" : ""}${v.sel === f.path ? " sel" : ""}"
+          ${gone ? "" : `data-cv-file="${escapeHtml(f.path)}"`}
+          title="${escapeHtml(f.path)}${gone ? " — bytes missing from the store" : ""}"
+          style="padding-left:${6 + depth * 13}px">
+          <span class="cv-tw"></span>
+          <span class="n">${escapeHtml(f.name)}</span>${badge}</div>`);
+    }
+  };
+  walk(codeTree(v.files), "", 0);
+
+  const tree = $("codeTree");
+  tree.innerHTML = out.join("");
+  tree.querySelectorAll("[data-cv-dir]").forEach((n) => {
+    n.onclick = () => {
+      const path = n.getAttribute("data-cv-dir");
+      if (!v.collapsed.delete(path)) v.collapsed.add(path);
+      renderCodeTree();
+    };
+  });
+  tree.querySelectorAll("[data-cv-file]").forEach((n) => {
+    n.onclick = () => openCodeFile(n.getAttribute("data-cv-file"));
+  });
+}
+
+async function openCodeFile(path) {
+  const v = codeView;
+  if (!v) return;
+  v.sel = path;
+  v.file = null;
+  renderCodeTree();
+  $("codeFileHead").innerHTML = `<span class="p">${escapeHtml(path)}</span>`;
+  $("codeFileBody").innerHTML = `<div class="cv-empty">Reading…</div>`;
+  let got;
+  try {
+    got = await call("code_file", { archive, code: v.code, path });
+  } catch (e) {
+    if (v.sel === path) $("codeFileBody").innerHTML = noteBox("err", `${e}`);
+    return;
+  }
+  if (!codeView || codeView !== v || v.sel !== path) return;   // clicked past it
+  v.file = got;
+  renderCodeFile();
+}
+
+function renderCodeFile() {
+  const v = codeView, f = v && v.file;
+  if (!f) return;
+  const bits = [`<span class="p">${escapeHtml(f.path)}</span>`];
+  if (f.path === v.entry) bits.push(`<span class="cv-badge">entry point</span>`);
+  if (f.size !== null && f.size !== undefined) bits.push(`<span>${_human(f.size)}</span>`);
+  if (f.truncated) bits.push(`<span>showing the first part only</span>`);
+  $("codeFileHead").innerHTML = bits.join("");
+
+  const body = $("codeFileBody");
+  if (!f.ok) { body.innerHTML = noteBox("err", f.error || "could not read this file"); return; }
+  if (f.binary) {
+    body.innerHTML = noteBox("info", "This file is not text, so there is nothing to show. "
+      + "Restore the snapshot if you need the bytes.");
+    return;
+  }
+  // A trailing newline is a line ending, not an empty last line -- numbering
+  // it would claim the file has a line it does not.
+  const lines = (f.text || "").split("\n");
+  if (lines.length > 1 && lines[lines.length - 1] === "") lines.pop();
+  const nums = lines.map((_, i) => i + 1).join("\n");
+  body.innerHTML = `<div class="cv-code"><pre class="cv-nums">${nums}</pre>`
+    + `<pre class="cv-text">${escapeHtml(lines.join("\n"))}</pre></div>`;
+  body.scrollTop = 0;
+}
+
+async function copyCodeFile() {
+  const f = codeView && codeView.file;
+  if (!f || !f.ok || f.binary || f.text === null) return;
+  try {
+    await navigator.clipboard.writeText(f.text);
+    toast(f.truncated ? "Copied the part shown" : `Copied ${baseName(f.path)}`);
+  } catch (e) {
+    toast("Could not reach the clipboard");
   }
 }
 
@@ -5496,6 +5673,7 @@ function initShortcuts() {
 
   document.addEventListener("keydown", (e) => {
     if (e.key === "Escape") {
+      if ($("codeScrim").classList.contains("show")) { closeCodeView(); return; }
       if ($("uriScrim").classList.contains("show")) {
         $("uriScrim").classList.remove("show");
         return;
@@ -5671,6 +5849,13 @@ $("uriCopy").onclick = async () => {
     toast("Could not reach the clipboard — press Cmd/Ctrl-C to copy");
   }
 };
+
+// The captured-source viewer. Same three ways out as every other dialog.
+const closeCodeView = () => { $("codeScrim").classList.remove("show"); codeView = null; };
+$("codeClose").onclick = closeCodeView;
+$("codeX").onclick = closeCodeView;
+$("codeScrim").onclick = (e) => { if (e.target === $("codeScrim")) closeCodeView(); };
+$("codeCopy").onclick = copyCodeFile;
 
 $("xferClose").onclick = () => $("xferScrim").classList.remove("show");
 $("xferCancel").onclick = () => $("xferScrim").classList.remove("show");

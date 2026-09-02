@@ -1605,6 +1605,17 @@ def code_info(archive, code: str) -> dict:
     return stats
 
 
+def code_file(archive, code: str, path: str) -> dict:
+    """The text of one file inside a captured-source snapshot, for the
+    viewer. Reading a snapshot should not require restoring it to disk
+    first -- most of the time the question is "what did this line say?",
+    not "give me the tree back"."""
+    from nebula import codestore
+
+    root, _ = resolve(archive)
+    return codestore.read_file(root, code, path)
+
+
 def restore_code(archive, code: str, dest_parent) -> dict:
     """Restore a captured-source snapshot into a fresh folder under
     `dest_parent`, named after the snapshot so two restores never collide."""
