@@ -201,3 +201,54 @@ def test_remove_tags_string_raises_instead_of_splitting_into_letters(tmp_path):
     s.close()
     with pytest.raises(TypeError, match=r"list of strings"):
         remove_tags(s.path, None, "ruby, twpa")
+
+
+# ---------------------------------------------------------------------
+# fixed=: tags the calling script adds regardless of what the user types.
+# ---------------------------------------------------------------------
+
+def test_input_tag_fixed_always_present_and_disclosed(tmp_path, monkeypatch, capsys):
+    archive = tmp_path / "archive"
+    _feed_input(monkeypatch, ["warmup", "/done"])
+    result = input_tag(archive, fixed=["sweep7"])
+    out = capsys.readouterr().out
+    assert result == ["sweep7", "warmup"]
+    assert "Always added" in out and "sweep7" in out
+
+
+def test_input_tag_fixed_survives_remove_and_clear(tmp_path, monkeypatch, capsys):
+    archive = tmp_path / "archive"
+    _feed_input(monkeypatch, ["a", "/remove sweep7", "/clear", "b", ""])
+    result = input_tag(archive, fixed=["sweep7"])
+    out = capsys.readouterr().out
+    assert result == ["sweep7", "b"]
+    assert "can't remove it" in out
+
+
+def test_input_tag_fixed_not_duplicated_by_initial_or_typing(tmp_path, monkeypatch):
+    archive = tmp_path / "archive"
+    _feed_input(monkeypatch, ["sweep7, extra", "/done"])
+    assert input_tag(archive, initial=["sweep7"], fixed=["sweep7"]) == ["sweep7", "extra"]
+
+
+def test_input_tag_non_interactive_returns_fixed_plus_initial(tmp_path, monkeypatch):
+    archive = tmp_path / "archive"
+
+    def eof_input(prompt=""):
+        raise EOFError
+
+    monkeypatch.setattr(builtins, "input", eof_input)
+    assert input_tag(archive, initial=["preset"], fixed=["sweep7"]) == ["sweep7", "preset"]
+
+
+def test_input_tag_fixed_string_raises_instead_of_splitting_into_letters(tmp_path):
+    archive = tmp_path / "archive"
+    with pytest.raises(TypeError, match=r"list of tag strings"):
+        input_tag(archive, fixed="ruby, twpa")
+
+
+def test_input_tag_prompt_shows_fixed_tags(tmp_path, monkeypatch):
+    from nebula import tags as tags_mod
+
+    line = tags_mod._format_prompt("tags", ["sweep7"], ["warmup"], False, False)
+    assert line == "tags [always: sweep7 | warmup]> "

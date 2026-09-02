@@ -10,7 +10,7 @@ ARCHIVE = AUTO_INTAKE_NICKNAME
 nebula.validate_archive(ARCHIVE)
 
 # Get tags from user for the ARTIFACTS produced by this run
-art_tags = nebula.input_tag(ARCHIVE)
+art_tags = nebula.input_tag(ARCHIVE, initial=["twpa-gain", "sweep-pump-freq"])
 
 # If a new session is created, it will ask for tags and a description. Otehrwise
 # it will just go ahead and rip.
