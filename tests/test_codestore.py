@@ -732,3 +732,130 @@ def test_manifest_stats_names_the_files_it_cannot_offer(tmp_path):
     stats = codestore.manifest_stats(archive, code)
     assert stats["missing"] == ["repo/helper.py"]
     assert stats["blobs_present"] == stats["n_blobs"] - 1
+
+
+# ---------------------------------------------------------------------
+# browsing the whole store: repo -> file -> versions -> what used them
+# ---------------------------------------------------------------------
+
+def _paths_of(tree, repo):
+    r = next(x for x in tree["repos"] if x["name"] == repo)
+    return {p["path"]: p for p in r["paths"]}
+
+
+def test_store_tree_groups_by_repo_and_path(tmp_path):
+    from nebula.navigator import model
+
+    archive = tmp_path / "archive"
+    _run_script(tmp_path / "repo", archive)
+
+    tree = model.code_store_tree(archive)
+    assert [r["name"] for r in tree["repos"]] == ["repo"]
+    paths = _paths_of(tree, "repo")
+    assert set(paths) == {"repo/run.py", "repo/helper.py"}
+    assert paths["repo/helper.py"]["name"] == "helper.py"     # repo prefix stripped
+    assert tree["n_paths"] == 2 and tree["n_snapshots"] == 1
+
+
+def test_store_tree_splits_a_path_into_its_versions(tmp_path):
+    """The point of the browser: one file, every version of it the archive
+    still holds, and what ran each."""
+    from nebula.navigator import model
+
+    archive = tmp_path / "archive"
+    repo = tmp_path / "repo"
+    first = _run_script(repo, archive)
+    (repo / "helper.py").write_text("VALUE = 99\n\ndef helper():\n    return VALUE\n")
+    second = _run_script(repo, archive)
+
+    helper = _paths_of(model.code_store_tree(archive), "repo")["repo/helper.py"]
+    assert helper["n_versions"] == 2
+    newest, oldest = helper["versions"]
+    assert [a["run_id"] for a in newest["artefacts"]] == [second]
+    assert [a["run_id"] for a in oldest["artefacts"]] == [first]
+    assert newest["first_seen"] >= oldest["first_seen"]        # newest first
+    assert codestore.read_blob(archive, oldest["blob"])["text"].startswith("VALUE = 1\n")
+    assert codestore.read_blob(archive, newest["blob"])["text"].startswith("VALUE = 99")
+
+
+def test_store_tree_lists_every_artefact_that_ran_a_version(tmp_path):
+    """A version reused by two runs names both -- that reuse is the whole
+    reason the store is small, and the browser is where it becomes visible."""
+    from nebula.navigator import model
+
+    archive = tmp_path / "archive"
+    repo = tmp_path / "repo"
+    first = _run_script(repo, archive)
+    (repo / "helper.py").write_text("VALUE = 99\n\ndef helper():\n    return VALUE\n")
+    second = _run_script(repo, archive)
+
+    # run.py did not change between the two runs, so both snapshots name
+    # the same blob -- one version, two artefacts.
+    run_py = _paths_of(model.code_store_tree(archive), "repo")["repo/run.py"]
+    assert run_py["n_versions"] == 1
+    version = run_py["versions"][0]
+    assert version["n_snapshots"] == 2
+    assert [a["run_id"] for a in version["artefacts"]] == [first, second]
+    for artefact in version["artefacts"]:
+        assert artefact["filename"] == "d.csv"
+        assert Path(artefact["session_path"]).name == artefact["run_id"]
+        assert artefact["trashed"] is False
+
+
+def test_store_tree_marks_the_entry_point(tmp_path):
+    from nebula.navigator import model
+
+    archive = tmp_path / "archive"
+    _run_script(tmp_path / "repo", archive)
+
+    paths = _paths_of(model.code_store_tree(archive), "repo")
+    assert all(v["entry"] for v in paths["repo/run.py"]["versions"])
+    assert not any(v["entry"] for v in paths["repo/helper.py"]["versions"])
+
+
+def test_store_tree_shows_versions_nothing_references(tmp_path):
+    """An unreferenced version is exactly what gc would delete; it has no
+    derivable date, so it sorts last and says so by having none."""
+    from nebula.navigator import model
+
+    archive = tmp_path / "archive"
+    _run_script(tmp_path / "repo", archive)
+    blob = codestore.store_blob(archive, b"VALUE = 0\n")
+    codestore.store_manifest(archive, None, {"repo/helper.py": blob})
+
+    helper = _paths_of(model.code_store_tree(archive), "repo")["repo/helper.py"]
+    assert helper["n_versions"] == 2
+    orphan = helper["versions"][-1]
+    assert orphan["blob"] == blob
+    assert orphan["artefacts"] == [] and orphan["first_seen"] is None
+
+
+def test_store_tree_reports_missing_bytes(tmp_path):
+    from nebula.navigator import model
+
+    archive = tmp_path / "archive"
+    run_id = _run_script(tmp_path / "repo", archive)
+    code = _sidecar(archive, run_id).produced_by.code
+    stats = codestore.manifest_stats(archive, code)
+    codestore.blob_path(archive, stats["files"]["repo/helper.py"]).unlink()
+
+    tree = model.code_store_tree(archive)
+    version = _paths_of(tree, "repo")["repo/helper.py"]["versions"][0]
+    assert version["present"] is False and version["size"] is None
+    assert tree["n_missing"] == 1
+
+
+def test_store_tree_is_empty_for_an_archive_with_no_captured_source(tmp_path):
+    from nebula.navigator import model
+
+    archive = tmp_path / "archive"
+    nebula.new(archive, description="no code here").close()
+    tree = model.code_store_tree(archive)
+    assert tree["repos"] == [] and tree["n_paths"] == 0
+
+
+def test_read_blob_refuses_anything_that_is_not_a_digest(tmp_path):
+    with pytest.raises(ValueError):
+        codestore.read_blob(tmp_path, "../../etc/passwd")
+    with pytest.raises(ValueError):
+        codestore.read_blob(tmp_path, "abc")

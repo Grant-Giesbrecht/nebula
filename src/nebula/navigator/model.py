@@ -1616,6 +1616,130 @@ def code_file(archive, code: str, path: str) -> dict:
     return codestore.read_file(root, code, path)
 
 
+def code_blob(archive, blob: str) -> dict:
+    """The text of one stored version, addressed by its digest -- what the
+    store browser reads, where a path may have many versions and no single
+    snapshot is the right one to name."""
+    from nebula import codestore
+
+    root, _ = resolve(archive)
+    return codestore.read_blob(root, blob)
+
+
+def code_store_tree(archive) -> dict:
+    """Everything the code store holds, arranged the way someone asks
+    about it: repo, then file, then the versions of that file, then the
+    artifacts that ran each version.
+
+    The store is content-addressed and deduped, which makes it compact but
+    unbrowsable on disk -- ``code/blobs/a3/f1/a3f1...`` says nothing about
+    what it is. This is the other view of the same bytes.
+
+    Two passes: every manifest (what versions exist) and every sidecar
+    (which artifact used which snapshot). That is the same order of work as
+    `nebula check`, so it is an explicit action rather than something a
+    panel does on open.
+
+    On ordering: a manifest deliberately records no timestamps (see
+    nebula.codestore's module docstring -- anything per-run would defeat
+    the dedupe), so the store cannot say when a version was captured. What
+    it can say is when the earliest artifact that used it was created, and
+    versions are ordered by that. It is a derived date, and it is labelled
+    as one; a version no live artifact references has none at all.
+    """
+    from nebula import codestore
+    from nebula.sidecar import SIDECAR_SUFFIX
+
+    root, _ = resolve(archive)
+
+    # Pass 1: what the store holds. path -> blob -> the snapshots naming it.
+    entries: Dict[str, Optional[str]] = {}
+    path_versions: Dict[str, Dict[str, set]] = {}
+    for digest, manifest in codestore.iter_manifests(root):
+        entries[digest] = manifest.get("entry")
+        for key, blob in (manifest.get("files") or {}).items():
+            path_versions.setdefault(key, {}).setdefault(blob, set()).add(digest)
+
+    # Pass 2: who used it. Trashed sessions are included and flagged --
+    # they are why an otherwise unreferenced snapshot is still here, and gc
+    # counts them as live for exactly that reason.
+    users: Dict[str, List[dict]] = {}
+    for sidecar_path in codestore.iter_sidecar_files(root):
+        try:
+            data = json.loads(sidecar_path.read_text())
+        except (OSError, ValueError):
+            continue
+        code = (data.get("produced_by") or {}).get("code")
+        if not code:
+            continue
+        session_dir = sidecar_path.parent
+        users.setdefault(code, []).append({
+            "run_id": session_dir.name,
+            "session_path": str(session_dir),
+            "filename": sidecar_path.name[: -len(SIDECAR_SUFFIX)],
+            "created": data.get("created"),
+            "trashed": ".trash" in sidecar_path.parts,
+        })
+
+    sizes: Dict[str, Optional[int]] = {}
+    repos: Dict[str, List[dict]] = {}
+    n_versions = 0
+    for key in sorted(path_versions):
+        repo, _, rel = key.partition("/")
+        versions = []
+        for blob, digests in path_versions[key].items():
+            if blob not in sizes:
+                path = codestore.blob_path(root, blob)
+                sizes[blob] = path.stat().st_size if path.is_file() else None
+            artefacts: List[dict] = []
+            is_entry = False
+            for digest in sorted(digests):
+                is_entry = is_entry or entries.get(digest) == key
+                artefacts.extend(users.get(digest, []))
+            # Oldest first, so the first artifact is also the earliest date
+            # this version is known to have existed by.
+            artefacts.sort(key=lambda a: (_parse_timestamp(a["created"]) or float("inf"),
+                                          a["run_id"], a["filename"]))
+            first_seen = next((a["created"] for a in artefacts if a["created"]), None)
+            versions.append({
+                "blob": blob,
+                "short": blob[:12],
+                "size": sizes[blob],
+                "present": sizes[blob] is not None,
+                "entry": is_entry,
+                "snapshots": sorted(digests),
+                "n_snapshots": len(digests),
+                "first_seen": first_seen,
+                "artefacts": artefacts,
+                "n_artefacts": len(artefacts),
+            })
+        # Newest first: the version someone is looking for is usually the
+        # last one that ran. Undated (unreferenced) versions sort last.
+        versions.sort(key=lambda v: (_parse_timestamp(v["first_seen"]) or float("-inf"),
+                                     v["blob"]), reverse=True)
+        n_versions += len(versions)
+        repos.setdefault(repo, []).append({
+            "path": key,
+            "name": rel or key,
+            "n_versions": len(versions),
+            "n_artefacts": sum(v["n_artefacts"] for v in versions),
+            "versions": versions,
+        })
+
+    return {
+        "repos": [{"name": name, "paths": paths, "n_paths": len(paths),
+                   "n_versions": sum(p["n_versions"] for p in paths)}
+                  for name, paths in sorted(repos.items())],
+        "n_repos": len(repos),
+        "n_paths": len(path_versions),
+        "n_versions": n_versions,
+        "n_snapshots": len(entries),
+        "n_blobs": len(sizes),
+        "n_missing": sum(1 for size in sizes.values() if size is None),
+        "store_dir": str(root / codestore.CODE_DIR),
+    }
+
+
 def restore_code(archive, code: str, dest_parent) -> dict:
     """Restore a captured-source snapshot into a fresh folder under
     `dest_parent`, named after the snapshot so two restores never collide."""

@@ -431,10 +431,6 @@ def read_file(archive_root, digest: str, key: str) -> dict:
     joins it onto a directory, but taking only known keys keeps the op from
     being steered into reading some other part of the archive.
 
-    Binary files are reported as such rather than decoded into mojibake:
-    the store holds source, but nothing stops a repo from containing a
-    .png, and a viewer showing 40kB of replacement characters is worse
-    than one saying "not text".
     """
     archive_root = Path(archive_root)
     manifest = read_manifest(archive_root, digest)
@@ -453,6 +449,15 @@ def read_file(archive_root, digest: str, key: str) -> dict:
         out["error"] = "this file's bytes are missing from the store"
         return out
 
+    _decode_into(out, path)
+    return out
+
+
+def _decode_into(out: dict, path: Path) -> dict:
+    """Fill a read result from a blob on disk. Binary files are reported as
+    such rather than decoded into mojibake: the store holds source, but
+    nothing stops a repo from containing a .png, and a viewer showing 40kB
+    of replacement characters is worse than one saying "not text"."""
     out["size"] = path.stat().st_size
     with open(path, "rb") as f:
         data = f.read(VIEW_MAX_BYTES)
@@ -467,6 +472,50 @@ def read_file(archive_root, digest: str, key: str) -> dict:
     except UnicodeDecodeError:
         out["binary"] = True
     return out
+
+
+def read_blob(archive_root, blob: str) -> dict:
+    """The same peek as :func:`read_file`, addressed by blob rather than by
+    (snapshot, path).
+
+    The store browser reaches a file the other way round -- it is looking
+    at one *version* of a path, which may be shared by many snapshots, so
+    naming one of them to read it would be arbitrary. The digest is checked
+    for shape before it is turned into a path: it arrives from a caller,
+    and a digest is the only thing this is ever allowed to be.
+    """
+    if not _is_digest(blob):
+        raise ValueError(f"{blob!r} is not a blob digest")
+    out = {"ok": False, "blob": blob, "size": None, "binary": False,
+           "truncated": False, "text": None, "error": None}
+    path = blob_path(Path(archive_root), blob)
+    if not path.is_file():
+        out["error"] = "these bytes are missing from the store"
+        return out
+    _decode_into(out, path)
+    return out
+
+
+def _is_digest(value: str) -> bool:
+    return (isinstance(value, str) and len(value) == 64
+            and all(c in "0123456789abcdef" for c in value))
+
+
+def iter_manifests(archive_root):
+    """(digest, manifest) for every snapshot in the store.
+
+    Manifests are immutable and content-addressed, so this needs no
+    freshness check of any kind: an id read here means exactly what it
+    meant when it was written.
+    """
+    for path in _iter_stored(Path(archive_root), MANIFESTS):
+        if path.suffix != ".json":
+            continue
+        try:
+            data = json.loads(path.read_text())
+        except (OSError, ValueError):
+            continue        # check reports an unreadable manifest
+        yield path.stem, data
 
 
 def _safe_relpath(key: str) -> Optional[Path]:
@@ -544,7 +593,7 @@ def restore(archive_root, digest: str, dest_dir) -> dict:
 
 # -- reachability, for check and gc ---------------------------------------
 
-def _iter_sidecar_files(archive_root: Path, *, include_trash: bool = True):
+def iter_sidecar_files(archive_root: Path, *, include_trash: bool = True):
     from nebula.sidecar import SIDECAR_SUFFIX
 
     for path in Path(archive_root).rglob(f"*{SIDECAR_SUFFIX}"):
@@ -560,7 +609,7 @@ def referenced_manifests(archive_root, *, include_trash: bool = True) -> Dict[st
     be restored, and deleting its code would make that restore a lie.
     """
     out: Dict[str, List[str]] = {}
-    for path in _iter_sidecar_files(Path(archive_root), include_trash=include_trash):
+    for path in iter_sidecar_files(Path(archive_root), include_trash=include_trash):
         try:
             data = json.loads(path.read_text())
         except (OSError, ValueError):

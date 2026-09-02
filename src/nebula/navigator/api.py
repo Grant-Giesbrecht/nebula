@@ -378,6 +378,14 @@ def op_code_file(args: Dict[str, Any]) -> Dict[str, Any]:
     return model.code_file(args["archive"], args["code"], args["path"])
 
 
+def op_code_blob(args: Dict[str, Any]) -> Dict[str, Any]:
+    return model.code_blob(args["archive"], args["blob"])
+
+
+def op_code_store_tree(args: Dict[str, Any]) -> Dict[str, Any]:
+    return model.code_store_tree(args["archive"])
+
+
 def op_restore_code(args: Dict[str, Any]) -> Dict[str, Any]:
     return model.restore_code(args["archive"], args["code"], args["dest_parent"])
 
@@ -986,6 +994,8 @@ OPS = {
     "resolve_refs": op_resolve_refs,
     "code_info": op_code_info,
     "code_file": op_code_file,
+    "code_blob": op_code_blob,
+    "code_store_tree": op_code_store_tree,
     "restore_code": op_restore_code,
     "list_collections": op_list_collections,
     "collection_tree": op_collection_tree,

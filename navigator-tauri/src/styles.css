@@ -1051,3 +1051,28 @@ body.panel-window .p-follow { -webkit-app-region:no-drag; }
 .cv-text { flex:1 1 auto; padding:10px 16px 14px 12px; color:var(--text); white-space:pre; }
 .cv-empty { padding:22px 16px; font-size:12.5px; color:var(--text-faint); }
 .cv-note { margin-right:auto; font-size:11.5px; color:var(--text-faint); }
+
+/* The store browser: the same two panes, plus a filter over a tree that
+   can be the whole archive's worth of files, and the list of artefacts
+   that ran whichever version is selected. */
+.cv-side { flex:0 0 340px; display:flex; flex-direction:column; min-width:0;
+           border-right:1px solid var(--border); background:var(--panel-2); }
+.cv-side .cv-tree { flex:1 1 auto; border-right:none; }
+.cv-filter { flex:0 0 auto; margin:8px 8px 4px; height:28px; border-radius:7px; font-size:12px;
+             border:1px solid var(--border-strong); background:var(--panel); color:var(--text);
+             padding:0 9px; font-family:var(--ui); }
+.cv-filter:focus { outline:2px solid var(--accent); outline-offset:-1px; border-color:var(--accent); }
+.cv-count { margin-left:auto; padding-left:8px; font-size:10.5px; color:var(--text-faint);
+            font-variant-numeric:tabular-nums; }
+.cv-row.ver { font-family:var(--mono); font-size:11px; }
+.cv-row.ver .when { font-family:var(--ui); font-size:10.5px; color:var(--text-faint); }
+.cv-users { flex:0 0 auto; max-height:132px; overflow:auto; padding:7px 14px 9px;
+            border-bottom:1px solid var(--border); font-size:12px; }
+.cv-users .h { font-size:10.5px; font-weight:700; letter-spacing:.06em; text-transform:uppercase;
+               color:var(--text-faint); margin-bottom:4px; }
+.cv-users .u { display:flex; align-items:center; gap:7px; height:20px; color:var(--text-dim); }
+.cv-users .u.go { cursor:pointer; }
+.cv-users .u.go:hover { color:var(--accent); }
+.cv-users .u .nm { font-family:var(--mono); overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.cv-users .u .when { font-size:11px; color:var(--text-faint); margin-left:auto; padding-left:10px;
+                     white-space:nowrap; }

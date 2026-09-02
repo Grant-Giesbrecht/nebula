@@ -747,6 +747,35 @@
     </div>
   </div>
 
+  <!-- "Browse code store": the same bytes as the viewer above, reached
+       from the other end. On disk the store is content-addressed and so
+       unbrowsable by hand (code/blobs/a3/f1/a3f1... says nothing about
+       what it is); this is repo, file, version, and what ran each. -->
+  <div class="scrim" id="codeStoreScrim">
+    <div class="dialog xwide" role="dialog" aria-modal="true" aria-labelledby="storeHead">
+      <div class="dlg-head row" id="storeHead">
+        <span id="storeTitle">Code store</span>
+        <button class="p-btn" id="storeX" title="Close">✕</button>
+      </div>
+      <div class="cv">
+        <div class="cv-side">
+          <input class="cv-filter" id="storeFilter" placeholder="Filter files…" spellcheck="false">
+          <div class="cv-tree" id="storeTree"></div>
+        </div>
+        <div class="cv-pane">
+          <div class="cv-fhead" id="storeFileHead"></div>
+          <div class="cv-users" id="storeUsers"></div>
+          <div class="cv-fbody" id="storeFileBody"></div>
+        </div>
+      </div>
+      <div class="dlg-actions">
+        <span class="cv-note" id="storeNote"></span>
+        <button class="dbtn ghost" id="storeClose">Close</button>
+        <button class="dbtn fill" id="storeCopy">Copy file</button>
+      </div>
+    </div>
+  </div>
+
   <div class="ctxmenu hidden" id="ctxMenu"></div>
 
   <div class="toast" id="toast"></div>

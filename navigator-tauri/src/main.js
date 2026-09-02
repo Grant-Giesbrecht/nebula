@@ -4242,6 +4242,7 @@ function renderArchivePanel() {
     row("Size", code.human || "0 B") +
     pathRow("Folder", code.dir) +
     `<div class="mg-actions">
+       <button class="dbtn ghost" id="arcBrowseCode">Browse code store…</button>
        <button class="dbtn ghost" id="arcGc">Find unreferenced (dry run)</button>
        ${gcPreview && (gcPreview.manifests.length || gcPreview.blobs.length)
          ? `<button class="dbtn danger" id="arcGcDelete">Delete ${gcPreview.manifests.length + gcPreview.blobs.length} object(s)</button>`
@@ -4274,6 +4275,7 @@ function renderArchivePanel() {
                       label: curSession ? curSession.run_id : "archive" });
   };
   $("arcCheck").onclick = runCheck;
+  $("arcBrowseCode").onclick = openCodeStore;
   $("arcGc").onclick = () => runGc(false);
   if ($("arcGcDelete")) $("arcGcDelete").onclick = () => runGc(true);
 }
@@ -4917,8 +4919,10 @@ function renderCodeTree() {
       (a.path === v.entry ? -1 : b.path === v.entry ? 1 : a.name.localeCompare(b.name)));
     for (const f of files) {
       const gone = v.missing.has(f.path);
-      const badge = f.path === v.entry ? `<span class="cv-badge">entry</span>`
-        : gone ? `<span class="cv-badge">missing</span>` : "";
+      // Both can be true at once, and "the entry point is the file we
+      // lost" is precisely the case worth seeing.
+      const badge = (f.path === v.entry ? `<span class="cv-badge">entry</span>` : "")
+        + (gone ? `<span class="cv-badge">missing</span>` : "");
       out.push(`<div class="cv-row${gone ? " gone" : ""}${v.sel === f.path ? " sel" : ""}"
           ${gone ? "" : `data-cv-file="${escapeHtml(f.path)}"`}
           title="${escapeHtml(f.path)}${gone ? " — bytes missing from the store" : ""}"
@@ -4973,20 +4977,27 @@ function renderCodeFile() {
   $("codeFileHead").innerHTML = bits.join("");
 
   const body = $("codeFileBody");
-  if (!f.ok) { body.innerHTML = noteBox("err", f.error || "could not read this file"); return; }
+  body.innerHTML = codeBodyHTML(f);
+  body.scrollTop = 0;
+}
+
+// How a stored file looks once it has been read. Shared by the snapshot
+// viewer and the store browser: they reach a file by different routes, but
+// what they show of it is the same thing.
+function codeBodyHTML(f) {
+  if (!f) return `<div class="cv-empty">Choose a file.</div>`;
+  if (!f.ok) return noteBox("err", f.error || "could not read this file");
   if (f.binary) {
-    body.innerHTML = noteBox("info", "This file is not text, so there is nothing to show. "
+    return noteBox("info", "This file is not text, so there is nothing to show. "
       + "Restore the snapshot if you need the bytes.");
-    return;
   }
   // A trailing newline is a line ending, not an empty last line -- numbering
   // it would claim the file has a line it does not.
   const lines = (f.text || "").split("\n");
   if (lines.length > 1 && lines[lines.length - 1] === "") lines.pop();
   const nums = lines.map((_, i) => i + 1).join("\n");
-  body.innerHTML = `<div class="cv-code"><pre class="cv-nums">${nums}</pre>`
+  return `<div class="cv-code"><pre class="cv-nums">${nums}</pre>`
     + `<pre class="cv-text">${escapeHtml(lines.join("\n"))}</pre></div>`;
-  body.scrollTop = 0;
 }
 
 async function copyCodeFile() {
@@ -4995,6 +5006,213 @@ async function copyCodeFile() {
   try {
     await navigator.clipboard.writeText(f.text);
     toast(f.truncated ? "Copied the part shown" : `Copied ${baseName(f.path)}`);
+  } catch (e) {
+    toast("Could not reach the clipboard");
+  }
+}
+
+// ---- browsing the whole code store --------------------------------------
+// The snapshot viewer above answers "what code made this file?". This
+// answers the other direction: "what versions of this file does the
+// archive hold, and what ran each of them?" -- which the store cannot be
+// asked on disk, because content addressing scatters a file's history
+// across code/blobs under names that are hashes.
+//
+// A version has no capture date: manifests carry content only, by design,
+// or the dedupe they exist for would break. So dates here are derived from
+// the earliest artefact that used a version, and labelled as derived.
+let storeView = null;
+
+async function openCodeStore() {
+  if (!archive) { toast("Open an archive first."); return; }
+  showDialog("codeStoreScrim");
+  storeView = null;
+  $("storeFilter").value = "";
+  $("storeFileHead").innerHTML = "";
+  $("storeUsers").innerHTML = "";
+  $("storeFileBody").innerHTML = "";
+  $("storeNote").textContent = "";
+  $("storeTree").innerHTML = `<div class="cv-empty">Reading the store…</div>`;
+  let tree;
+  try {
+    tree = await call("code_store_tree", { archive });
+  } catch (e) {
+    $("storeTree").innerHTML = noteBox("err", `Could not read the code store: ${e}`);
+    return;
+  }
+  if (!$("codeStoreScrim").classList.contains("show")) return;   // closed while we scanned
+  storeView = { tree, shut: new Set(), open: new Set(), sel: null, file: null, q: "" };
+  $("storeNote").textContent = tree.n_paths
+    ? `${tree.n_paths} file(s), ${tree.n_versions} version(s), ${tree.n_snapshots} snapshot(s)`
+      + (tree.n_missing ? ` — ${tree.n_missing} with missing bytes` : "")
+    : "";
+  renderStoreTree();
+}
+
+// Which paths the filter admits. Matching on the full "repo/dir/name" key
+// means typing a directory narrows to it, which is how people search a
+// tree they half-remember.
+function storePaths(repo) {
+  const q = storeView.q;
+  return q ? repo.paths.filter((p) => p.path.toLowerCase().includes(q)) : repo.paths;
+}
+
+function renderStoreTree() {
+  const v = storeView;
+  if (!v) return;
+  const out = [];
+  let shown = 0;
+
+  for (const repo of v.tree.repos) {
+    const paths = storePaths(repo);
+    if (!paths.length) continue;
+    shown += paths.length;
+    const shut = v.shut.has(repo.name);
+    out.push(`<div class="cv-row repo" data-store-repo="${escapeHtml(repo.name)}">
+        <span class="cv-tw">${shut ? "▶" : "▼"}</span>
+        <span class="n">${escapeHtml(repo.name)}</span>
+        <span class="cv-count">${paths.length} file(s)</span></div>`);
+    if (shut) continue;
+
+    for (const p of paths) {
+      // A filter is a search: what matched should be open, not one more
+      // click away.
+      const open = v.open.has(p.path) || !!v.q;
+      out.push(`<div class="cv-row dir" data-store-path="${escapeHtml(p.path)}"
+          title="${escapeHtml(p.path)}" style="padding-left:19px">
+          <span class="cv-tw">${open ? "▼" : "▶"}</span>
+          <span class="n">${escapeHtml(p.name)}</span>
+          <span class="cv-count">${p.n_versions > 1 ? `${p.n_versions} versions` : ""}</span></div>`);
+      if (!open) continue;
+      for (const ver of p.versions) {
+        const sel = v.sel && v.sel.blob === ver.blob && v.sel.path === p.path;
+        const badge = (ver.entry ? `<span class="cv-badge">entry</span>` : "")
+          + (ver.present ? "" : `<span class="cv-badge">missing</span>`);
+        out.push(`<div class="cv-row ver${sel ? " sel" : ""}${ver.present ? "" : " gone"}"
+            ${ver.present ? `data-store-blob="${escapeHtml(ver.blob)}" `
+                          + `data-store-in="${escapeHtml(p.path)}"` : ""}
+            title="${escapeHtml(ver.blob)}" style="padding-left:32px">
+            <span class="cv-tw"></span>
+            <span class="n">${escapeHtml(ver.short)}</span>${badge}
+            <span class="when">${storeWhen(ver)}</span></div>`);
+      }
+    }
+  }
+
+  const tree = $("storeTree");
+  tree.innerHTML = out.join("")
+    || `<div class="cv-empty">${v.q ? "No file matches that."
+        : "This archive has captured no source yet."}</div>`;
+  tree.querySelectorAll("[data-store-repo]").forEach((n) => {
+    n.onclick = () => {
+      const name = n.getAttribute("data-store-repo");
+      if (!v.shut.delete(name)) v.shut.add(name);
+      renderStoreTree();
+    };
+  });
+  tree.querySelectorAll("[data-store-path]").forEach((n) => {
+    n.onclick = () => {
+      const path = n.getAttribute("data-store-path");
+      if (!v.open.delete(path)) v.open.add(path);
+      renderStoreTree();
+    };
+  });
+  tree.querySelectorAll("[data-store-blob]").forEach((n) => {
+    n.onclick = () => openStoreVersion(n.getAttribute("data-store-in"),
+                                       n.getAttribute("data-store-blob"));
+  });
+  if (v.q) $("storeNote").textContent = `${shown} of ${v.tree.n_paths} file(s) match`;
+}
+
+// A count, not a date, when nothing dates it -- saying "unknown date" for
+// every unreferenced version would be noise where the useful fact is that
+// nothing references it at all.
+function storeWhen(ver) {
+  if (!ver.n_artefacts) return "unused";
+  // Just the date here: the tree row is narrow, and the full timestamp is
+  // in the header once a version is open.
+  const when = fmtCreated(ver.first_seen).slice(0, 10);
+  return escapeHtml(when || `${ver.n_artefacts} artefact(s)`);
+}
+
+function storeVersion(path, blob) {
+  for (const repo of storeView.tree.repos) {
+    const p = repo.paths.find((x) => x.path === path);
+    if (p) return { p, ver: p.versions.find((x) => x.blob === blob) };
+  }
+  return {};
+}
+
+async function openStoreVersion(path, blob) {
+  const v = storeView;
+  if (!v) return;
+  const { p, ver } = storeVersion(path, blob);
+  if (!ver) return;
+  v.sel = { path, blob };
+  v.file = null;
+  renderStoreTree();
+  renderStoreHead(p, ver);
+  $("storeFileBody").innerHTML = `<div class="cv-empty">Reading…</div>`;
+  let got;
+  try {
+    got = await call("code_blob", { archive, blob });
+  } catch (e) {
+    if (v.sel && v.sel.blob === blob) $("storeFileBody").innerHTML = noteBox("err", `${e}`);
+    return;
+  }
+  if (storeView !== v || !v.sel || v.sel.blob !== blob || v.sel.path !== path) return;
+  v.file = got;
+  $("storeFileBody").innerHTML = codeBodyHTML(got);
+  $("storeFileBody").scrollTop = 0;
+}
+
+function renderStoreHead(p, ver) {
+  const bits = [`<span class="p">${escapeHtml(p.path)}</span>`,
+                `<span class="mono" title="${escapeHtml(ver.blob)}">${escapeHtml(ver.short)}</span>`];
+  if (ver.entry) bits.push(`<span class="cv-badge">entry point</span>`);
+  if (ver.size !== null && ver.size !== undefined) bits.push(`<span>${_human(ver.size)}</span>`);
+  if (ver.n_snapshots > 1) bits.push(`<span>in ${ver.n_snapshots} snapshots</span>`);
+  $("storeFileHead").innerHTML = bits.join("");
+
+  const users = $("storeUsers");
+  if (!ver.artefacts.length) {
+    users.innerHTML = noteBox("info", "No artefact in this archive was produced by a snapshot "
+      + "containing this version — `nebula gc` would collect it.");
+    return;
+  }
+  // The derived date is stated as derived. The store genuinely does not
+  // know when a version was captured, and implying otherwise in a tool
+  // people cite from would be worse than saying nothing.
+  const dated = ver.first_seen
+    ? `<div class="mg-note">Earliest use ${escapeHtml(fmtCreated(ver.first_seen))} `
+      + `— derived from the artefacts below, not recorded by the store.</div>`
+    : "";
+  users.innerHTML = `<div class="h">Ran by ${ver.n_artefacts} artefact(s)</div>`
+    + ver.artefacts.map((a) => `<div class="u go"
+        data-goto-session="${escapeHtml(a.session_path)}"
+        data-goto-file="${escapeHtml(a.filename)}"
+        title="Go to this artefact">
+        <span class="nm">${escapeHtml(a.run_id)}/${escapeHtml(a.filename)}</span>
+        ${a.trashed ? `<span class="cv-badge">trashed</span>` : ""}
+        <span class="when">${escapeHtml(fmtCreated(a.created).slice(0, 10))}</span>
+      </div>`).join("") + dated;
+  users.querySelectorAll("[data-goto-session]").forEach((n) => {
+    n.onclick = () => {
+      // Following the link means leaving the browser: it lands on a file in
+      // the main window, which is behind both open dialogs.
+      closeCodeStore();
+      $("arcScrim").classList.remove("show");
+      gotoArtifact(n.getAttribute("data-goto-session"), n.getAttribute("data-goto-file"));
+    };
+  });
+}
+
+async function copyStoreFile() {
+  const f = storeView && storeView.file;
+  if (!f || !f.ok || f.binary || f.text === null) return;
+  try {
+    await navigator.clipboard.writeText(f.text);
+    toast(f.truncated ? "Copied the part shown" : "Copied");
   } catch (e) {
     toast("Could not reach the clipboard");
   }
@@ -5673,6 +5891,7 @@ function initShortcuts() {
 
   document.addEventListener("keydown", (e) => {
     if (e.key === "Escape") {
+      if ($("codeStoreScrim").classList.contains("show")) { closeCodeStore(); return; }
       if ($("codeScrim").classList.contains("show")) { closeCodeView(); return; }
       if ($("uriScrim").classList.contains("show")) {
         $("uriScrim").classList.remove("show");
@@ -5856,6 +6075,19 @@ $("codeClose").onclick = closeCodeView;
 $("codeX").onclick = closeCodeView;
 $("codeScrim").onclick = (e) => { if (e.target === $("codeScrim")) closeCodeView(); };
 $("codeCopy").onclick = copyCodeFile;
+
+// The store browser. Opened from archive management, and closing it goes
+// back there rather than to the main window.
+const closeCodeStore = () => { $("codeStoreScrim").classList.remove("show"); storeView = null; };
+$("storeClose").onclick = closeCodeStore;
+$("storeX").onclick = closeCodeStore;
+$("codeStoreScrim").onclick = (e) => { if (e.target === $("codeStoreScrim")) closeCodeStore(); };
+$("storeCopy").onclick = copyStoreFile;
+$("storeFilter").oninput = () => {
+  if (!storeView) return;
+  storeView.q = $("storeFilter").value.trim().toLowerCase();
+  renderStoreTree();
+};
 
 $("xferClose").onclick = () => $("xferScrim").classList.remove("show");
 $("xferCancel").onclick = () => $("xferScrim").classList.remove("show");

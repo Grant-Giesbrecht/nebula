@@ -123,7 +123,7 @@ def referenced_blobs(archive_root, *, include_trash: bool = True) -> Dict[str, L
     corrupt file into deleted bytes.
     """
     from nebula import assets as assets_mod
-    from nebula.codestore import _iter_sidecar_files
+    from nebula.codestore import iter_sidecar_files
     import json
 
     archive_root = Path(archive_root)
@@ -139,7 +139,7 @@ def referenced_blobs(archive_root, *, include_trash: bool = True) -> Dict[str, L
             if not snap.pending_gc:
                 out.setdefault(snap.sha256, []).append(asset_id)
 
-    for path in _iter_sidecar_files(archive_root, include_trash=include_trash):
+    for path in iter_sidecar_files(archive_root, include_trash=include_trash):
         try:
             data = json.loads(path.read_text())
         except (OSError, ValueError):
