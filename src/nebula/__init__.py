@@ -27,7 +27,7 @@ from nebula.session import (
 )
 from nebula.sidecar import write_sidecar, read_sidecar
 from nebula.tags import collect_tags, input_tag
-from nebula.session_select import select_session
+from nebula.session_select import select_session, ask_new_session_metadata
 from nebula.manual import (
     import_file,
     import_new,
@@ -39,7 +39,7 @@ from nebula.manual import (
     delete_session,
 )
 from nebula.check import check as check_archive
-from nebula import graph
+from nebula import annotations, graph
 
 __all__ = [
     "Ref",
@@ -59,6 +59,7 @@ __all__ = [
     "hold",
     "release",
     "select_session",
+    "ask_new_session_metadata",
     "write_sidecar",
     "read_sidecar",
     "collect_tags",
@@ -72,6 +73,7 @@ __all__ = [
     "reseal",
     "delete_session",
     "check_archive",
+    "annotations",
     "graph",
 ]
 

@@ -8,6 +8,56 @@ cold. Delete an item when it ships.
 
 ---
 
+## ~~The question was asked before the answer could matter~~ — DONE 2026-09-02
+
+`nebula.session(archive, tags=[...], description="...")` made the caller
+collect both **before** the picker ran, then discarded them, silently,
+whenever the user picked an existing session — which already has its own.
+Half the time the question cost typing and had no effect, and nothing
+said so. Reported from `examples/ex2_measurement.py`, where the tag
+picker ran at the top of the script for exactly this reason.
+
+Two separate problems turned out to be tangled together, and the fix is
+mostly about telling them apart:
+
+- **Session tags describe the run**, so they only exist for a session
+  being *created*. They are now collected by
+  `session_select.ask_new_session_metadata`, called after the choice and
+  only on the `/new` branch. `ask` is tri-state: `None` asks for whatever
+  was not supplied, `True` always asks (pre-filling), `False` restores
+  the old never-ask behaviour. Non-interactive runs never prompt, so
+  unattended scripts are unchanged.
+- **Artifact tags describe the file**, and there was no way to set them
+  from Python at all. Per-file tags already existed as
+  `annotations.yaml` — what `nebula annotate` edits and
+  `nebula search "user_tag:..."` reads — but only the CLI and the
+  Navigator could write them, which in practice meant they were not
+  written. `Session.artifact(tags=..., comment=...)`,
+  `write_meta_for(...)` and `Session.annotate(...)` now reach it, plus
+  `artifact_tags=` on the session for "everything this script writes".
+
+Points worth keeping:
+
+- Tags are **not** sidecar fields, and the temptation to make them one
+  should be resisted: a sidecar records what happened and is never
+  rewritten, so a label you change your mind about cannot live there.
+  `test_tags_go_in_annotations_not_the_sidecar` pins this.
+- They are validated at the `artifact()` **call**, not at block exit, so
+  a typo'd tag costs a traceback before the measurement runs rather than
+  after an hour of sweeping is on disk.
+- They are stored under the name **on disk**. Overwrite protection may
+  have written `raw-001.csv`, and tagging `raw.csv` would then describe
+  the previous run's file — the same trap `_redirect_ref` exists for on
+  the lineage side.
+- `artifact_tags` survives appending to an existing session; session tags
+  cannot. That asymmetry is the whole reason the two arguments are
+  separate, and is why `artifact_tags` is still safe to ask for up front.
+- The discard, where it still happens (`run_id=` given, or an existing
+  session picked), is now *reported* rather than silent.
+
+`examples/ex3_provenance.py` is new: every field `artifact()` records,
+end to end, verified by running it.
+
 ## ~~Asset settings have no UI~~ — DONE 2026-08-10
 
 Shipped as the "Asset defaults" section of the archive-management dialog

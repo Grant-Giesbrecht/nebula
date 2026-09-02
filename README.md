@@ -49,13 +49,33 @@ depend on" months later without a rigid, ever-breaking folder taxonomy.
 ```python
 import nebula
 
-with nebula.session("postdoc", tags=["RP23D"], description="S21 characterization, sample #7") as s:
+with nebula.session("postdoc") as s:
     scope_data = acquire()
-    save_csv(scope_data, s.artifact_path("scope_trace_raw.csv"))
-    s.write_meta_for("scope_trace_raw.csv", inputs={"bias_current_mA": {"start": 0, "stop": 10, "step": 0.5}})
+    with s.artifact("scope_trace_raw.csv",
+                    inputs={"bias_current_mA": {"start": 0, "stop": 10, "step": 0.5}},
+                    tags=["RP23D"]) as fn:
+        save_csv(scope_data, fn)
     run_id = s.id
 # session closes here.
 ```
+
+The session picker runs first, and only *then* — if a new session is
+actually being made — are you asked for its tags and description. Pass
+`tags=`/`description=` to answer in advance, or `ask=False` to never be
+asked. `artifact_tags=[...]` is the other kind: it tags every file the
+session writes, whether the session is new or appended to.
+
+`s.artifact()` is the front door: it hands you a path, then writes the
+sidecar when the block exits, and refuses to finish if no file appeared.
+`s.artifact_path()` + `s.write_meta_for()` do the same job in two steps,
+for when a library insists on opening the file itself. See
+`examples/ex3_provenance.py` for the full set of things either one can
+record.
+
+Tags and comments on a file (`tags=`, `comment=`, `s.annotate(...)`) are
+the *mutable* layer — the same field `nebula annotate` edits and
+`nebula search "user_tag:..."` reads. They deliberately do not go in the
+sidecar, which records what happened and is never rewritten.
 
 A later, separate script step in the *same session* (e.g. a conversion
 pass, or a second related measurement) uses `append_to` / passes
@@ -79,6 +99,12 @@ Calling `nebula.session(...)` with **no** `run_id` pops an interactive CLI
 picker listing the sessions you can append to (today's, plus anything
 still open), so you can add to a run in progress or type `/new` to start
 fresh. Pass `new_session=True` to skip the prompt and always start clean.
+
+Choosing `/new` then asks for the session's tags and description, since
+that is the only outcome in which they mean anything — an existing
+session already has its own. Passing `tags=`/`description=` and then
+picking an existing session says so rather than discarding them silently.
+Nothing is ever prompted in a non-interactive run.
 
 ### Holding a session open across midnight
 
@@ -233,7 +259,7 @@ it's resolved:
   to register.
 
 ```python
-with nebula.session("postdoc", tags=["RP23D"], description="...") as s:
+with nebula.session("postdoc") as s:
     ...
 ```
 

@@ -144,8 +144,15 @@ def announce_artifact(session: "Session", path: Path,
 
         described = session.meta.description or "(no description)"
         lines.append(f"  session:    {session.id} — {described}")
+        # The file's own tags first: they are what this line is about.
+        # The session's are shown separately rather than merged, because
+        # "this file shows the drift" and "this run was a warm-up sweep"
+        # are not interchangeable when you come back to find the data.
+        file_tags = _artifact_tags(session, path)
+        if file_tags:
+            lines.append(f"  tags:       {', '.join(file_tags)}")
         if session.meta.tags:
-            lines.append(f"  tags:       {', '.join(session.meta.tags)}")
+            lines.append(f"  session tags: {', '.join(session.meta.tags)}")
         parents = [format_ref(r) for r in meta.derived_from_refs()]
         if parents:
             lines.append(f"  derived from: {', '.join(parents)}")
@@ -162,6 +169,17 @@ def announce_artifact(session: "Session", path: Path,
             warn(f"  note: {note}")
     except Exception:           # noqa: BLE001 -- reporting must never cost data
         pass
+
+
+def _artifact_tags(session: "Session", path: Path) -> List[str]:
+    """This artifact's own (mutable) tags, or [] if anything goes wrong.
+    Part of announce_artifact, which must never cost a completed save."""
+    try:
+        from nebula import annotations
+
+        return list(annotations.get(session.path, path.name)["tags"])
+    except Exception:           # noqa: BLE001
+        return []
 
 
 def _artifact_uri(session: "Session", path: Path) -> "tuple[str, Optional[str]]":
@@ -489,6 +507,7 @@ class Session:
         archive: Optional[str] = None,
         on_missing_meta: str = _DEFAULT_MISSING_META,
         announce: bool = _DEFAULT_ANNOUNCE,
+        artifact_tags: Optional[List[str]] = None,
     ):
         self.path = Path(path)
         self.meta = meta
@@ -496,6 +515,17 @@ class Session:
         #: Print a short report as each artifact is saved. See
         #: `announce_artifact`; NEBULA_ANNOUNCE overrides this.
         self.announce = announce
+        #: Tags applied to every artifact this session writes, on top of
+        #: whatever `artifact(tags=...)` names for one file.
+        #:
+        #: This exists because "what is this run about?" and "what is this
+        #: *file*?" are different questions with different answers, and a
+        #: script that collects tags once at the top usually means the
+        #: second one -- the tags it wants to find the data by later. Those
+        #: are per-file (annotations.yaml), so a session-level list would
+        #: not reach them. Settable mid-session; only artifacts written
+        #: afterwards get the change.
+        self.artifact_tags: List[str] = _merge_tags(artifact_tags)
         if on_missing_meta not in _MISSING_META_POLICIES:
             raise ValueError(
                 f"on_missing_meta must be one of {_MISSING_META_POLICIES!r}, "
@@ -573,13 +603,16 @@ class Session:
         *,
         derived_from: Optional[List["str | Ref"]] = None,
         inputs: Optional[Dict] = None,
+        tags: Optional[List[str]] = None,
+        comment: Optional[str] = None,
         announce: Optional[bool] = None,
         **extra,
     ) -> "_ArtifactWriter":
         """Context manager that pairs writing an artifact with writing its
         sidecar, so the two can't drift apart:
 
-            with s.artifact("raw.tome", inputs={"gain": 10}) as fn:
+            with s.artifact("raw.tome", inputs={"gain": 10},
+                            tags=["warmup"]) as fn:
                 dict_to_tome(data, fn)
             # sidecar written automatically on block exit
 
@@ -593,10 +626,24 @@ class Session:
         write_meta_for() remain as a lower-level escape hatch (and the
         close() audit still covers anything written that way).
 
+        `tags` and `comment` are the *mutable* notes on this file --
+        annotations.yaml, the same field `nebula annotate` edits and
+        `nebula search tag:` looks in. They deliberately do not go in the
+        sidecar: a sidecar records what happened and is never rewritten,
+        while a tag is something you change your mind about later. Tagging
+        at write time is nonetheless the moment you actually know what the
+        file is, which is why this argument exists at all rather than
+        making every script shell out to `nebula annotate` afterwards.
+        Session-wide `artifact_tags` are added to whatever is named here.
+
+        A malformed tag raises straight away, at the call -- before the
+        measurement runs -- rather than after the data is on disk.
+
         `announce` overrides this session's setting for this one artifact
         -- False for the thousandth file of a sweep, True for the one
         result the run is actually about.
         """
+        tags = _merge_tags(self.artifact_tags, tags)
         # Capture provenance now, while the user script is the direct
         # caller (fixed depth 2), rather than at block-exit time where the
         # frame layout is murkier.
@@ -614,6 +661,8 @@ class Session:
             produced_by=produced_by,
             derived_from=derived_from,
             inputs=inputs or {},
+            tags=tags,
+            comment=comment,
             extra=extra,
             caller_file=caller_file,
             announce=self.announce if announce is None else announce,
@@ -625,6 +674,8 @@ class Session:
         *,
         derived_from: Optional[List["str | Ref"]] = None,
         inputs: Optional[Dict] = None,
+        tags: Optional[List[str]] = None,
+        comment: Optional[str] = None,
         caller_frame_depth: int = 2,
         announce: Optional[bool] = None,
         **extra,
@@ -634,7 +685,11 @@ class Session:
         derived_from accepts compact ref strings or Ref objects; bare
         filenames ("scope_trace_raw.csv") are resolved as same-session
         refs automatically by parse_ref.
+
+        `tags`/`comment` behave exactly as in artifact(): mutable notes in
+        annotations.yaml, not sidecar fields.
         """
+        tags = _merge_tags(self.artifact_tags, tags)
         caller_file = _resolve_caller(caller_frame_depth)
         meta = SidecarMeta(
             created=_now_iso(),
@@ -647,12 +702,39 @@ class Session:
         self._attach_code(meta, caller_file)
         path = self.artifact_path(artifact_filename)
         written = write_sidecar(path, meta)
+        self.annotate(path.name, tags=tags, comment=comment)
         # After the sidecar, not before: the report quotes the checksum,
         # and write_sidecar is what computes it.
         if (self.announce if announce is None else announce) \
                 and announce_enabled():
             announce_artifact(self, path, meta)
         return written
+
+    def annotate(
+        self,
+        filename: Optional[str] = None,
+        *,
+        tags: Optional[List[str]] = None,
+        comment: Optional[str] = None,
+    ) -> None:
+        """Add mutable tags and/or a comment to one artifact, or to the
+        session itself (`filename=None`).
+
+        Additive for tags: an artifact written twice, or annotated again
+        later, accumulates rather than losing what was there. The comment
+        is replaced, since there is no sensible way to merge two.
+
+        A no-op when both are empty, so callers can pass through whatever
+        they collected without checking first.
+        """
+        if not tags and not comment:
+            return
+        from nebula import annotations
+
+        if tags:
+            annotations.add_tags(self.path, filename, list(tags))
+        if comment:
+            annotations.set_annotation(self.path, filename, comment=comment)
 
     def _note_write(self, requested: str, actual: str) -> None:
         self._written[requested] = actual
@@ -820,6 +902,8 @@ class _ArtifactWriter:
         derived_from: Optional[List["str | Ref"]],
         inputs: Dict,
         extra: Dict,
+        tags: Optional[List[str]] = None,
+        comment: Optional[str] = None,
         caller_file: Optional[str] = None,
         original_name: Optional[str] = None,
         duplicate_index: Optional[int] = None,
@@ -835,6 +919,8 @@ class _ArtifactWriter:
         self._derived_from = derived_from or []
         self._inputs = inputs
         self._extra = extra
+        self._tags = list(tags or [])
+        self._comment = comment
 
     def __enter__(self) -> Path:
         return self.path
@@ -860,9 +946,39 @@ class _ArtifactWriter:
             self._session._add_derived_from(meta, ref)
         self._session._attach_code(meta, self._caller_file)
         write_sidecar(self.path, meta)
+        # Annotated under the name on disk, not the name asked for:
+        # overwrite protection may have written raw-001.csv, and tags on
+        # "raw.csv" would then describe last run's file.
+        self._session.annotate(self.path.name, tags=self._tags,
+                               comment=self._comment)
         if self._announce and announce_enabled():
             announce_artifact(self._session, self.path, meta)
         return None
+
+
+def _merge_tags(*groups) -> List[str]:
+    """Combine tag lists in order, dropping duplicates, and validate the
+    result now rather than after the measurement has run.
+
+    `annotations.clean_tags` is what raises on a bad tag; calling it at
+    the top of artifact() means a typo'd tag costs a traceback before any
+    data exists, not after -- the opposite of the failure this whole
+    module is arranged to avoid.
+    """
+    from nebula import annotations
+
+    merged: List[str] = []
+    for group in groups:
+        if not group:
+            continue
+        if isinstance(group, str):
+            raise TypeError(
+                f"tags must be a list of strings, not a single string "
+                f"({group!r}). Use nebula.annotations.split_tags({group!r}) "
+                f"to parse the comma-separated form, or pass a list."
+            )
+        merged.extend(group)
+    return annotations.clean_tags(merged) if merged else []
 
 
 def _now_iso() -> str:
@@ -877,6 +993,7 @@ def new(
     archive_name: Optional[str] = None,
     on_missing_meta: str = _DEFAULT_MISSING_META,
     announce: bool = _DEFAULT_ANNOUNCE,
+    artifact_tags: Optional[List[str]] = None,
 ) -> Session:
     """Create a brand-new session folder and return an open Session.
 
@@ -892,6 +1009,11 @@ def new(
     announce=False silences the per-artifact save report (see
     `announce_artifact`), for scripts whose stdout is data or that save in
     a tight loop.
+
+    `tags` describes the *run*; `artifact_tags` is applied to every file
+    the session writes (see Session.artifact_tags). They are separate
+    because a script that asks its user for tags once, at the top, almost
+    always means the second -- the tags it wants to find the data by.
     """
     if isinstance(tags, str):
         # A bare string ("ruby, twpa") looks like the comma-separated form
@@ -953,7 +1075,8 @@ def new(
     )
     write_session_yaml(session_dir, meta)
     return Session(session_dir, meta, archive=name,
-                   on_missing_meta=on_missing_meta, announce=announce)
+                   on_missing_meta=on_missing_meta, announce=announce,
+                   artifact_tags=artifact_tags)
 
 
 class ArchiveNotWritable(PermissionError):
@@ -1096,6 +1219,7 @@ def append_to(
     archive_name: Optional[str] = None,
     on_missing_meta: str = _DEFAULT_MISSING_META,
     announce: bool = _DEFAULT_ANNOUNCE,
+    artifact_tags: Optional[List[str]] = None,
 ) -> Session:
     """Reattach to a session to write more artifacts into it, so several
     related measurements can share one folder.
@@ -1129,7 +1253,8 @@ def append_to(
         meta.status = "open"
         write_session_yaml(session_dir, meta)
     return Session(session_dir, meta, archive=name,
-                   on_missing_meta=on_missing_meta, announce=announce)
+                   on_missing_meta=on_missing_meta, announce=announce,
+                   artifact_tags=artifact_tags)
 
 
 def reopen(
@@ -1139,6 +1264,7 @@ def reopen(
     archive_name: Optional[str] = None,
     on_missing_meta: str = _DEFAULT_MISSING_META,
     announce: bool = _DEFAULT_ANNOUNCE,
+    artifact_tags: Optional[List[str]] = None,
 ) -> Session:
     """Explicitly reopen a session regardless of its current status (e.g.
     a crashed session resuming from a checkpoint after a machine reboot).
@@ -1152,7 +1278,8 @@ def reopen(
     meta.status = "open"
     write_session_yaml(session_dir, meta)
     return Session(session_dir, meta, archive=name,
-                   on_missing_meta=on_missing_meta, announce=announce)
+                   on_missing_meta=on_missing_meta, announce=announce,
+                   artifact_tags=artifact_tags)
 
 
 @contextlib.contextmanager
@@ -1163,6 +1290,8 @@ def session(
     new_session: bool = False,
     tags: Optional[List[str]] = None,
     description: str = "",
+    artifact_tags: Optional[List[str]] = None,
+    ask: Optional[bool] = None,
     archive_name: Optional[str] = None,
     on_missing_meta: str = _DEFAULT_MISSING_META,
     announce: bool = _DEFAULT_ANNOUNCE,
@@ -1170,7 +1299,7 @@ def session(
     """Convenience context manager. Closes/marks crashed automatically on
     exit.
 
-        with nebula.session("postdoc", tags=["RP23D"], description="...") as s:
+        with nebula.session("postdoc") as s:
             ...
             s.write_meta_for("raw.graf", derived_from=["scope_trace.csv"])
 
@@ -1187,6 +1316,26 @@ def session(
     Pass new_session=True in unattended scripts that should always start
     clean without prompting.
 
+    **Tags and the description are asked for after the choice.** They only
+    describe a session being *created*; pick an existing one and it
+    already has its own. So by default the picker runs first and the
+    question is put only if it turns out to matter -- rather than making
+    the caller collect answers up front that half the time get discarded.
+
+      tags/description  -- supplied up front; then not asked for.
+      ask=None          -- (default) ask for whichever was not supplied,
+                           and only when a new session is being made
+                           interactively.
+      ask=True          -- always ask, pre-filling anything supplied.
+      ask=False         -- never ask; use exactly what was passed. This is
+                           the pre-existing behaviour.
+
+    Non-interactive runs (batch, cron, piped stdin) never prompt.
+
+    `artifact_tags` is different: it tags every *file* the session writes,
+    new session or not, and is the one that survives picking an existing
+    session. See Session.artifact_tags.
+
     `archive` may be a registered archive name (str) or a literal Path.
     """
     if run_id is not None:
@@ -1196,8 +1345,25 @@ def session(
             archive_name=archive_name,
             on_missing_meta=on_missing_meta,
             announce=announce,
+            artifact_tags=artifact_tags,
         )
+        if tags or description:
+            # Same silent-discard the picker warns about, reached by a
+            # different door.
+            from nebula._termui import warn
+
+            warn(f"note: session {s.id} already has its own tags and "
+                 f"description; the ones passed to nebula.session() were "
+                 f"not applied. Use sess.annotate(tags=[...]) to add them.")
     elif new_session:
+        # ask=True is the only way to prompt here: new_session=True is
+        # documented as the unattended path, and a prompt appearing in a
+        # cron job would be a regression, not a feature.
+        if ask:
+            from nebula.session_select import ask_new_session_metadata
+
+            tags, description = ask_new_session_metadata(
+                archive, tags=tags, description=description, ask=True)
         s = new(
             archive,
             tags=tags,
@@ -1205,6 +1371,7 @@ def session(
             archive_name=archive_name,
             on_missing_meta=on_missing_meta,
             announce=announce,
+            artifact_tags=artifact_tags,
         )
     else:
         # Imported lazily: select_session imports back from this module, and
@@ -1218,6 +1385,8 @@ def session(
             archive_name=archive_name,
             on_missing_meta=on_missing_meta,
             announce=announce,
+            ask=ask,
+            artifact_tags=artifact_tags,
         )
     try:
         yield s

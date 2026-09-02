@@ -36,7 +36,7 @@ from nebula.registry import resolve_archive
 from nebula.session import Session, append_to, new, reopen
 from nebula.session import _DEFAULT_MISSING_META, _hold_active
 from nebula.sidecar import SessionMeta, read_session_yaml
-from nebula.tags import collect_tags, _print_tag_table, _sorted_tags
+from nebula.tags import collect_tags, input_tag, _print_tag_table, _sorted_tags
 
 _STATUS_STYLE = {"open": "green bold", "closed": "dim", "crashed": "red"}
 
@@ -178,6 +178,72 @@ def _prompt(color: bool, guard: bool) -> str:
     return f"{arrow} "
 
 
+def ask_new_session_metadata(
+    archive: "str | Path",
+    *,
+    tags: Optional[List[str]] = None,
+    description: Optional[str] = None,
+    ask: Optional[bool] = None,
+) -> "tuple[Optional[List[str]], str]":
+    """Collect a new session's tags and description, at the moment we know
+    a new session is actually being made.
+
+    This is the whole point of the argument's existence. Asking *before*
+    the picker runs -- which is what a script passing tags= to
+    nebula.session() does -- means answering a question that only matters
+    in one of the two outcomes: pick an existing session and the answers
+    are thrown away, silently, having already cost the user the typing.
+    Asked here, the question is only ever put when it has an effect.
+
+    `ask` is tri-state, matching nebula.session():
+      None  -- ask for whichever of the two was not supplied (the default);
+      True  -- ask for both, pre-filling anything supplied;
+      False -- never ask, take what was given.
+
+    Non-interactive runs never ask, so an unattended script behaves as it
+    always did.
+    """
+    if ask is False or not is_interactive():
+        return tags, description or ""
+
+    color = color_enabled(sys.stdout)
+    print(paint("New session -- describe it (Enter to skip either).",
+                "dim", color))
+
+    if ask or tags is None:
+        tags = input_tag(archive, prompt="session tags", initial=tags)
+    if ask or not description:
+        try:
+            answer = input("session description> ").strip()
+        except EOFError:
+            print()
+            answer = ""
+        description = answer or description or ""
+    return tags, description or ""
+
+
+def _note_ignored_metadata(run_id: str, tags, description, color: bool) -> None:
+    """Say so when tags/description were supplied but the user picked an
+    existing session, which already has its own.
+
+    Silence here is the bug this function exists for: the values simply
+    vanished, and nothing said the session was not tagged the way the
+    script's author believed it was.
+    """
+    supplied = []
+    if tags:
+        supplied.append(f"tags {', '.join(tags)}")
+    if description:
+        supplied.append("a description")
+    if not supplied:
+        return
+    print(paint(
+        f"  note: {run_id} already has its own tags and description, so "
+        f"the {' and '.join(supplied)} passed to nebula.session() were not "
+        f"applied. Use sess.annotate(tags=[...]) to add them anyway.",
+        "yellow", color))
+
+
 def select_session(
     archive: "str | Path",
     *,
@@ -186,10 +252,17 @@ def select_session(
     archive_name: Optional[str] = None,
     on_missing_meta: str = _DEFAULT_MISSING_META,
     announce: bool = True,
+    ask: Optional[bool] = None,
+    artifact_tags: Optional[List[str]] = None,
 ) -> Session:
     """Interactively choose a session to write into, returning an open
     Session. Used by nebula.session() when no run_id is given and the
     caller didn't ask for an automatic new session.
+
+    Tags and a description are asked for *after* the choice, and only when
+    the choice was to start a new session -- see
+    `ask_new_session_metadata`. Pass ask=False to keep the old behaviour
+    of using whatever the caller supplied without prompting.
 
     In a non-interactive context (batch/cron/piped) there's no one to ask,
     so this quietly creates a new session -- the same thing the old default
@@ -198,13 +271,16 @@ def select_session(
     archive_root, _ = resolve_archive(archive)
 
     def _new(desc: str) -> Session:
+        chosen_tags, chosen_desc = ask_new_session_metadata(
+            archive, tags=tags, description=desc, ask=ask)
         return new(
             archive,
-            tags=tags,
-            description=desc,
+            tags=chosen_tags,
+            description=chosen_desc,
             archive_name=archive_name,
             on_missing_meta=on_missing_meta,
             announce=announce,
+            artifact_tags=artifact_tags,
         )
 
     if not is_interactive():
@@ -240,7 +316,10 @@ def select_session(
                 # A bare token is a shortcut for /open <id>.
                 s = _try_open(archive, line.split()[0], color,
                               announce=announce, archive_name=archive_name,
-                              on_missing_meta=on_missing_meta)
+                              on_missing_meta=on_missing_meta,
+                              artifact_tags=artifact_tags,
+                              supplied_tags=tags,
+                              supplied_description=description)
                 if s is not None:
                     return s
                 continue
@@ -289,12 +368,19 @@ def select_session(
                     continue
                 s = _try_open(archive, rest[0], color, announce=announce,
                               archive_name=archive_name,
-                              on_missing_meta=on_missing_meta)
+                              on_missing_meta=on_missing_meta,
+                              artifact_tags=artifact_tags,
+                              supplied_tags=tags,
+                              supplied_description=description)
                 if s is not None:
                     return s
             elif cmd == "/reopen":
                 s = _try_reopen(archive, rest, color, announce=announce,
-                                archive_name=archive_name, on_missing_meta=on_missing_meta)
+                                archive_name=archive_name,
+                                on_missing_meta=on_missing_meta,
+                                artifact_tags=artifact_tags,
+                                supplied_tags=tags,
+                                supplied_description=description)
                 if s is not None:
                     return s
             elif cmd in ("/cancel", "/q"):
@@ -306,12 +392,16 @@ def select_session(
 
 
 def _try_open(archive, run_id, color, *, archive_name, on_missing_meta,
-              announce: bool = True) -> Optional[Session]:
+              announce: bool = True, artifact_tags=None,
+              supplied_tags=None, supplied_description="") -> Optional[Session]:
     """Append to a same-day-or-open session, or explain why we can't."""
     try:
-        return append_to(archive, run_id, announce=announce,
-                         archive_name=archive_name,
-                         on_missing_meta=on_missing_meta)
+        s = append_to(archive, run_id, announce=announce,
+                      archive_name=archive_name,
+                      on_missing_meta=on_missing_meta,
+                      artifact_tags=artifact_tags)
+        _note_ignored_metadata(s.id, supplied_tags, supplied_description, color)
+        return s
     except FileNotFoundError:
         print(paint(f"  no session {run_id!r} in this archive", "red", color))
     except RuntimeError:
@@ -323,7 +413,8 @@ def _try_open(archive, run_id, color, *, archive_name, on_missing_meta,
 
 
 def _try_reopen(archive, tokens, color, *, archive_name, on_missing_meta,
-                announce: bool = True) -> Optional[Session]:
+                announce: bool = True, artifact_tags=None,
+                supplied_tags=None, supplied_description="") -> Optional[Session]:
     """Force-reopen a closed session, gated behind --force or a typed
     confirmation so it can't happen by reflex."""
     forced = any(t in ("--force", "-f", "!") for t in tokens)
@@ -347,9 +438,12 @@ def _try_reopen(archive, tokens, color, *, archive_name, on_missing_meta,
             return None
 
     try:
-        return reopen(archive, run_id, announce=announce,
-                      archive_name=archive_name,
-                      on_missing_meta=on_missing_meta)
+        s = reopen(archive, run_id, announce=announce,
+                   archive_name=archive_name,
+                   on_missing_meta=on_missing_meta,
+                   artifact_tags=artifact_tags)
+        _note_ignored_metadata(s.id, supplied_tags, supplied_description, color)
+        return s
     except FileNotFoundError:
         print(paint(f"  no session {run_id!r} in this archive", "red", color))
         return None
