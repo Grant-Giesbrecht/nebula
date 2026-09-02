@@ -110,3 +110,103 @@ def test_error_message_lists_known_archives(tmp_path, monkeypatch, capsys):
         main(["ls", "typo-of-postdoc"])
     err = capsys.readouterr().err
     assert "postdoc" in err  # the real nickname is surfaced as a hint
+
+
+# ---------------------------------------------------------------------
+# The name on screen is a name you can type
+# ---------------------------------------------------------------------
+
+def _declared(tmp_path, folder, *, name, key=None, user=None):
+    from nebula import transfer
+
+    root = tmp_path / folder
+    transfer.init_archive(root, name=name, user=user)
+    get_registry().register_archive(root, key=key)
+    return root
+
+
+def test_every_command_accepts_the_name_archives_prints(tmp_path, capsys):
+    """`nebula archives` shows the declared name; `nebula ls` used to
+    refuse it and suggest the registry key instead."""
+    root = _declared(tmp_path, "folder", name="declared", key="a-nickname")
+
+    resolved, label = _resolve_archive_cli("declared")
+    assert resolved == root
+
+    main(["ls", "declared"])            # no SystemExit
+    capsys.readouterr()
+    main(["ls", "a-nickname"])          # and the key still works
+    capsys.readouterr()
+
+
+def test_an_archive_resolves_by_its_id_too(tmp_path):
+    from nebula.config import read_settings
+
+    root = _declared(tmp_path, "folder", name="declared", key="a-nickname")
+    ident = read_settings(root, apply_env=False).id
+    assert _resolve_archive_cli(ident)[0] == root
+
+
+def test_an_unknown_name_lists_names_that_would_work(tmp_path, capsys):
+    _declared(tmp_path, "folder", name="declared", key="a-nickname")
+    with pytest.raises(SystemExit):
+        _resolve_archive_cli("nonsense")
+    err_text = capsys.readouterr().err
+    assert "declared" in err_text and "a-nickname" in err_text
+
+
+def test_an_ambiguous_name_is_refused_rather_than_treated_as_a_path(tmp_path,
+                                                                    capsys):
+    """Two archives, one declared name. Neither picking one nor falling
+    through to "...and it is not a directory either" is a useful answer."""
+    _declared(tmp_path, "a", name="shared", user="me@here.edu", key="mine")
+    _declared(tmp_path, "b", name="shared", user="jane@lab.edu", key="theirs")
+    with pytest.raises(SystemExit):
+        _resolve_archive_cli("shared")
+    err_text = capsys.readouterr().err
+    assert "different archives" in err_text
+    assert "mine" in err_text and "theirs" in err_text
+
+
+def test_remove_accepts_the_declared_name(tmp_path, capsys):
+    _declared(tmp_path, "folder", name="declared", key="a-nickname")
+    main(["register", "--remove", "declared"])
+    assert "removed" in capsys.readouterr().out
+    assert get_registry().all() == {}
+
+
+def test_remove_forgets_every_alias(tmp_path, capsys):
+    """Otherwise --remove looks like it did nothing: the archive is still
+    listed, under another of its names."""
+    root = _declared(tmp_path, "folder", name="declared", key="first")
+    get_registry().register_archive(root, key="second")
+
+    main(["register", "--remove", "declared"])
+    out = capsys.readouterr().out
+    assert "first" in out and "second" in out
+    assert get_registry().all() == {}
+
+
+def test_archives_tells_two_same_named_archives_apart(tmp_path, capsys):
+    """Two rows that both read "shared" leave no way to say which one a
+    command should act on."""
+    _declared(tmp_path, "a", name="shared", user="me@here.edu", key="mine")
+    _declared(tmp_path, "b", name="shared", user="jane@lab.edu", key="theirs")
+    main(["archives"])
+    out = capsys.readouterr().out
+    assert "shared (me@here.edu)" in out
+    assert "shared (jane@lab.edu)" in out
+    # ...and the path is still readable, not run into by the longer name.
+    for line in out.splitlines():
+        if "shared (" in line:
+            assert ") /" in line or ")  " in line
+
+
+def test_removing_one_of_two_same_named_archives_says_so(tmp_path, capsys):
+    _declared(tmp_path, "a", name="shared", user="me@here.edu", key="mine")
+    _declared(tmp_path, "b", name="shared", user="jane@lab.edu", key="theirs")
+    main(["register", "--remove", "mine"])
+    got = capsys.readouterr()
+    assert "removed" in got.out
+    assert "still declare the name 'shared'" in got.err
+    assert list(get_registry().all()) == ["theirs"]

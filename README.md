@@ -796,6 +796,7 @@ nebula stale <archive> [--hours N]                 # find abandoned "open" sessi
 nebula archives [-l]                               # list registered archives
                                                    # (-l: kind, aliases, settings)
 nebula register <root> [nickname] [--git-org ORG] [--user WHO]
+nebula register --remove NAME                      # forget an archive (files kept)
 nebula whoami [--set NAME]                         # your name in nebula:// URIs
 nebula uri <archive> [<run_id> [<file>]]           # the citable nebula:// URI
 nebula uri <archive> --collection NAME | --asset ID
@@ -814,8 +815,10 @@ nebula check <archive> [--no-checksums]            # fsck, incl. dangling code r
 nebula gc <archive> [--delete] [--ignore-trash]    # sweep unreferenced captured code
 ```
 
-`<archive>` is either a registered nickname (see `nebula archives`) or a
-literal path.
+`<archive>` is any name the archive answers to — the name it declares for
+itself (what `nebula archives` prints), a registry nickname, its immutable
+id, or a literal path. Where two different archives share a declared name,
+the command says so and asks you to use a nickname rather than picking one.
 
 `downstream` only searches archives you tell it to (via `--also-search`),
 since a derived artifact could in principle live in any registered archive

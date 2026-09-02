@@ -78,6 +78,34 @@ in `main.js`, around the existing panels) covering the seven settings:
 - `cap_action: drop` discards snapshot *records*, which is not recoverable.
   Worth a confirmation rather than a bare dropdown.
 
+## ~~The name on screen was not a name you could type~~ — DONE 2026-09-01
+
+`nebula archives` prints the name each archive *declares* (the portable
+one); every command resolved by registry *nickname* only. So a user read
+`intake_name`, typed it, and got `unknown archive 'intake_name'. Known
+archives: ['nebula_reg_name']` — a machine saying the word it had just
+printed is not a word. `nebula register --remove` had it worst, since the
+name it wanted was the one thing the listing did not show.
+
+Fixed at the choke points rather than per command:
+
+- `Registry.lookup` / `resolve_one` accept a nickname, a declared name or
+  an archive id. An exact nickname wins (it is the file's unique key, and
+  the escape hatch that makes two same-named archives separable); otherwise
+  a name matching several *different* archives is refused with their
+  nicknames, never guessed at. Several entries for *one* archive are not
+  ambiguous — they are several doors into one room.
+- `get`, `try_get` and `_resolve_archive_cli` all go through it. `try_get`
+  is documented as "like get()" and now literally is: the two accepting
+  different names is the exact shape of this bug.
+- `--remove` forgets *every* entry pointing at that archive. Removing one
+  alias left the others, so it looked like it had done nothing.
+- Unknown-name errors list the names that would have worked, not just the
+  registry's keys.
+- `nebula archives` appends the owner when two archives declare the same
+  name, since two identical-looking rows leave no way to say which is
+  which; `--remove` says when others still declare the name it just took.
+
 ## Cleanup
 
  - `nebula -h` order in which commands are listed seems arbitrary. Change order to something like alphabetical.

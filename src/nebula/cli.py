@@ -107,17 +107,39 @@ def _resolve_archive_cli(text: str):
         return root, ref.archive
 
     registry = get_registry()
-    cfg = registry.try_get(text)
-    if cfg is not None:
-        return cfg.root, text
+    # Any name the archive answers to, not just the registry's own key:
+    # `nebula archives` prints the name each archive *declares*, so that is
+    # the one people have in front of them when they type a command.
+    try:
+        cfg = registry.resolve_one(text)
+        return cfg.root, cfg.nickname
+    except KeyError as e:
+        # Ambiguous is a different problem from unknown, and only the
+        # second has "...or it is a path" as a sensible next guess.
+        if "names" in str(e) and "different archives" in str(e):
+            err(str(e).strip("\"'"))
+            sys.exit(1)
+
     path = Path(text)
     if not path.is_dir():
         err(f"{text!r} is not a registered archive, and {path} does not "
             f"exist as a directory either. Known archives: "
-            f"{sorted(registry.all()) or '(none registered)'} -- see "
+            f"{_known_archive_names(registry) or '(none registered)'} -- see "
             f"{registry.path}.")
         sys.exit(1)
     return path, "local"
+
+
+def _known_archive_names(registry) -> list:
+    """Every name a command would accept, for an error message. Listing the
+    registry's keys alone is what made "unknown archive 'intake_name'.
+    Known archives: ['nebula_reg_name']" possible."""
+    names = set()
+    for nickname, cfg in registry.all().items():
+        names.add(nickname)
+        if cfg.declared_name:
+            names.add(cfg.declared_name)
+    return sorted(names)
 
 
 def cmd_rebuild(args):
@@ -1032,11 +1054,21 @@ def cmd_archives(args):
     for nickname, cfg in archives.items():
         groups.setdefault(cfg.key, []).append((nickname, cfg))
 
+    # Two people can declare the same archive name, and the plain listing
+    # would then print two identical-looking rows -- leaving no way to say
+    # which one a command should act on. Where that happens, the owner is
+    # shown alongside, since that is what actually tells them apart.
+    name_counts: Dict[str, int] = {}
+    for key in groups:
+        name_counts[key[1]] = name_counts.get(key[1], 0) + 1
+
     NAME_W = 15
     for key, entries in sorted(groups.items(), key=lambda kv: kv[1][0][1].uri_name.lower()):
         entries.sort(key=lambda ne: ne[0])
         primary = entries[0][1]
         official = primary.uri_name
+        if name_counts.get(official, 0) > 1:
+            official = f"{official} ({primary.user or 'no owner'})"
         nicknames = [n for n, _ in entries]
 
         # Union every location any alias for this archive knows about:
@@ -1052,10 +1084,14 @@ def cmd_archives(args):
                     locations.append(loc)
 
         if not args.long:
-            head = hl(f"{official:{NAME_W}}")
+            # Pad to the column, but never let a long name run into the
+            # path -- a disambiguated one ("shared (jane@lab.edu)") is well
+            # over the column width, and the two would otherwise touch.
+            padded = official.ljust(NAME_W) + " "
+            head = hl(padded)
             for i, loc in enumerate(locations):
                 label = f"  [{loc.label}]" if loc.label else ""
-                pref = "" if i == 0 else " " * NAME_W + " "
+                pref = "" if i == 0 else " " * len(padded)
                 print(f"{head if i == 0 else pref}{loc.value}{label}  {_location_mark(loc)}")
                 head = ""
             continue
@@ -1486,18 +1522,36 @@ def cmd_register(args):
 
     if args.remove:
         try:
-            cfg = reg.unregister(args.remove)
+            # Every entry pointing at that archive, not just the one whose
+            # key was typed: an archive reachable under several nicknames
+            # would otherwise still be listed afterwards, and --remove would
+            # look like it had done nothing.
+            gone_entries = reg.unregister_all(args.remove)
         except KeyError as e:
-            err(str(e))
+            err(str(e).strip("\"'"))
             sys.exit(1)
-        print(f"removed '{hl(args.remove)}' from the registry "
+        cfg = gone_entries[0]
+        names = ", ".join(f"'{hl(c.nickname)}'" for c in gone_entries)
+        also = " (and its aliases)" if len(gone_entries) > 1 else ""
+        print(f"removed {names}{also} from the registry "
               f"(files at {cfg.root} untouched)")
+        # Another archive can declare the same name. Say so: the row that
+        # is still there looks exactly like the one that just went.
+        still = [c.nickname for c in reg.all().values()
+                 if c.declared_name == cfg.declared_name]
+        if still:
+            # Flush first: stdout block-buffers when piped and stderr does
+            # not, so without this the two streams interleave backwards.
+            sys.stdout.flush()
+            warn(f"note: {len(still)} other archive(s) still declare the name "
+                 f"{cfg.declared_name!r} ({', '.join(sorted(still))}) -- "
+                 f"'nebula archives' shows their owners")
 
     if args.prune or args.remove:
         return
 
     if not args.root:
-        err("register needs ROOT (or --remove NICKNAME / --prune)")
+        err("register needs ROOT (or --remove NAME / --prune)")
         sys.exit(1)
 
     from nebula.config import archive_identity
@@ -2374,9 +2428,11 @@ def main(argv=None):
     p.add_argument("--git-org", help="GitHub org/user hosting this archive's repos")
     p.add_argument("--user", help="who owns this archive, for nebula:// URIs "
                                   "(omit for your own archives)")
-    p.add_argument("--remove", metavar="NICKNAME",
-                   help="remove one archive from the registry (its files "
-                        "are untouched)")
+    p.add_argument("--remove", metavar="NAME",
+                   help="forget an archive: any name it answers to, "
+                        "including the one 'nebula archives' shows. Removes "
+                        "every registry entry pointing at it; its files are "
+                        "untouched")
     p.add_argument("--prune", action="store_true",
                    help="remove every registered archive whose location "
                         "no longer exists on disk")

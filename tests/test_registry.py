@@ -151,3 +151,125 @@ def test_the_leak_guard_ignores_an_identical_rewrite(tmp_path):
     before = conftest._snapshot(watched, absent)
     (watched / "identity.yaml").write_text("user: g@x.edu\n")
     assert conftest._snapshot(watched, absent) == before
+
+
+# ---------------------------------------------------------------------
+# Names a user can actually type
+# ---------------------------------------------------------------------
+# `nebula archives` prints the name each archive *declares*, because that
+# is the portable one. Until this worked, no command accepted it: you read
+# "intake_name" and got back "unknown archive 'intake_name'. Known
+# archives: ['nebula_reg_name']" -- a machine telling somebody the word it
+# had just printed is not a word.
+
+def _registered(tmp_path, folder, *, name, user=None, key=None):
+    from nebula import transfer
+
+    root = tmp_path / folder
+    transfer.init_archive(root, name=name, user=user)
+    _reg().register_archive(root, key=key)
+    return root
+
+
+def test_an_archive_answers_to_its_declared_name(tmp_path):
+    root = _registered(tmp_path, "folder", name="declared", key="a-nickname")
+    reg = _reg()
+    assert reg.get("declared").root == root
+    assert reg.get("a-nickname").root == root
+    assert reg.resolve_one("declared").nickname == "a-nickname"
+
+
+def test_an_archive_answers_to_its_id(tmp_path):
+    from nebula.config import read_settings
+
+    root = _registered(tmp_path, "folder", name="declared", key="a-nickname")
+    ident = read_settings(root, apply_env=False).id
+    assert _reg().resolve_one(ident).root == root
+
+
+def test_an_exact_nickname_wins_over_a_declared_name(tmp_path):
+    """The nickname is the file's unique key, so typing one has to mean
+    exactly that entry -- it is the escape hatch that makes two archives
+    sharing a declared name separable at all."""
+    # `a` *declares* "shared"; `b` is *filed under* "shared".
+    a = _registered(tmp_path, "a", name="shared", user="me@here.edu",
+                    key="mine")
+    b = _registered(tmp_path, "b", name="other", user="me@here.edu",
+                    key="shared")
+    assert _reg().resolve_one("shared").root == b      # the key wins
+    assert _reg().resolve_one("mine").root == a
+    assert _reg().resolve_one("other").root == b
+
+
+def test_a_name_naming_two_archives_is_refused_not_guessed(tmp_path):
+    """Picking one silently is how somebody deletes the wrong entry."""
+    _registered(tmp_path, "a", name="shared", user="me@here.edu",
+                key="mine")
+    _registered(tmp_path, "b", name="shared", user="jane@lab.edu",
+                key="theirs")
+    with pytest.raises(KeyError, match="different archives"):
+        _reg().resolve_one("shared")
+
+
+def test_several_nicknames_for_one_archive_are_not_ambiguous(tmp_path):
+    """Aliases are several doors into one room, so the first is as good as
+    any -- unlike two rooms."""
+    root = _registered(tmp_path, "folder", name="declared", key="first")
+    _reg().register_archive(root, key="second")
+    assert _reg().resolve_one("declared").root == root
+
+
+def test_an_unknown_name_lists_the_names_that_would_have_worked(tmp_path):
+    _registered(tmp_path, "folder", name="declared", key="a-nickname")
+    with pytest.raises(KeyError) as exc:
+        _reg().resolve_one("nonsense")
+    message = str(exc.value)
+    assert "declared" in message and "a-nickname" in message
+
+
+def test_unregister_takes_the_declared_name(tmp_path):
+    """The reported bug: --remove only accepted the registry's own key."""
+    _registered(tmp_path, "folder", name="declared", key="a-nickname")
+    removed = _reg().unregister("declared")
+    assert removed.nickname == "a-nickname"
+    assert _reg().all() == {}
+
+
+def test_unregistering_forgets_every_alias_for_that_archive(tmp_path):
+    """Removing one door leaves the others open, so --remove appears to do
+    nothing -- the archive is still listed afterwards."""
+    root = _registered(tmp_path, "folder", name="declared", key="first")
+    _reg().register_archive(root, key="second")
+    assert len(_reg().all()) == 2
+
+    gone = _reg().unregister_all("declared")
+    assert sorted(c.nickname for c in gone) == ["first", "second"]
+    assert _reg().all() == {}
+
+
+def test_unregistering_leaves_a_different_archive_alone(tmp_path):
+    a = _registered(tmp_path, "a", name="alpha", key="alpha")
+    b = _registered(tmp_path, "b", name="beta", key="beta")
+    _reg().unregister_all("alpha")
+    assert list(_reg().all()) == ["beta"]
+    assert b.is_dir() and a.is_dir()        # files are never touched
+
+
+def test_try_get_accepts_exactly_what_get_does(tmp_path):
+    """The two diverging is the shape of bug that let `nebula archives`
+    print a name every other command rejected."""
+    _registered(tmp_path, "folder", name="declared", key="a-nickname")
+    reg = _reg()
+    for name in ("declared", "a-nickname"):
+        assert reg.try_get(name) is not None
+        assert reg.get(name).nickname == "a-nickname"
+    assert reg.try_get("nonsense") is None
+
+
+def test_try_get_is_quiet_about_an_ambiguous_name(tmp_path):
+    """A caller who wanted to be told would have used get()."""
+    _registered(tmp_path, "a", name="shared", user="me@here.edu", key="mine")
+    _registered(tmp_path, "b", name="shared", user="jane@lab.edu", key="theirs")
+    assert _reg().try_get("shared") is None
+    with pytest.raises(KeyError):
+        _reg().get("shared")

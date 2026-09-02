@@ -311,22 +311,95 @@ class Registry:
                 archive_id=str(cfg.get("id") or ""),
             )
 
-    def get(self, nickname: str) -> ArchiveConfig:
+    def lookup(self, text: str) -> "list[ArchiveConfig]":
+        """Every entry `text` could mean, by any name a user can see.
+
+        A registry nickname is the file's key, but it is *not* what
+        `nebula archives` puts in front of people -- that shows the name
+        the archive declares for itself, because that is the portable one.
+        So a user reads `intake_name` and types `intake_name`, and until
+        this existed every command answered "unknown archive
+        'intake_name'. Known archives: ['nebula_reg_name']", which is a
+        machine telling somebody the word it just printed is not a word.
+
+        Matching order is exactness first: a nickname is the unique key, so
+        an exact hit on one is the answer and nothing else is considered.
+        Otherwise the declared name and the archive id are tried, either of
+        which can legitimately match several entries.
+        """
         self._load()
-        if nickname not in self._archives:
+        if text in self._archives:
+            return [self._archives[text]]
+
+        from nebula import archive_id as archive_id_mod
+
+        return [cfg for cfg in self._archives.values()
+                if cfg.declared_name == text
+                or archive_id_mod.same_id(cfg.archive_id, text)]
+
+    def resolve_one(self, text: str) -> ArchiveConfig:
+        """The single archive `text` names, or a KeyError explaining why not.
+
+        Several entries for *one* archive -- an alias, or the
+        `<user>-<name>` fallback -- are not ambiguous: they are several
+        doors into the same room, so the first is as good as any. Several
+        entries for *different* archives are, and picking one silently is
+        how somebody deletes the wrong registry entry.
+        """
+        matches = self.lookup(text)
+        if not matches:
+            raise KeyError(self._unknown_message(text))
+        roots = {str(Path(cfg.root).resolve()) for cfg in matches}
+        if len(roots) > 1:
             raise KeyError(
-                f"unknown archive {nickname!r}. Known archives: "
-                f"{sorted(self._archives) or '(none registered)'}. "
-                f"Check {self.path}"
-            )
-        return self._archives[nickname]
+                f"{text!r} names {len(roots)} different archives here "
+                f"({', '.join(sorted(cfg.nickname for cfg in matches))}). "
+                f"Use one of those names to say which.")
+        return matches[0]
+
+    def _unknown_message(self, text: str) -> str:
+        """What to say when nothing matches -- listing every name that
+        *would* have worked, not just the registry's own keys."""
+        self._load()
+        names = set()
+        for nickname, cfg in self._archives.items():
+            names.add(nickname)
+            if cfg.declared_name:
+                names.add(cfg.declared_name)
+        return (f"unknown archive {text!r}. Known archives: "
+                f"{sorted(names) or '(none registered)'}. "
+                f"Check {self.path}")
+
+    def get(self, nickname: str) -> ArchiveConfig:
+        """Look up by any name a user can see -- see `lookup`.
+
+        Still called `get` and still raises KeyError, so every existing
+        caller behaves as it did; it has simply stopped refusing names the
+        rest of nebula prints.
+        """
+        self._load()
+        if nickname in self._archives:
+            return self._archives[nickname]
+        return self.resolve_one(nickname)
 
     def try_get(self, nickname: str) -> Optional[ArchiveConfig]:
         """Like get(), but returns None instead of raising -- useful for
         gracefully reporting an unresolved external reference (e.g. the
-        other archive's NAS share isn't mounted on this machine)."""
+        other archive's NAS share isn't mounted on this machine).
+
+        "Like get()" is meant literally, including which names it accepts:
+        the two diverging is precisely the shape of bug that let `nebula
+        archives` print a name every other command then rejected. An
+        ambiguous name is None here rather than an error, because a caller
+        who wanted to be told would have used `get`.
+        """
         self._load()
-        return self._archives.get(nickname)
+        if nickname in self._archives:
+            return self._archives[nickname]
+        try:
+            return self.resolve_one(nickname)
+        except KeyError:
+            return None
 
     def all(self) -> Dict[str, ArchiveConfig]:
         self._load()
@@ -392,12 +465,36 @@ class Registry:
     def unregister(self, nickname: str) -> ArchiveConfig:
         """Remove one entry from the registry. Does not touch anything on
         disk -- the archive itself is untouched, only this machine's
-        pointer to it is forgotten. Returns the removed entry."""
+        pointer to it is forgotten. Returns the removed entry.
+
+        Accepts any name the archive answers to, since the one people have
+        in front of them is whatever `nebula archives` printed. Removing by
+        a *declared* name that several entries share is refused rather than
+        guessed at -- see `resolve_one`.
+        """
         self._load()
-        cfg = self.get(nickname)   # raises KeyError with the same message as get()
-        del self._archives[nickname]
+        cfg = self.resolve_one(nickname)
+        del self._archives[cfg.nickname]
         self._save()
         return cfg
+
+    def unregister_all(self, text: str) -> "list[ArchiveConfig]":
+        """Forget every entry pointing at the archive `text` names.
+
+        One archive can be reachable under several nicknames, and removing
+        one door leaves the others open -- so `nebula register --remove`
+        appears to do nothing. This forgets the archive rather than the
+        entry.
+        """
+        self._load()
+        cfg = self.resolve_one(text)
+        root = str(Path(cfg.root).resolve())
+        doomed = [c for c in self._archives.values()
+                  if str(Path(c.root).resolve()) == root]
+        for one in doomed:
+            del self._archives[one.nickname]
+        self._save()
+        return doomed
 
     def prune(self) -> "list[tuple[str, ArchiveConfig]]":
         """Drop every registered archive whose location(s) are no longer
