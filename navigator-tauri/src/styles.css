@@ -321,15 +321,22 @@ body.resizing *, body.resizing-y * { pointer-events:none; }
 .dlg-body { padding:8px 18px 4px; display:flex; flex-direction:column; gap:12px; }
 .dlg-arc { font-size:12.5px; color:var(--text-dim); margin-top:-4px; }
 .dlg-arc b { color:var(--text); }
+/* flex-shrink:0 is load-bearing on every scrollable box in a dialog body.
+   .dlg-body is a flex column, and an item with `overflow` set has its
+   min-height resolve to 0 instead of its content -- so once the body has
+   more in it than fits, flex squashes these to a sliver and crops the
+   first row in half. They cap their own height already; the body scrolls. */
 .filelist, .bulk-list { background:var(--panel-2); border:1px solid var(--border); border-radius:8px; padding:8px 10px;
-            max-height:78px; overflow:auto; display:flex; flex-direction:column; gap:2px; }
+            max-height:78px; overflow:auto; display:flex; flex-direction:column; gap:2px;
+            flex-shrink:0; }
 .filelist .f, .bulk-list .f { font-size:12px; color:var(--text-dim); font-family:var(--mono); }
 .bulk-note { font-size:12px; }
 .bulk-note.err { color:var(--danger, #c33); }
 .bulk-note.ok { color:var(--text-faint); }
 .bulk-taggrid { display:grid; grid-template-columns:1fr 1fr; gap:12px; }
 .bulk-taglist { background:var(--panel-2); border:1px solid var(--border); border-radius:8px; padding:6px;
-                max-height:96px; overflow:auto; display:flex; flex-wrap:wrap; align-content:flex-start; gap:4px; }
+                max-height:96px; overflow:auto; display:flex; flex-wrap:wrap; align-content:flex-start; gap:4px;
+                flex-shrink:0; }
 .bulk-taglist .none { font-size:11px; color:var(--text-faint); padding:2px 4px; }
 .bulk-taglist .chip { user-select:none; }
 .bulk-taglist .chip.staged { background:var(--err-bg); color:var(--err); text-decoration:line-through; }
@@ -734,7 +741,7 @@ body.dragging-entry { cursor:grabbing; user-select:none; }
             padding:2px 0 10px; }
 .xfer-sum .big { font-size:17px; font-weight:650; }
 .xfer-list { max-height:280px; overflow:auto; border:1px solid var(--border);
-             border-radius:8px; }
+             border-radius:8px; flex-shrink:0; }
 .xfer-row { display:flex; gap:9px; align-items:baseline; padding:5px 10px;
             font-size:12px; border-bottom:1px solid var(--border); }
 .xfer-row:last-child { border-bottom:none; }
@@ -757,7 +764,7 @@ body.marquee-on, body.marquee-on * { user-select:none; }
 
 /* tree picker in the add-to-collection dialog */
 .pick-tree { max-height:220px; overflow:auto; border:1px solid var(--border);
-             border-radius:8px; background:var(--field); padding:4px 0; }
+             border-radius:8px; background:var(--field); padding:4px 0; flex-shrink:0; }
 .pick-tree.off { opacity:.45; pointer-events:none; }
 .pick-row { display:flex; align-items:center; gap:6px; padding:4px 10px; font-size:12.5px;
             cursor:default; }
