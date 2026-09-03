@@ -19,7 +19,7 @@ filename still resolves. Collections have one. Archives had neither: change
 `archive.yaml`'s `name` and every URI ever written into that archive dangles,
 silently, with no way back.
 
-This became urgent the moment `nebula uri` and the Navigator's "Get URI"
+This became urgent the moment `nebula uri` and the Navigator's "Copy URI"
 started handing people strings to keep. Before that, nothing could go stale
 because nothing was ever held.
 

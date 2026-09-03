@@ -1,4 +1,4 @@
-// jsdom harness for the Navigator's "Get URI" feature.
+// jsdom harness for the Navigator's "Copy URI" feature.
 //
 //     cd navigator-tauri && npm install && npm test
 //
@@ -85,27 +85,30 @@ async function main() {
   ok($("uriText"), "#uriText exists");
   ok($("uriCopy"), "#uriCopy exists");
 
-  console.log("showUri populates and opens the dialog");
+  console.log("copyUri copies straight to the clipboard, with no dialog");
+  const toasts = [];
+  win.__toasts = toasts;
+  run("toast = (m) => { window.__toasts.push(m); };");
   run('archive = "postdoc"');
-  await win.showUri({ session: "S-26-0001", file: "raw.csv" }, "S-26-0001/raw.csv");
+  await win.copyUri({ session: "S-26-0001", file: "raw.csv" }, "S-26-0001/raw.csv");
   const last = calls[calls.length - 1];
   eq(last.op, "uri", "calls the uri op");
   eq(last.args.archive, "postdoc", "passes the active archive");
   eq(last.args.file, "raw.csv", "passes the filename");
-  ok($("uriScrim").classList.contains("show"), "dialog is shown");
-  eq($("uriText").value, uriResponse.uri, "URI is in the box");
-  ok($("uriMeta").textContent.includes("/archives/postdoc"), "path is shown");
-  ok($("uriWarn").classList.contains("hidden"), "no warning block for a clean URI");
-  ok(!$("uriCopy").disabled, "Copy is enabled");
+  eq(copied[copied.length - 1], uriResponse.uri, "the URI is on the clipboard");
+  ok(!$("uriScrim").classList.contains("show"), "no dialog is opened");
+  eq(toasts[toasts.length - 1], "URI copied", "and it says so");
 
-  console.log("Copy button");
-  await $("uriCopy").onclick();
-  eq(copied[copied.length - 1], uriResponse.uri, "copies the URI");
-  ok(!$("uriScrim").classList.contains("show"), "closes after copying");
+  console.log("an unreachable clipboard falls back to the dialog");
+  const realClipboard = win.navigator.clipboard.writeText;
+  win.navigator.clipboard.writeText = async () => { throw new Error("denied"); };
+  await win.copyUri({ session: "S-26-0001", file: "raw.csv" }, "S-26-0001/raw.csv");
+  ok($("uriScrim").classList.contains("show"), "the dialog opens instead");
+  eq($("uriText").value, uriResponse.uri, "with the URI in the box to select by hand");
+  ok(toasts[toasts.length - 1].includes("Cmd/Ctrl-C"), "and says how to copy it");
+  win.navigator.clipboard.writeText = realClipboard;
 
-  console.log("Escape closes it");
-  await win.showUri({ session: "S-26-0001" }, "S-26-0001");
-  ok($("uriScrim").classList.contains("show"), "reopened");
+  console.log("Escape closes the dialog");
   win.document.dispatchEvent(new win.KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
   ok(!$("uriScrim").classList.contains("show"), "Escape closed it");
 
@@ -114,24 +117,26 @@ async function main() {
     ok: false, uri: null, error: "no owner", archive: "scratch",
     warnings: ["this archive declares no owner, so the URI names nobody"],
   };
-  await win.showUri({ session: "S-26-0001" }, "S-26-0001");
+  await win.copyUri({ session: "S-26-0001" }, "S-26-0001");
+  ok($("uriScrim").classList.contains("show"), "the dialog opens when nothing can be copied");
   eq($("uriText").value, "", "no URI in the box");
   ok(!$("uriWarn").classList.contains("hidden"), "the warning block is shown");
   ok($("uriWarn").textContent.includes("declares no owner"), "and says why");
   ok($("uriCopy").disabled, "Copy is disabled when there is nothing to copy");
   $("uriClose").onclick();
 
-  console.log("a warning on a URI that IS minted is shown alongside it");
+  console.log("a caveat on a URI that IS minted rides along with the copy");
   uriResponse = {
     ok: true, uri: "nebula://grant@local/postdoc/S-26-0001", kind: "session",
     user: "grant@local", archive: "postdoc", path: "/p", exists: true,
     unique: false, warnings: ["the owner 'grant@local' is a local name"],
     error: null, label: "S-26-0001",
   };
-  await win.showUri({ session: "S-26-0001" }, "S-26-0001");
-  eq($("uriText").value, "nebula://grant@local/postdoc/S-26-0001", "URI still offered");
-  ok(!$("uriWarn").classList.contains("hidden"), "caveat shown with it");
-  $("uriClose").onclick();
+  copied.length = 0;
+  await win.copyUri({ session: "S-26-0001" }, "S-26-0001");
+  eq(copied[0], "nebula://grant@local/postdoc/S-26-0001", "it is copied, caveat and all");
+  ok(!$("uriScrim").classList.contains("show"), "still no dialog");
+  ok(toasts[toasts.length - 1].includes("local name"), "the caveat is in the toast");
 
   console.log("menus offer it");
   const menus = [];
@@ -147,17 +152,17 @@ async function main() {
   win.assetContextMenu(0, 0, "AF-26-0017");
   const names = ["item", "session", "collection", "entry", "asset"];
   menus.forEach((entries, i) => {
-    const hit = entries.find((e) => e.label && e.label.startsWith("Get URI"));
-    ok(!!hit, `${names[i]} menu has a Get URI entry`);
+    const hit = entries.find((e) => e.label && e.label.startsWith("Copy URI"));
+    ok(!!hit, `${names[i]} menu has a Copy URI entry`);
     ok(hit && !hit.disabled, `${names[i]} menu's entry is enabled`);
   });
 
-  console.log("multi-select copies a list instead of opening the dialog");
+  console.log("multi-select copies a list");
   run('picked = [{ name: "a.csv" }, { name: "b.csv" }]; selected = picked[0];');
   menus.length = 0;
   win.showItemMenu(0, 0);
-  const multi = menus[0].find((e) => e.label && e.label.startsWith("Get URIs"));
-  ok(!!multi, "label switches to Get URIs (2)");
+  const multi = menus[0].find((e) => e.label && e.label.startsWith("Copy URIs"));
+  ok(!!multi, "label switches to Copy URIs (2)");
   uriResponse = { ok: true, uri: "nebula://g@ncsu.edu/postdoc/S-26-0001/x.csv", warnings: [] };
   copied.length = 0;
   await multi.action();

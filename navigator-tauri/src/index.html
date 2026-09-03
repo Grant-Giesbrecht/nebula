@@ -704,10 +704,11 @@
     </div>
   </div>
 
-  <!-- "Get URI": the citable name of whatever was right-clicked. A dialog
-       rather than a toast because the string is long, worth reading before
-       it is pasted somewhere permanent, and may come with caveats about
-       whether it is actually unique. -->
+  <!-- "Copy URI" falls back to this: the citable name of whatever was
+       right-clicked, shown when there is nothing to copy (and the reason
+       needs room to explain itself) or when the webview cannot reach the
+       clipboard, in which case the string is selected for Cmd/Ctrl-C. A
+       URI that copies cleanly never opens this. -->
   <div class="scrim" id="uriScrim">
     <div class="dialog" role="dialog" aria-modal="true" aria-labelledby="uriHead">
       <div class="dlg-head" id="uriHead">Nebula URI</div>
