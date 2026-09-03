@@ -24,7 +24,7 @@ import os
 import re
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Dict, List, Optional
+from typing import Any, Dict, List, Optional
 
 from nebula import annotations
 from nebula.index import _iter_session_dirs
@@ -1614,6 +1614,61 @@ def code_file(archive, code: str, path: str) -> dict:
 
     root, _ = resolve(archive)
     return codestore.read_file(root, code, path)
+
+
+def resolve_uri(text: str) -> dict:
+    """What a ``nebula://`` URI points at *on this machine*, for the
+    Navigator's URL handler.
+
+    Never raises for an unresolvable URI: "no archive by that name is
+    registered here" is the ordinary case for a link that arrived from a
+    colleague, not an error condition, and the handler needs the message
+    to show rather than an exception to swallow. `ok` says whether the
+    archive was found; `exists` says whether the thing inside it is
+    actually there, which is a separate question with a separate answer.
+    """
+    from nebula import uris
+    from nebula.registry import get_registry
+
+    out: Dict[str, Any] = {
+        "ok": False, "input": text, "error": None, "kind": None,
+        "archive": None, "archive_root": None, "user": None,
+        "run_id": None, "filename": None, "collection": None, "asset": None,
+        "path": None, "exists": False,
+    }
+    try:
+        root, ref = uris.resolve_any(text)
+    except uris.UriError as e:
+        out["error"] = str(e)
+        return out
+    except ValueError as e:              # a malformed URI, from parse_ref
+        out["error"] = str(e)
+        return out
+
+    out["ok"] = True
+    out["archive_root"] = str(root)
+    out["user"] = ref.user
+    out["run_id"] = ref.session
+    out["filename"] = ref.file
+    out["collection"] = ref.collection
+    out["asset"] = ref.asset
+    out["kind"] = ("file" if ref.file else "session" if ref.session
+                   else "collection" if ref.collection else "asset" if ref.asset
+                   else "archive")
+
+    # The front-end addresses archives by registered name where there is
+    # one -- that is what its switcher lists -- and falls back to the path.
+    for name, cfg in get_registry().all().items():
+        if Path(cfg.root) == root:
+            out["archive"] = name
+            break
+    else:
+        out["archive"] = str(root)
+
+    path = uris.target_path(root, ref)
+    out["path"] = str(path) if path else None
+    out["exists"] = bool(path and path.exists())
+    return out
 
 
 def code_blob(archive, blob: str) -> dict:

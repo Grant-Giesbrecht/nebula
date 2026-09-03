@@ -46,10 +46,15 @@ async function main() {
     unique: true, warnings: [], error: null, label: "S-26-0001/raw.csv",
   };
   const copied = [];
+  let uriQueue = [];
+  let resolveResponse = null;
   win.__TAURI__ = {
     core: { invoke: async (cmd, payload) => {
+      // take_uris is a plain Rust command, not a bridge op: no payload.
+      if (cmd === "take_uris") { const q = uriQueue; uriQueue = []; return q; }
       calls.push(payload);
       if (payload.op === "uri") return uriResponse;
+      if (payload.op === "resolve_uri") return resolveResponse;
       if (payload.op === "file_manager_name") return { name: "Finder" };
       return {};
     } },
@@ -169,6 +174,46 @@ async function main() {
   eq(copied.length, 1, "one clipboard write");
   eq(copied[0].split("\n").length, 2, "two URIs, one per line");
   ok(!$("uriScrim").classList.contains("show"), "no dialog for a multi-selection");
+
+  // ---- incoming links --------------------------------------------------
+  console.log("a nebula:// link handed over by the OS is resolved and opened");
+  const resolved = {
+    ok: true, error: null, kind: "file", archive: "postdoc",
+    archive_root: "/archives/postdoc", user: "g@ncsu.edu",
+    run_id: "S-26-0001", filename: "raw.csv", collection: null, asset: null,
+    path: "/archives/postdoc/data/2026/S-26-0001/raw.csv", exists: true,
+  };
+  uriQueue = ["nebula://g@ncsu.edu/postdoc~ab12/S-26-0001/raw.csv"];
+  resolveResponse = resolved;
+  const went = [];
+  win.__went = went;
+  run("gotoRunId = async (r, f) => { window.__went.push([r, f]); };");
+  run('archive = "postdoc";');
+  await win.drainUris();
+  eq(calls[calls.length - 1].args.uri,
+     "nebula://g@ncsu.edu/postdoc~ab12/S-26-0001/raw.csv", "the whole URI is handed to the backend");
+  eq(JSON.stringify(went[0]), JSON.stringify(["S-26-0001", "raw.csv"]),
+     "and it navigates to the artefact it names");
+  ok(!$("uriScrim").classList.contains("show"), "no dialog for a link that works");
+
+  console.log("a link to an archive this machine does not have explains itself");
+  resolveResponse = { ok: false, error: "no archive 'theirs' owned by 'someone@else.edu' "
+                      + "is registered on this machine.", archive_root: null };
+  await win.openNebulaUri("nebula://someone@else.edu/theirs/S-26-0001/raw.csv");
+  ok($("uriScrim").classList.contains("show"), "the dialog opens");
+  ok($("uriWarn").textContent.includes("registered on this machine"),
+     "carrying the backend's own explanation");
+  eq($("uriText").value, "nebula://someone@else.edu/theirs/S-26-0001/raw.csv",
+     "and the link itself, to copy or forward");
+  $("uriClose").onclick();
+
+  console.log("an asset link selects the asset and shows the browser");
+  resolveResponse = Object.assign({}, resolved, {
+    kind: "asset", run_id: null, filename: null, asset: "AF-26-0017", exists: true });
+  run("setRailTab = (t) => { window.__rail = t; };");
+  await win.openNebulaUri("nebula://g@ncsu.edu/postdoc/assets/AF-26-0017");
+  eq(run("assetSel"), "AF-26-0017", "the asset is selected");
+  eq(win.__rail, "assets", "and the rail moves to Assets");
 
   console.log(`\n${checks - failures}/${checks} assertions passed`);
   process.exit(failures ? 1 : 0);

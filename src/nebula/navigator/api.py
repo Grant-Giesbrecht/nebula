@@ -378,6 +378,10 @@ def op_code_file(args: Dict[str, Any]) -> Dict[str, Any]:
     return model.code_file(args["archive"], args["code"], args["path"])
 
 
+def op_resolve_uri(args: Dict[str, Any]) -> Dict[str, Any]:
+    return model.resolve_uri(args["uri"])
+
+
 def op_code_blob(args: Dict[str, Any]) -> Dict[str, Any]:
     return model.code_blob(args["archive"], args["blob"])
 
@@ -1037,6 +1041,7 @@ OPS = {
     "reveal_path": op_reveal_path,
     "file_manager_name": op_file_manager_name,
     "uri": op_uri,
+    "resolve_uri": op_resolve_uri,
 }
 
 

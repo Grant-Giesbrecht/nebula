@@ -297,3 +297,76 @@ def test_a_name_that_could_never_appear_in_a_uri_is_refused(tmp_path, capsys):
     with pytest.raises(SystemExit):
         main(["config", "postdoc", "--name", "post~doc"])
     assert "~" in capsys.readouterr().err
+
+
+# ---------------------------------------------------------------------
+# the Navigator's URL handler
+# ---------------------------------------------------------------------
+
+def test_resolve_uri_finds_a_file(tmp_path):
+    from nebula.navigator import model
+
+    root = _archive(tmp_path / "postdoc", name="postdoc")
+    s = _session(root)
+    got = model.resolve_uri(f"nebula://g@ncsu.edu/{_seg(root)}/{s.id}/raw.csv")
+    assert got["ok"] and got["error"] is None
+    assert got["kind"] == "file"
+    assert got["run_id"] == s.id and got["filename"] == "raw.csv"
+    assert got["archive"] == "postdoc"            # the registered name, for the switcher
+    assert got["archive_root"] == str(root)
+    assert got["exists"] and got["path"].endswith("raw.csv")
+
+
+def test_resolve_uri_of_a_session_and_an_archive(tmp_path):
+    from nebula.navigator import model
+
+    root = _archive(tmp_path / "postdoc", name="postdoc")
+    s = _session(root)
+    session = model.resolve_uri(f"nebula://g@ncsu.edu/{_seg(root)}/{s.id}")
+    assert session["kind"] == "session" and session["filename"] is None
+    assert session["run_id"] == s.id and session["exists"]
+
+    whole = model.resolve_uri(f"nebula://g@ncsu.edu/{_seg(root)}")
+    assert whole["kind"] == "archive" and whole["run_id"] is None
+    assert whole["path"] == str(root)
+
+
+def test_resolve_uri_reports_an_unknown_archive_rather_than_raising(tmp_path):
+    """The ordinary case for a link from a colleague. The handler needs a
+    sentence to show, not an exception to swallow."""
+    from nebula.navigator import model
+
+    got = model.resolve_uri("nebula://someone@else.edu/theirs/S-26-0001/raw.csv")
+    assert got["ok"] is False
+    assert "registered on this machine" in got["error"]
+    assert got["archive_root"] is None
+
+
+def test_resolve_uri_separates_missing_target_from_missing_archive(tmp_path):
+    """A URI naming a file that has since gone still resolves: the archive
+    is here, the file is not, and those are different problems."""
+    from nebula.navigator import model
+
+    root = _archive(tmp_path / "postdoc", name="postdoc")
+    s = _session(root)
+    got = model.resolve_uri(f"nebula://g@ncsu.edu/{_seg(root)}/{s.id}/gone.csv")
+    assert got["ok"] and got["exists"] is False
+    assert got["filename"] == "gone.csv"
+
+
+def test_resolve_uri_rejects_something_that_is_not_a_uri(tmp_path):
+    from nebula.navigator import model
+
+    got = model.resolve_uri("https://example.com/whatever")
+    assert got["ok"] is False and got["error"]
+
+
+def test_resolve_uri_accepts_the_compact_form(tmp_path):
+    """The same handler serves a pasted `postdoc|S-.../file` ref, which is
+    what people actually put in a derived_from."""
+    from nebula.navigator import model
+
+    root = _archive(tmp_path / "postdoc", name="postdoc")
+    s = _session(root)
+    got = model.resolve_uri(f"postdoc|{s.id}/raw.csv")
+    assert got["ok"] and got["run_id"] == s.id and got["filename"] == "raw.csv"

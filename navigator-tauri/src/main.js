@@ -344,10 +344,12 @@ const TAB_ICONS = {
 };
 
 function renderTabs() {
-  // A single tab is just "the window", so the strip stays out of the way
-  // until there is actually a choice to make.
-  $("tabbar").classList.toggle("hidden", tabs.length < 2);
-  $("tabstrip").innerHTML = tabs.map((t) => `
+  // A single tab is just "the window", so its chip stays out of the way
+  // until there is actually a choice to make -- but the bar itself does
+  // not, because it holds the only button that makes a tab. Tabs are
+  // created here and by Cmd-T, and by nothing else: a click that quietly
+  // spawns one is a click nobody can predict.
+  $("tabstrip").innerHTML = tabs.length < 2 ? "" : tabs.map((t) => `
     <div class="wtab ${t.id === activeTab ? "on" : ""}" data-tab="${t.id}" title="${escapeHtml(tabTitle(t))}">
       <span class="wt-ico">${TAB_ICONS[t.kind] || ""}</span>
       <span class="wt-label">${escapeHtml(tabTitle(t))}</span>
@@ -2107,15 +2109,50 @@ function setRailTab(tab, { keepLocation = false } = {}) {
     else renderItemArea();
   }
   if (tab === "collections") loadCollections();
-  if (tab === "assets" && !keepLocation) openAssetsFromRail();
   if (tab === "views") loadViews();
-  // Leaving Assets has to take the main area with it, otherwise the rail
-  // says "Sessions" while the asset grid is still on screen and the click
-  // reads as broken.
-  if (tab !== "assets") {
-    const cur = activeTabObj();
-    if (cur && cur.kind === "assets") returnToBrowseTab();
+  // Assets shares the main area with everything else in the rail, so
+  // switching to or from it changes what *this* tab shows. It used to
+  // reach for a window tab instead, which made one of the four rail
+  // buttons behave unlike the other three, and made leaving it land in
+  // some other browse tab -- whose own saved rail tab then overwrote the
+  // one just clicked, so "Searches" arrived at "Sessions".
+  if (!keepLocation) showAssets(tab === "assets", { railTo: tab });
+}
+
+// Turn the current tab's main area into the asset browser, or back into
+// the browse view it was showing before. In place, always: the tab is the
+// window, and the rail decides what is in it.
+async function showAssets(on, { railTo = null } = {}) {
+  const cur = activeTabObj();
+  if (!cur) return;
+  if (on) {
+    if (cur.kind === "assets") { await loadAssets(); return; }
+    // A tree or index tab owns its main area and hides the rail entirely,
+    // so there is nothing to swap; the rail button is only a preference
+    // until a browse tab is in front again.
+    if (cur.kind !== "browse") return;
+    cur.back = browseState();
+    cur.kind = "assets";
+    cur.state = { policy: assetPolicyFilter, query: assetQuery, sort: assetSort };
+    saveTabs();
+    renderTabs();
+    applyTabChrome();
+    await renderAssetTab(cur);
+    return;
   }
+  if (cur.kind !== "assets") return;
+  // Restore where this tab was, but under the rail tab that was just
+  // clicked -- the stored state remembers where the tab used to be, and
+  // letting it win is what made the rail snap back to Sessions.
+  const back = Object.assign({}, cur.back || {});
+  if (railTo) back.railTab = railTo;
+  cur.kind = "browse";
+  cur.state = back;
+  delete cur.back;
+  saveTabs();
+  renderTabs();
+  applyTabChrome();
+  await restoreBrowse(cur.state);
 }
 
 async function loadCollections() {
@@ -4099,8 +4136,9 @@ async function copyUri(spec, what) {
 // The explainer, and the clipboard fallback. No longer part of copying a
 // URI that works: that used to mean a dialog whose only real button was
 // Copy, in front of a string nobody needed to read.
-function showUri(info, what) {
-  $("uriWhat").innerHTML = `The nebula URI for <b>${escapeHtml(what || info.label || "")}</b>`;
+function showUri(info, what, { heading = null } = {}) {
+  $("uriWhat").innerHTML = heading
+    || `The nebula URI for <b>${escapeHtml(what || info.label || "")}</b>`;
   const box = $("uriText");
   box.value = info.uri || "";
   $("uriMeta").textContent = info.ok
@@ -4116,6 +4154,64 @@ function showUri(info, what) {
   // without depending on the clipboard API being available at all.
   box.focus();
   box.select();
+}
+
+// ---- opening a nebula:// link from outside ------------------------------
+// The OS hands these to us (see the deep-link plugin in main.rs): a URI
+// someone pasted into a paper, an email, a lab notebook. Rust queues them
+// and says when there is something to take, because a link that *launches*
+// the app arrives before any of this exists to hear about it.
+async function drainUris() {
+  let urls = [];
+  try {
+    urls = await invoke("take_uris");
+  } catch (e) {
+    return;      // an older build of the Rust side, with no queue in it
+  }
+  for (const url of urls) await openNebulaUri(url);
+}
+
+// A URI names an owner and an archive id, so a link that arrives from
+// somebody else usually points at an archive this machine has never seen.
+// That is the ordinary case, not the error case, and it gets the dialog:
+// the backend's message says whether to plug a drive in or to go and ask
+// for the archive, and those are different jobs.
+async function openNebulaUri(text) {
+  let res;
+  try {
+    res = await call("resolve_uri", { uri: text });
+  } catch (e) {
+    toast(/unknown op/.test(String(e))
+      ? "This build's Python sidecar predates URI opening — rebuild it with ./build-sidecar.sh"
+      : `Could not open that link: ${e}`);
+    return;
+  }
+  if (!res.ok) {
+    showUri({ uri: text, ok: false, warnings: [res.error] }, text,
+            { heading: "This link points somewhere this machine cannot reach" });
+    return;
+  }
+
+  if (res.archive && res.archive !== archive) await loadArchive(res.archive);
+  if (res.asset) {
+    // Set the selection first: entering the asset browser loads the list
+    // and keeps a selection that is still in it.
+    assetSel = res.asset;
+    setRailTab("assets");
+    if (!res.exists) toast(`${res.asset} is not in this archive any more`);
+    return;
+  }
+  if (res.collection) {
+    setRailTab("collections");
+    await loadCollections();
+    await showCollection(res.collection, { push: false });
+    return;
+  }
+  if (res.run_id) {
+    await gotoRunId(res.run_id, res.filename);
+    return;
+  }
+  toast(`Opened ${activeLabel()}`);
 }
 
 // A whole selection at once. Copies rather than opening the dialog: there
@@ -5918,6 +6014,10 @@ function initShortcuts() {
     .catch((e) => console.error("menu listener failed", e));
   tauriEvent.listen("nebula://accept", (e) => acceptFromWindow(e.payload))
     .catch((e) => console.error("window hand-off listener failed", e));
+  // Rust emits this with no payload: the queue it fills is the only source
+  // of truth, so a URL cannot be handled twice or lost to a race.
+  tauriEvent.listen("nebula-uri://arrived", () => drainUris())
+    .catch((e) => console.error("uri listener failed", e));
   tauriEvent.listen("nebula://changed", () => {
     // Someone else edited what we may be showing.
     if (showSc && selected) openSidecarPanel(selected);
@@ -6287,8 +6387,15 @@ async function boot() {
   syncViewOptions();
   loadIdentity();
   showCal = LS.get("nebula.showCal", false);
-  setRailTab(LS.get("nebula.railTab", "sessions"));
+  // keepLocation: there is no tab yet for the rail to act on, and the
+  // restored tabs decide below what is actually on screen.
+  setRailTab(LS.get("nebula.railTab", "sessions"), { keepLocation: true });
   restoreTabs();
+  // The tab kind is what was really on screen last time, so it wins over
+  // the remembered rail tab if the two ever disagree.
+  const restored = activeTabObj();
+  if (restored && restored.kind === "assets") setRailTab("assets", { keepLocation: true });
+  else if (railTab === "assets") setRailTab("sessions", { keepLocation: true });
   archives = LS.get("nebula.archives", []);
   const last = localStorage.getItem("nebula.archive") || null;
   if (!archives.length && last) archives = [{ id: last, label: last }];
@@ -6314,12 +6421,16 @@ async function boot() {
       const tab = activeTabObj();
       if (tab && tab.kind === "tree") await renderTreeTab(tab);
       else if (tab && tab.kind === "index") await renderIndexTab(tab);
+      else if (tab && tab.kind === "assets") await renderAssetTab(tab);
       else if (tab && tab.state && (tab.state.sessionRun || tab.state.collection
                                     || tab.state.searchMode)) {
         await restoreBrowse(tab.state);
       }
     } catch (e) { toast(`Startup error: ${e}`); }
   }
+  // Last: a nebula:// link may have been what launched this window, and it
+  // needs an archive loaded before it can land anywhere.
+  await drainUris();
 }
 
 boot();
@@ -6355,9 +6466,15 @@ let assetPreviewCache = {};
 let assetImpFiles = [];
 let assetCommitTarget = null;
 
-function openAssetsTab() { addTab("assets", {}); }
+// "Show me the assets" from somewhere other than the rail (finishing an
+// import, say). Same rule: it changes this tab, it does not make one.
+function openAssetsTab() { setRailTab("assets"); }
 
 async function renderAssetTab(tab) {
+  // Selecting an assets tab from the tab strip has to move the rail too,
+  // or the sidebar says "Sessions" over an asset grid. keepLocation, so
+  // this cannot recurse back into showAssets().
+  if (railTab !== "assets") setRailTab("assets", { keepLocation: true });
   const st = tab.state || {};
   assetPolicyFilter = st.policy || "";
   assetQuery = st.query || "";
@@ -6817,18 +6934,6 @@ $("assetCommitScrim").addEventListener("keydown", (ev) => {
 // Choosing the Assets rail tab puts the asset browser in the main area.
 // Reusing the tab already open, rather than stacking a new one on every
 // click, keeps the rail behaving like the Collections tab beside it.
-async function openAssetsFromRail() {
-  const cur = activeTabObj();
-  if (!cur || cur.kind !== "assets") {
-    const existing = tabs.find((t) => t.kind === "assets");
-    if (existing) await selectTab(existing.id);
-    else { addTab("assets", {}); return; }
-  } else {
-    await loadAssets();
-  }
-  await renderAssetRail();
-}
-
 // The rail lists the same assets as the grid, so the sidebar answers
 // "what have I got?" without the main area having to be on that tab.
 async function renderAssetRail() {
@@ -6849,7 +6954,7 @@ async function renderAssetRail() {
     el.onclick = async () => {
       assetSel = id;
       const cur = activeTabObj();
-      if (!cur || cur.kind !== "assets") { addTab("assets", {}); return; }
+      if (!cur || cur.kind !== "assets") { setRailTab("assets"); return; }
       renderAssetGrid();
       await renderAssetDetail();
       await renderAssetRail();
@@ -6869,15 +6974,6 @@ async function renderAssetRail() {
   });
 }
 
-
-// Getting back out of the asset browser. Reuse an existing browse tab
-// rather than minting one, so flipping between rail tabs does not breed
-// tabs the user then has to close.
-async function returnToBrowseTab() {
-  const existing = tabs.find((t) => t.kind === "browse");
-  if (existing) await selectTab(existing.id);
-  else addTab("browse", {});
-}
 
 // Grid or list. The thumbnail grid is the better default for a figure
 // library, but it is the wrong shape for CAD files and long names, so the

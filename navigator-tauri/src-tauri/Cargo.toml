@@ -12,8 +12,19 @@ tauri-build = { version = "2", features = [] }
 [dependencies]
 tauri = { version = "2", features = [] }
 tauri-plugin-dialog = "2"
+# Registers the nebula:// scheme with the OS and delivers the URLs it
+# hands back. The registration itself is per-platform (Info.plist entry,
+# .desktop MimeType, HKCU keys); the plugin writes all three.
+tauri-plugin-deep-link = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+
+# On Windows and Linux a nebula:// link launches a *second* copy of the
+# app -- and each copy spawns its own Python sidecar. Single-instance
+# forwards the URL to the running one instead. macOS delivers URLs to the
+# already-running app by Apple Event, so it needs none of this.
+[target.'cfg(any(target_os = "windows", target_os = "linux"))'.dependencies]
+tauri-plugin-single-instance = { version = "2", features = ["deep-link"] }
 
 [features]
 # By default Tauri runs in production; `tauri dev` enables this automatically.

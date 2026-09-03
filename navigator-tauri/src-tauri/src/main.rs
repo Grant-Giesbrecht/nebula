@@ -590,6 +590,42 @@ fn send_to_window(app: tauri::AppHandle, label: String,
     Ok(())
 }
 
+/// URLs the OS has handed us that the front-end has not collected yet.
+///
+/// A queue rather than a straight emit, because of cold start: opening a
+/// `nebula://` link when the app is not running *launches* it, and the URL
+/// arrives long before any webview exists to hear an event. So every URL
+/// lands here, and the front-end drains it -- once when it finishes
+/// booting, and again whenever `nebula-uri://arrived` says there is more.
+/// The event carries no payload for the same reason: the queue is the only
+/// source of truth, so nothing can be handled twice or dropped.
+struct PendingUris(Mutex<Vec<String>>);
+
+/// Hand over every URL received so far, and forget them.
+#[tauri::command]
+fn take_uris(state: tauri::State<PendingUris>) -> Vec<String> {
+    let mut queue = state.0.lock().unwrap();
+    std::mem::take(&mut *queue)
+}
+
+/// Queue a URL and wake whichever window should act on it: the main
+/// window when it is still open, otherwise any window, so a link is not
+/// silently lost by someone who closed the first one.
+fn deliver_uri(app: &tauri::AppHandle, url: String) {
+    use tauri::{Emitter, Manager};
+
+    if let Some(state) = app.try_state::<PendingUris>() {
+        state.0.lock().unwrap().push(url);
+    }
+    let target = app
+        .get_webview_window("main")
+        .or_else(|| app.webview_windows().into_values().next());
+    if let Some(window) = target {
+        let _ = window.set_focus();
+        let _ = window.emit("nebula-uri://arrived", ());
+    }
+}
+
 fn main() {
     // Not named `bridge`: that would shadow the #[tauri::command] fn of the
     // same name, which `generate_handler!` needs to resolve in this scope.
@@ -601,16 +637,60 @@ fn main() {
         }
     };
 
-    tauri::Builder::default()
+    let builder = tauri::Builder::default();
+
+    // Single-instance goes on first, per the plugin's own requirement: it
+    // has to decide whether this process is the one that lives before
+    // anything else does any work. The second process exits, and its argv
+    // (which is where Windows and Linux put a nebula:// link) reaches the
+    // first one through the deep-link plugin.
+    #[cfg(any(target_os = "windows", target_os = "linux"))]
+    let builder = builder.plugin(tauri_plugin_single_instance::init(|app, _argv, _cwd| {
+        use tauri::Manager;
+
+        if let Some(window) = app.get_webview_window("main") {
+            let _ = window.set_focus();
+        }
+    }));
+
+    builder
+        .plugin(tauri_plugin_deep_link::init())
         .plugin(tauri_plugin_dialog::init())
         .manage(BridgeState(Mutex::new(slot)))
+        .manage(PendingUris(Mutex::new(Vec::new())))
         .invoke_handler(tauri::generate_handler![
             bridge, new_window, window_at_cursor, send_to_window,
-            open_panel_window, main_window_label, broadcast
+            open_panel_window, main_window_label, broadcast, take_uris
         ])
         .setup(|_app| {
             #[cfg(target_os = "macos")]
             install_menu(_app)?;
+            {
+                use tauri_plugin_deep_link::DeepLinkExt;
+
+                // Linux and Windows have no bundle to declare the scheme in
+                // during development, so the running app claims it itself.
+                // On macOS the .app's Info.plist is what LaunchServices
+                // reads, which is also why `tauri dev` cannot be used to
+                // test this there -- there is no bundle yet.
+                #[cfg(any(target_os = "linux", target_os = "windows"))]
+                let _ = _app.deep_link().register_all();
+
+                // A link that launched us. macOS delivers this by Apple
+                // Event before the window exists; the queue is what makes
+                // that safe.
+                if let Ok(Some(urls)) = _app.deep_link().get_current() {
+                    for url in urls {
+                        deliver_uri(_app.handle(), url.to_string());
+                    }
+                }
+                let handle = _app.handle().clone();
+                _app.deep_link().on_open_url(move |event| {
+                    for url in event.urls() {
+                        deliver_uri(&handle, url.to_string());
+                    }
+                });
+            }
             Ok(())
         })
         // A menu accelerator never reaches the webview, so the item hands
