@@ -5829,8 +5829,22 @@ function toggleMetadataPanel() {
 }
 
 function openSelectedExternally() {
+  // An asset is a file too, and the asset browser has its own selection.
+  // The active tab decides: on the asset tab the asset wins, on a browse
+  // tab the artefact does, and the rail's selection is the fallback for
+  // when nothing in the main area is selected at all.
+  const cur = activeTabObj();
+  const onAssetTab = !!(cur && cur.kind === "assets");
+  if (assetSel && (onAssetTab || (!selected && railTab === "assets"))) {
+    call("asset_open", { archive, asset_id: assetSel });
+    return;
+  }
   const it = selected;
-  if (!it) { toast("Select a file first."); return; }
+  if (!it) {
+    toast(railTab === "assets" || onAssetTab
+      ? "Select an asset first." : "Select a file first.");
+    return;
+  }
   // Whichever row is selected is what opens: the sidecar row opens the
   // .meta.json, the artefact row the artefact itself.
   const path = selectedIsSidecar ? it.sidecar_path : (it.artifact_path || it.sidecar_path);
@@ -6831,13 +6845,26 @@ async function renderAssetRail() {
       <span class="ctitle">${escapeHtml(a.size_human)}</span>
     </div>`).join("");
   list.querySelectorAll(".arow").forEach((el) => {
+    const id = el.getAttribute("data-id");
     el.onclick = async () => {
-      assetSel = el.getAttribute("data-id");
+      assetSel = id;
       const cur = activeTabObj();
       if (!cur || cur.kind !== "assets") { addTab("assets", {}); return; }
       renderAssetGrid();
       await renderAssetDetail();
       await renderAssetRail();
+    };
+    el.ondblclick = () => call("asset_open", { archive, asset_id: id });
+    // The same menu the grid offers: an asset in the sidebar is the same
+    // asset, and a menu that depends on which list you found it in is a
+    // menu people learn twice.
+    el.oncontextmenu = async (ev) => {
+      ev.preventDefault();
+      assetSel = id;
+      const cur = activeTabObj();
+      if (cur && cur.kind === "assets") { renderAssetGrid(); renderAssetDetail(); }
+      await renderAssetRail();
+      assetContextMenu(ev.clientX, ev.clientY, id);
     };
   });
 }
