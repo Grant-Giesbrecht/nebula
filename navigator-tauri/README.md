@@ -536,8 +536,17 @@ pip install pyinstaller     # one-time
 npm run build               # produces .app / .dmg
 ```
 
-`build-sidecar.sh` runs PyInstaller over `sidecar/bridge.py` and installs
-the result as `src-tauri/binaries/nebula-bridge-<target-triple>`. The triple
+On Windows, use `build-sidecar.ps1` instead (same steps, PowerShell):
+
+```
+pip install pyinstaller
+.\build-sidecar.ps1         # freeze the Python bridge
+npm run build                # produces the .exe / installer
+```
+
+`build-sidecar.sh`/`build-sidecar.ps1` run PyInstaller over
+`sidecar/bridge.py` and install the result as
+`src-tauri/binaries/nebula-bridge-<target-triple>` (`.exe` on Windows). The triple
 suffix is Tauri's `externalBin` convention (it lets one bundle carry
 per-platform binaries); Tauri strips it when copying into the app, landing
 it at `Nebula Navigator.app/Contents/MacOS/nebula-bridge` — right beside the

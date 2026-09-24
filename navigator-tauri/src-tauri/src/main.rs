@@ -31,7 +31,8 @@ const STDERR_KEEP: usize = 40;
 /// hasn't been run) we fall back to a real interpreter.
 fn sidecar_path() -> Option<std::path::PathBuf> {
     let exe = std::env::current_exe().ok()?;
-    let candidate = exe.parent()?.join("nebula-bridge");
+    let name = if cfg!(windows) { "nebula-bridge.exe" } else { "nebula-bridge" };
+    let candidate = exe.parent()?.join(name);
     candidate.is_file().then_some(candidate)
 }
 
@@ -60,28 +61,38 @@ fn candidate_pythons() -> Vec<String> {
     // PATH first: honours an activated venv when run from a terminal.
     push("python3".to_string());
 
-    // python.org framework builds, newest-looking first.
-    let framework = "/Library/Frameworks/Python.framework/Versions";
-    if let Ok(entries) = std::fs::read_dir(framework) {
-        let mut versions: Vec<String> = entries
-            .filter_map(|e| e.ok())
-            .filter_map(|e| e.file_name().into_string().ok())
-            .collect();
-        versions.sort();
-        versions.reverse();
-        for v in versions {
-            push(format!("{framework}/{v}/bin/python3"));
+    if cfg!(windows) {
+        // Windows python.org installs (and venvs) name the executable
+        // `python`, not `python3`; the py launcher is the other common
+        // entry point. Neither of the macOS-specific paths below exist
+        // here, so skip straight past them.
+        push("python".to_string());
+        push("py".to_string());
+    } else {
+        // python.org framework builds, newest-looking first.
+        let framework = "/Library/Frameworks/Python.framework/Versions";
+        if let Ok(entries) = std::fs::read_dir(framework) {
+            let mut versions: Vec<String> = entries
+                .filter_map(|e| e.ok())
+                .filter_map(|e| e.file_name().into_string().ok())
+                .collect();
+            versions.sort();
+            versions.reverse();
+            for v in versions {
+                push(format!("{framework}/{v}/bin/python3"));
+            }
         }
-    }
 
-    // Homebrew (Apple silicon, then Intel), then the system stub as a
-    // last resort -- it will normally fail the import probe, which is fine.
-    for p in [
-        "/opt/homebrew/bin/python3",
-        "/usr/local/bin/python3",
-        "/usr/bin/python3",
-    ] {
-        push(p.to_string());
+        // Homebrew (Apple silicon, then Intel), then the system stub as a
+        // last resort -- it will normally fail the import probe, which is
+        // fine.
+        for p in [
+            "/opt/homebrew/bin/python3",
+            "/usr/local/bin/python3",
+            "/usr/bin/python3",
+        ] {
+            push(p.to_string());
+        }
     }
 
     out

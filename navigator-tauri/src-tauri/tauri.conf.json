@@ -36,7 +36,8 @@
       "binaries/nebula-bridge"
     ],
     "icon": [
-      "icons/nebula.icns"
+      "icons/nebula.icns",
+      "icons/icon.ico"
     ]
   }
 }
