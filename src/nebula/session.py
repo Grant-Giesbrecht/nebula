@@ -1297,6 +1297,7 @@ def session(
     *,
     run_id: Optional[str] = None,
     new_session: bool = False,
+    reuse: bool = False,
     tags: Optional[List[str]] = None,
     description: str = "",
     artifact_tags: Optional[List[str]] = None,
@@ -1315,6 +1316,10 @@ def session(
     Which session it opens:
       - run_id given         -> append to that (open) session;
       - new_session=True     -> create a fresh session, no questions asked;
+      - reuse=True           -> append to the most recent unlocked session
+                                (one that's still open, created today, or
+                                actively held -- see hold()) if one exists,
+                                else create a fresh one. Never prompts.
       - otherwise            -> present the interactive CLI session picker
                                 (nebula.session_select.select_session), so
                                 the user can append to a session in progress
@@ -1324,6 +1329,11 @@ def session(
 
     Pass new_session=True in unattended scripts that should always start
     clean without prompting.
+
+    Pass reuse=True for unattended scripts that should share one session
+    per day (or per hold) instead of always starting clean: a session
+    closed on a previous day is locked and won't be picked up, matching
+    what /reopen --force normally guards against.
 
     **Tags and the description are asked for after the choice.** They only
     describe a session being *created*; pick an existing one and it
@@ -1382,6 +1392,47 @@ def session(
             announce=announce,
             artifact_tags=artifact_tags,
         )
+    elif reuse:
+        # Same unattended contract as new_session=True: never prompt. Only
+        # difference is we first look for an unlocked session (open,
+        # created today, or held) to append to instead of always making a
+        # new one.
+        from nebula.registry import resolve_archive
+        from nebula.session_select import _candidate_sessions
+
+        archive_root, _ = resolve_archive(archive)
+        candidates = _candidate_sessions(archive_root)
+        if candidates:
+            s = append_to(
+                archive,
+                candidates[0].run_id,
+                archive_name=archive_name,
+                on_missing_meta=on_missing_meta,
+                announce=announce,
+                artifact_tags=artifact_tags,
+            )
+            if tags or description:
+                from nebula._termui import warn
+
+                warn(f"note: session {s.id} already has its own tags and "
+                     f"description; the ones passed to nebula.session() "
+                     f"were not applied. Use sess.annotate(tags=[...]) to "
+                     f"add them.")
+        else:
+            if ask:
+                from nebula.session_select import ask_new_session_metadata
+
+                tags, description = ask_new_session_metadata(
+                    archive, tags=tags, description=description, ask=True)
+            s = new(
+                archive,
+                tags=tags,
+                description=description,
+                archive_name=archive_name,
+                on_missing_meta=on_missing_meta,
+                announce=announce,
+                artifact_tags=artifact_tags,
+            )
     else:
         # Imported lazily: select_session imports back from this module, and
         # it pulls in the terminal-UI helpers that batch code needn't load.
