@@ -603,26 +603,37 @@ def _resolve_ref_string(token: str, state: "_State"):
     return state.archive_root, state.archive_text, ref
 
 
-def _segments_exist(archive_root, segments: List[str]) -> bool:
+def _segments_exist(archive_root, segments: List[str], *, cached: bool = False) -> bool:
     """Whether `segments` names something real, not just something
     syntactically well-formed -- parse_ref happily parses "nonexistent/
     deeper" into a session ref without knowing "nonexistent" was never a
     session; this is the check that catches that before `cd` commits to
-    it."""
+    it.
+
+    `cached=True` (tab completion only) answers from the short-lived
+    completion cache instead of a live index/filesystem read -- see
+    _resolve_run_id's docstring for why that matters on a network-mounted
+    archive. `cached=False` (real navigation) always reads live."""
     if not segments:
         return True
     if segments[0] == "collections":
         if len(segments) < 2:
             return True
+        if cached:
+            return segments[1] in _completion_collection_names(archive_root)
         from nebula import collection as collection_mod
 
         return collection_mod.read(archive_root, segments[1]) is not None
     if segments[0] == "assets":
         if len(segments) < 2:
             return True
+        if cached:
+            return segments[1] in _completion_asset_ids(archive_root)
         from nebula import assets
 
         return segments[1] in assets.list_assets(archive_root)
+    if cached:
+        return segments[0] in _completion_session_ids(archive_root)
     conn = index.open_fresh(archive_root)
     try:
         row = conn.execute(
@@ -1045,12 +1056,13 @@ def _prompt(state: _State, color: bool, guard: bool) -> str:
     return paint(f"{state.breadcrumb()}>", "bold", color, guard=guard) + " "
 
 
-def _cd_one(state: _State, target: str, *, quiet: bool = False) -> bool:
+def _cd_one(state: _State, target: str, *, quiet: bool = False, cached: bool = False) -> bool:
     """Apply one path component to `state` in place. Returns whether it
     resolved -- `_apply_cd` uses this to walk a multi-segment path like
     `cd ../../assets` one hop at a time. `quiet` suppresses the error
-    message (used when this is a trial resolution for tab completion,
-    not an actual `cd`)."""
+    message and `cached` sources existence checks from the completion
+    cache instead of the network/index (both used only for tab
+    completion's trial resolution, never for an actual `cd`)."""
     def report(msg):
         if not quiet:
             err(msg)
