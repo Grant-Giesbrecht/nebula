@@ -588,3 +588,63 @@ def test_complete_does_not_offer_names_for_a_flag(registered_archive):
     state = browse._State()
     browse._do_cd(state, "postdoc")
     assert browse._ref_completions(state, "-t") == []
+
+
+# ---------------------------------------------------------------------
+# completion is cache-bounded (matters on a network-mounted archive,
+# where every index/filesystem read is a round-trip); real `cd` stays
+# fully live regardless.
+# ---------------------------------------------------------------------
+
+def _count_open_fresh(monkeypatch):
+    """Patch index.open_fresh (as browse.py sees it) to count calls."""
+    from nebula import index as index_mod
+
+    real = index_mod.open_fresh
+    calls = {"n": 0}
+
+    def counting(*a, **kw):
+        calls["n"] += 1
+        return real(*a, **kw)
+
+    monkeypatch.setattr(index_mod, "open_fresh", counting)
+    return calls
+
+
+def test_completing_a_growing_ref_does_not_scale_with_length(registered_archive, monkeypatch):
+    """Typing a ref character by character must not re-hit the index once
+    per keystroke -- the whole point of the completion cache."""
+    root, run1, run2, uri = registered_archive
+    calls = _count_open_fresh(monkeypatch)
+
+    state = browse._State()
+    browse._do_cd(state, "postdoc")
+    calls["n"] = 0
+
+    full = f"{run2}/s21_sweep.HDF5"
+    for i in range(1, len(full) + 1):
+        browse._ref_completions(state, full[:i])
+
+    # A couple of calls (one per distinct thing actually looked up:
+    # session ids, then this session's filenames) is expected; anything
+    # proportional to len(full) means the cache isn't doing its job.
+    assert calls["n"] <= 3, f"expected a small constant number of index reads, got {calls['n']}"
+
+
+def test_real_cd_is_never_served_from_the_completion_cache(registered_archive, monkeypatch):
+    """The cache exists only for _walk_path/completion (cached=True);
+    _do_cd must always resolve live, so a session that changed between
+    keystrokes is never silently mis-navigated."""
+    root, run1, run2, uri = registered_archive
+    calls = _count_open_fresh(monkeypatch)
+
+    state = browse._State()
+    browse._do_cd(state, "postdoc")
+    # Warm the completion cache for run1 -- a real cd afterward must not
+    # reuse it.
+    browse._ref_completions(state, run1[:4])
+    calls["n"] = 0
+
+    browse._do_cd(state, run1)
+    assert calls["n"] > 0
+    assert state.breadcrumb().endswith(f"/{run1}")

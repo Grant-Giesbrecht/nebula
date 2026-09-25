@@ -1092,16 +1092,20 @@ def _cd_one(state: _State, target: str, *, quiet: bool = False, cached: bool = F
         if target in ("collections", "assets"):
             state.segments = [target]
             return True
-        run_id = _resolve_run_id(state.archive_root, target)
+        run_id = _resolve_run_id(state.archive_root, target, cached=cached)
         if run_id is None:
             report(f"no such session {target!r}")
             return False
         state.segments = [run_id]
         return True
     if kind == "collections":
-        from nebula import collection as collection_mod
+        if cached:
+            found = target in _completion_collection_names(state.archive_root)
+        else:
+            from nebula import collection as collection_mod
 
-        if collection_mod.read(state.archive_root, target) is None:
+            found = collection_mod.read(state.archive_root, target) is not None
+        if not found:
             report(f"no such collection {target!r}")
             return False
         state.segments = ["collections", target]
@@ -1114,7 +1118,9 @@ def _cd_one(state: _State, target: str, *, quiet: bool = False, cached: bool = F
         if not assets.is_asset_id(cand) and cand.isdigit():
             year2 = _dt.datetime.now().year % 100
             cand = assets.format_asset_id(year2, int(cand))
-        if not assets.is_asset_id(cand) or cand not in assets.list_assets(state.archive_root):
+        ids = _completion_asset_ids(state.archive_root) if cached else assets.list_assets(
+            state.archive_root)
+        if not assets.is_asset_id(cand) or cand not in ids:
             report(f"no such asset {target!r}")
             return False
         state.segments = ["assets", cand]
@@ -1123,7 +1129,7 @@ def _cd_one(state: _State, target: str, *, quiet: bool = False, cached: bool = F
     return False
 
 
-def _apply_cd(state: _State, target: str, *, quiet: bool = False) -> bool:
+def _apply_cd(state: _State, target: str, *, quiet: bool = False, cached: bool = False) -> bool:
     """`cd`'s actual resolution logic: handles a multi-segment path
     (`../../assets`, `collections/paper-2026`, an absolute
     `/archive/S-26-0001`) one hop at a time, mutating `state` in place
@@ -1134,14 +1140,20 @@ def _apply_cd(state: _State, target: str, *, quiet: bool = False) -> bool:
     "/Users/me/data" would be misread as three path segments named
     "Users", "me" and "data".
 
-    `quiet` suppresses error messages -- used by the tab completer, which
+    `quiet` suppresses error messages, and `cached` sources every
+    existence check from the short-lived completion cache instead of a
+    live index/filesystem read -- both used by the tab completer, which
     calls this against a scratch copy purely to find out where a
-    partially-typed ref's already-typed prefix would land, and must never
-    print anything to the terminal mid-completion. `_do_cd` (the real
-    command) and `_walk_path` (the completer's read-only lookup) are the
-    two callers; both run this against a scratch copy and only `_do_cd`
-    commits the result, so a typo partway through a path -- or a partial
-    one still being typed -- never leaves the real cursor half-moved.
+    partially-typed ref's already-typed prefix would land, must never
+    print anything mid-completion, and -- on a network-mounted archive
+    especially -- cannot afford a round-trip on every keystroke just to
+    answer a question the *previous* keystroke already answered a moment
+    ago. `_do_cd` (the real command) and `_walk_path` (the completer's
+    read-only lookup) are the two callers; only `_do_cd` ever passes
+    cached=False, and only it commits the result, so a typo partway
+    through a path -- or a partial one still being typed -- never leaves
+    the real cursor half-moved, and a stale completion guess never
+    becomes a wrong `cd`.
     """
     def report(msg):
         if not quiet:
@@ -1174,7 +1186,7 @@ def _apply_cd(state: _State, target: str, *, quiet: bool = False) -> bool:
         if loc is not None:
             archive_root, archive_display, ref = loc
             segments = _ref_to_segments(ref)
-            if segments is not None and _segments_exist(archive_root, segments):
+            if segments is not None and _segments_exist(archive_root, segments, cached=cached):
                 state.archive_root = archive_root
                 state.archive_text = archive_display
                 state.segments = segments
@@ -1206,7 +1218,7 @@ def _apply_cd(state: _State, target: str, *, quiet: bool = False) -> bool:
         # that (e.g. "/postdoc/S-26-0001").
         state.archive_text = state.archive_root = None
         state.segments = []
-        return _apply_cd(state, target[1:], quiet=quiet)
+        return _apply_cd(state, target[1:], quiet=quiet, cached=cached)
 
     if state.at_root:
         found = _try_resolve_archive(target)
@@ -1220,7 +1232,7 @@ def _apply_cd(state: _State, target: str, *, quiet: bool = False) -> bool:
             if found is not None:
                 state.archive_root, state.archive_text = found
                 state.segments = []
-                return _apply_cd(state, rest, quiet=quiet)
+                return _apply_cd(state, rest, quiet=quiet, cached=cached)
         report(f"no such archive {target!r} (known: {', '.join(_archive_names()) or 'none'})")
         return False
 
@@ -1231,7 +1243,7 @@ def _apply_cd(state: _State, target: str, *, quiet: bool = False) -> bool:
     if not tokens:
         return True
     for tok in tokens:
-        if not _cd_one(state, tok, quiet=quiet):
+        if not _cd_one(state, tok, quiet=quiet, cached=cached):
             return False
     return True
 
@@ -1268,7 +1280,7 @@ def _walk_path(state: _State, target: str) -> Optional[_State]:
     scratch = _scratch_state(state)
     if not target:
         return scratch
-    return scratch if _apply_cd(scratch, target, quiet=True) else None
+    return scratch if _apply_cd(scratch, target, quiet=True, cached=True) else None
 
 
 # ---------------------------------------------------------------------
