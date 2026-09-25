@@ -232,6 +232,63 @@ def cmd_ls(args):
               f"{tag_str:20}  {row['description']}{held}")
 
 
+def _print_artifact_row(root, run_id, session_dir, a, conn, *,
+                         uri=False, tags=False, long=False, indent="    "):
+    """Print one artifact line from a `show`/`browse` listing, plus
+    whichever of its URI / tags / sha256+size the caller asked for.
+
+    `a` is a row from the `artifacts` table (or anything with the same
+    keys: filename, repo, commit_hash, dirty, entry_point, source,
+    origin, sha256); `conn` is the already-open index connection, reused
+    for the derived_from lookup so callers don't reopen it per artifact.
+    """
+    if a["source"] == "external":
+        # No git commit to show -- report where it actually came from.
+        prov = f"external: {a['origin'] or '(no origin recorded)'}"
+    else:
+        dirty_flag = " (dirty)" if a["dirty"] else ""
+        commit_short = (a["commit_hash"] or "")[:8]
+        prov = f"{a['repo'] or '-'}@{commit_short or '-'}{dirty_flag}"
+    print(f"{indent}- {a['filename']:30} {prov}")
+
+    derived = conn.execute(
+        "SELECT ref_user, ref_archive, ref_archive_id, ref_session, "
+        "ref_file FROM derived_from WHERE run_id = ? AND filename = ?",
+        (run_id, a["filename"]),
+    ).fetchall()
+    for d in derived:
+        print(f"{indent}    <- {_fmt_ref_row(d)}")
+
+    if uri:
+        from nebula import uris
+
+        try:
+            info = uris.describe(root, session=run_id, file=a["filename"])
+            print(f"{indent}    uri: {info.uri}")
+        except uris.UriError as e:
+            print(f"{indent}    uri: (unavailable: {e})")
+
+    if tags:
+        from nebula import annotations
+
+        note = annotations.get(session_dir, a["filename"])
+        tag_list = ", ".join(note["tags"]) if note["tags"] else "-"
+        print(f"{indent}    tags: {tag_list}")
+        if note.get("comment"):
+            print(f"{indent}    comment: {note['comment']}")
+
+    if long:
+        sha = (a["sha256"] or "-")
+        sha_short = sha if sha == "-" else sha[:16] + "..."
+        size = "-"
+        path = Path(session_dir) / a["filename"]
+        if path.is_file():
+            size = _fmt_bytes(path.stat().st_size)
+        print(f"{indent}    sha256: {sha_short}   size: {size}")
+        if a["entry_point"]:
+            print(f"{indent}    entry_point: {a['entry_point']}")
+
+
 def cmd_show(args):
     root, _ = _resolve_archive_cli(args.archive)
     run_id = _run_id_from_target(args.archive, args.run_id)
@@ -271,27 +328,15 @@ def cmd_show(args):
             print(f"    - {_fmt_ref_row(r)}")
 
     artifacts = conn.execute(
-        "SELECT filename, repo, commit_hash, dirty, entry_point, source, origin "
-        "FROM artifacts WHERE run_id = ? ORDER BY filename",
+        "SELECT filename, repo, commit_hash, dirty, entry_point, source, "
+        "origin, sha256 FROM artifacts WHERE run_id = ? ORDER BY filename",
         (args.run_id,),
     ).fetchall()
     print("  artifacts:")
+    session_dir = index.session_path(root, session_row)
     for a in artifacts:
-        if a["source"] == "external":
-            # No git commit to show -- report where it actually came from.
-            prov = f"external: {a['origin'] or '(no origin recorded)'}"
-        else:
-            dirty_flag = " (dirty)" if a["dirty"] else ""
-            commit_short = (a["commit_hash"] or "")[:8]
-            prov = f"{a['repo'] or '-'}@{commit_short or '-'}{dirty_flag}"
-        print(f"    - {a['filename']:30} {prov}")
-        derived = conn.execute(
-            "SELECT ref_user, ref_archive, ref_archive_id, ref_session, "
-            "ref_file FROM derived_from WHERE run_id = ? AND filename = ?",
-            (args.run_id, a["filename"]),
-        ).fetchall()
-        for d in derived:
-            print(f"        <- {_fmt_ref_row(d)}")
+        _print_artifact_row(root, args.run_id, session_dir, a, conn,
+                            uri=args.uri, tags=args.tags, long=args.long)
 
     history = json.loads(session_row["history"] or "[]")
     if history:
@@ -307,6 +352,19 @@ def cmd_show(args):
 # ---------------------------------------------------------------------
 # Assets
 # ---------------------------------------------------------------------
+
+def cmd_browse(args):
+    from nebula import browse
+
+    start_archive = args.archive
+    start_run_id = args.run_id
+    if start_archive:
+        # Same lenient resolution every other command uses, so a mistyped
+        # nickname is reported the same way (known archives listed) rather
+        # than the REPL silently landing at the global root.
+        _resolve_archive_cli(start_archive)
+    browse.run_browse(start_archive=start_archive, start_run_id=start_run_id)
+
 
 def _fmt_bytes(n) -> str:
     if n is None:
@@ -1867,7 +1925,24 @@ def main(argv=None):
     p.add_argument("run_id", nargs="?", type=_run_id_arg,
                    help="session id -- S-26-0012, or 0012 for the current "
                         "year; optional when the URI already names one")
+    p.add_argument("-u", "--uri", action="store_true",
+                   help="print each artifact's nebula:// URI")
+    p.add_argument("-t", "--tag", "--tags", dest="tags", action="store_true",
+                   help="print each artifact's tags")
+    p.add_argument("-l", "--long", action="store_true",
+                   help="print sha256/size alongside each artifact")
     p.set_defaults(func=cmd_show)
+
+    p = sub.add_parser(
+        "browse", help="interactive cd/ls-style shell for an archive",
+        description="Walk an archive's sessions/collections/assets from a "
+                     "terminal, without the Navigator GUI: cd, ls, show, "
+                     "info, open, reveal, uri, search, tags, annotate.")
+    p.add_argument("archive", nargs="?", help="registered archive nickname, "
+                                              "a literal path, or a nebula:// URI")
+    p.add_argument("run_id", nargs="?", type=_run_id_arg,
+                   help="start inside this session")
+    p.set_defaults(func=cmd_browse)
 
     p = sub.add_parser(
         "import", help="add external file(s) to an existing session",

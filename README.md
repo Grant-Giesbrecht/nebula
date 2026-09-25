@@ -575,6 +575,31 @@ to **stderr**, so it can be captured: `URI=$(nebula uri postdoc 152 raw.csv)`.
 In the Navigator, right-click any session, artifact, collection or asset →
 **Get URI**.
 
+Without the Navigator GUI installed (a headless machine, an SSH session),
+`nebula browse` is the other way to poke around and grab one: a `cd`/`ls`
+-style shell over an archive's sessions, collections and assets.
+
+```
+$ nebula browse postdoc
+/postdoc> cd S-26-0152
+/postdoc/S-26-0152> show -u -t
+  - raw.csv                        me@repo@a1b2c3d4
+      uri: nebula://grant@ncsu.edu/postdoc~0fe/S-26-0152/raw.csv
+      tags: RP23D
+/postdoc/S-26-0152> reveal raw.csv        # or: open raw.csv
+/postdoc/S-26-0152> cd ../../assets
+/postdoc/assets> cd AF-26-0017
+/postdoc/assets/AF-26-0017> uri
+nebula://grant@ncsu.edu/postdoc~0fe/assets/AF-26-0017
+```
+
+`cd` moves between archives, sessions, and the `collections/`/`assets/`
+sibling namespaces (multi-segment paths and `..` chains both work, e.g.
+`cd ../../assets`); `show`/`info` take the same `-u`/`-t`/`-l` flags as
+`nebula show`; `open`/`reveal` hand a file to the OS default app or the
+file manager; `annotate` edits tags/comments without leaving the shell.
+Type `help` for the full command list.
+
 And a script tells you as it saves:
 
 ```
@@ -815,7 +840,10 @@ nebula index <archive> [--rebuild]                 # index status + freshness sw
 nebula seal <archive> <year> [--force]             # declare a year finished (sweeps skip it)
 nebula unseal <archive> <year>                     # go back to checking it every time
 nebula ls <archive> [--tag T] [--status S] [--today]
-nebula show <archive> <run_id>                     # full detail incl. derived_from graph
+nebula show <archive> <run_id> [-u/--uri] [-t/--tag] [-l/--long]
+                                                   # full detail incl. derived_from graph;
+                                                   # -u/-t/-l add per-artifact URI/tags/sha256+size
+nebula browse [archive [run_id]]                   # interactive cd/ls-style shell (no GUI needed)
 nebula upstream <archive> <run_id> <file>          # trace an artifact back to its inputs
 nebula downstream <archive> <run_id> <file> [--also-search ARCHIVE ...]
 nebula stale <archive> [--hours N]                 # find abandoned "open" sessions
