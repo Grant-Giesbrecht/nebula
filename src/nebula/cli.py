@@ -68,6 +68,28 @@ from nebula.session import (
     release as release_session,
 )
 
+#: Shortcut tokens, resolved wherever an archive/run_id argument is
+#: accepted (see _resolve_archive_cli and _resolve_reuse_session_shortcut):
+#: A! means "the archive `nebula default` points at", S! means "the
+#: session `nebula.session(archive, reuse=True)` would use" -- the most
+#: recent open/today/held one. Case-insensitive; matched before any other
+#: interpretation of the text.
+DEFAULT_ARCHIVE_TOKEN = "A!"
+REUSE_SESSION_TOKEN = "S!"
+
+#: Colour conventions shared by every listing in the CLI and in `browse`:
+#: cyan-bold for identifiers meant to be copy-pasted (URIs, run ids),
+#: plain cyan for user tags, dim for incidental detail (hashes), and the
+#: same open/closed/crashed/HELD colours session_select already uses --
+#: reused here so a session looks the same whether it came from the
+#: interactive picker or a plain `nebula ls`/`nebula show`.
+_URI_STYLE = "cyan bold"
+_RUNID_STYLE = "cyan bold"
+_TAG_STYLE = "cyan"
+_DIM_STYLE = "dim"
+_STATUS_STYLE = {"open": "green bold", "closed": "dim", "crashed": "red"}
+_HELD_STYLE = "yellow bold"
+
 
 def _resolve_archive_cli(text: str):
     """Lenient resolution for CLI use: try the registry first (so
@@ -91,6 +113,14 @@ def _resolve_archive_cli(text: str):
     at all," which is a different problem.
     """
     from nebula import uris
+
+    if (text or "").strip().upper() == DEFAULT_ARCHIVE_TOKEN.upper():
+        default = get_registry().default_nickname()
+        if not default:
+            err(f"no default archive set -- `nebula default <archive>` to "
+                f"pick what {DEFAULT_ARCHIVE_TOKEN} means")
+            sys.exit(1)
+        text = default
 
     if uris.is_uri(text):
         # A full URI is a legal way to name an archive anywhere a nickname
@@ -222,18 +252,24 @@ def cmd_ls(args):
     rows = conn.execute(query, params).fetchall()
     conn.close()
 
+    color = color_enabled(sys.stdout)
     for row in rows:
         tags = json.loads(row["tags"])
         if args.tag and args.tag not in tags:
             continue
         tag_str = ",".join(tags) if tags else "-"
-        held = "  HELD" if _hold_value_active(row["hold_until"]) else ""
-        print(f"{row['run_id']}  {row['created']}  [{row['status']:7}]  "
-              f"{tag_str:20}  {row['description']}{held}")
+        status_padded = f"{row['status']:7}"
+        tag_padded = f"{tag_str:20}"
+        tag_style = _TAG_STYLE if tags else _DIM_STYLE
+        held = paint("  HELD", _HELD_STYLE, color) if _hold_value_active(row["hold_until"]) else ""
+        print(f"{paint(row['run_id'], _RUNID_STYLE, color)}  {row['created']}  "
+              f"[{paint(status_padded, _STATUS_STYLE.get(row['status'], ''), color)}]  "
+              f"{paint(tag_padded, tag_style, color)}  {row['description']}{held}")
 
 
 def _print_artifact_row(root, run_id, session_dir, a, conn, *,
-                         uri=False, tags=False, long=False, indent="    "):
+                         uri=False, tags=False, long=False, indent="    ",
+                         number=None):
     """Print one artifact line from a `show`/`browse` listing, plus
     whichever of its URI / tags / sha256+size the caller asked for.
 
@@ -241,7 +277,10 @@ def _print_artifact_row(root, run_id, session_dir, a, conn, *,
     keys: filename, repo, commit_hash, dirty, entry_point, source,
     origin, sha256); `conn` is the already-open index connection, reused
     for the derived_from lookup so callers don't reopen it per artifact.
+    `number`, when given (browse's numbered listings), replaces the plain
+    "-" bullet with "<N>." so the line can be referred back to by number.
     """
+    color = color_enabled(sys.stdout)
     if a["source"] == "external":
         # No git commit to show -- report where it actually came from.
         prov = f"external: {a['origin'] or '(no origin recorded)'}"
@@ -249,7 +288,9 @@ def _print_artifact_row(root, run_id, session_dir, a, conn, *,
         dirty_flag = " (dirty)" if a["dirty"] else ""
         commit_short = (a["commit_hash"] or "")[:8]
         prov = f"{a['repo'] or '-'}@{commit_short or '-'}{dirty_flag}"
-    print(f"{indent}- {a['filename']:30} {prov}")
+    name_padded = f"{a['filename']:30}"
+    bullet = paint(f"{number:>3}.", _DIM_STYLE, color) if number is not None else "  -"
+    print(f"{indent}{bullet} {paint(name_padded, 'bold', color)} {prov}")
 
     derived = conn.execute(
         "SELECT ref_user, ref_archive, ref_archive_id, ref_session, "
@@ -264,7 +305,7 @@ def _print_artifact_row(root, run_id, session_dir, a, conn, *,
 
         try:
             info = uris.describe(root, session=run_id, file=a["filename"])
-            print(f"{indent}    uri: {info.uri}")
+            print(f"{indent}    uri: {paint(info.uri, _URI_STYLE, color)}")
         except uris.UriError as e:
             print(f"{indent}    uri: (unavailable: {e})")
 
@@ -272,7 +313,10 @@ def _print_artifact_row(root, run_id, session_dir, a, conn, *,
         from nebula import annotations
 
         note = annotations.get(session_dir, a["filename"])
-        tag_list = ", ".join(note["tags"]) if note["tags"] else "-"
+        if note["tags"]:
+            tag_list = ", ".join(paint(t, _TAG_STYLE, color) for t in note["tags"])
+        else:
+            tag_list = paint("-", _DIM_STYLE, color)
         print(f"{indent}    tags: {tag_list}")
         if note.get("comment"):
             print(f"{indent}    comment: {note['comment']}")
@@ -284,7 +328,7 @@ def _print_artifact_row(root, run_id, session_dir, a, conn, *,
         path = Path(session_dir) / a["filename"]
         if path.is_file():
             size = _fmt_bytes(path.stat().st_size)
-        print(f"{indent}    sha256: {sha_short}   size: {size}")
+        print(f"{indent}    sha256: {paint(sha_short, _DIM_STYLE, color)}   size: {size}")
         if a["entry_point"]:
             print(f"{indent}    entry_point: {a['entry_point']}")
 
@@ -305,9 +349,15 @@ def cmd_show(args):
         err(f"no session {run_id!r} in index")
         sys.exit(1)
 
-    print(f"{session_row['run_id']}  [{session_row['status']}]")
+    color = color_enabled(sys.stdout)
+    status = session_row["status"]
+    print(f"{paint(session_row['run_id'], _RUNID_STYLE, color)}  "
+          f"[{paint(status, _STATUS_STYLE.get(status, ''), color)}]")
     print(f"  created:     {session_row['created']}")
-    print(f"  tags:        {', '.join(json.loads(session_row['tags']))}")
+    row_tags = json.loads(session_row["tags"])
+    tags_str = ", ".join(paint(t, _TAG_STYLE, color) for t in row_tags) \
+        if row_tags else paint("-", _DIM_STYLE, color)
+    print(f"  tags:        {tags_str}")
     print(f"  description: {session_row['description']}")
     print(f"  path:        {index.session_path(root, session_row)}")
     hold_until = session_row["hold_until"]
@@ -754,14 +804,18 @@ def cmd_check(args):
 
 
 def _run_id_arg(text: str) -> str:
-    """argparse type for session ids: accepts the canonical S-<yy>-<nnnn>
-    or a bare number for the current year, so `nebula show arc 12` works.
+    """argparse type for session ids: accepts the canonical S-<yy>-<nnnn>,
+    a bare number for the current year (so `nebula show arc 12` works), or
+    the S! shortcut.
 
-    The prefix a bare number expands to depends on the archive, which
-    argparse cannot see here -- so this assumes S- and the commands that
-    know their archive re-resolve (see _run_id_for)."""
+    The prefix a bare number expands to, and what S! actually means,
+    depend on the archive, which argparse cannot see here -- so both pass
+    through provisionally and the real resolution happens once the
+    archive is known (see _run_id_for and _resolve_reuse_session_shortcut)."""
     from nebula.session import resolve_run_id
 
+    if (text or "").strip().upper() == REUSE_SESSION_TOKEN:
+        return REUSE_SESSION_TOKEN
     try:
         return resolve_run_id(text)
     except ValueError as e:
@@ -912,9 +966,12 @@ def cmd_annotate(args):
         sys.exit(1)
 
     got = annotations.get(session_dir, target)
+    color = color_enabled(sys.stdout)
     where = f"{args.run_id}/{target}" if target else args.run_id
     print(f"{where}{'  (updated)' if changed else ''}")
-    print(f"  user tags: {', '.join(got['tags']) if got['tags'] else '(none)'}")
+    tags_str = ", ".join(paint(t, _TAG_STYLE, color) for t in got["tags"]) \
+        if got["tags"] else "(none)"
+    print(f"  user tags: {tags_str}")
     if got["comment"]:
         print("  comment:")
         for line in got["comment"].splitlines():
@@ -1431,6 +1488,26 @@ def cmd_whoami(args):
           file=sys.stderr)
 
 
+def cmd_default(args):
+    """Show or set the archive A! refers to."""
+    reg = get_registry()
+    if args.archive is None:
+        current = reg.default_nickname()
+        if current:
+            print(current)
+        else:
+            warn(f"(no default archive set -- 'nebula default <archive>' "
+                f"to pick what {DEFAULT_ARCHIVE_TOKEN} means)")
+        return
+    try:
+        cfg = reg.resolve_one(args.archive)
+    except KeyError as e:
+        err(str(e))
+        sys.exit(1)
+    reg.set_default(cfg.nickname)
+    print(f"{DEFAULT_ARCHIVE_TOKEN} -> {cfg.nickname}")
+
+
 def cmd_uri(args):
     """Print the fully-qualified nebula:// URI for something in an archive.
 
@@ -1477,7 +1554,7 @@ def cmd_uri(args):
         print(json.dumps(info.to_dict(), indent=2))
         return
 
-    print(info.uri)
+    print(paint(info.uri, _URI_STYLE, color_enabled(sys.stdout)))
     sys.stdout.flush()
     print(f"  kind:   {info.kind}", file=sys.stderr)
     print(f"  owner:  {info.user}", file=sys.stderr)
@@ -2622,6 +2699,16 @@ def main(argv=None):
     p.set_defaults(func=cmd_whoami)
 
     p = sub.add_parser(
+        "default", help=f"show or set the archive {DEFAULT_ARCHIVE_TOKEN} refers to",
+        description=f"With no argument, show which archive {DEFAULT_ARCHIVE_TOKEN} "
+                     f"currently means. With one, set it -- then any command "
+                     f"that takes an archive accepts {DEFAULT_ARCHIVE_TOKEN} "
+                     f"in place of typing its name.")
+    p.add_argument("archive", nargs="?", help="registered archive nickname "
+                                              "or declared name to make the default")
+    p.set_defaults(func=cmd_default)
+
+    p = sub.add_parser(
         "uri", help="print the nebula:// URI for a session, file, "
                     "collection or asset",
         description="Print the fully-qualified nebula:// URI for something "
@@ -2647,7 +2734,35 @@ def main(argv=None):
 
 
     args = parser.parse_args(argv)
+    _resolve_reuse_session_shortcut(args)
     args.func(args)
+
+
+def _resolve_reuse_session_shortcut(args) -> None:
+    """Expand S! to a real run_id, once, right after parsing.
+
+    run_id reaches each command through a different path from there -- a
+    direct SQL lookup in cmd_show, _find_session_dir in
+    cmd_annotate/cmd_hold, a bare string handed straight to nebula.manual
+    in others -- so this is the one place that can resolve it for every
+    command without editing each of them individually.
+    """
+    run_id = getattr(args, "run_id", None)
+    if not run_id or run_id.strip().upper() != REUSE_SESSION_TOKEN:
+        return
+    archive_text = getattr(args, "archive", None) or getattr(args, "target", None)
+    if not archive_text:
+        return
+    root, _ = _resolve_archive_cli(archive_text)
+    from nebula.session_select import reuse_candidate
+
+    got = reuse_candidate(root)
+    if got is None:
+        err(f"{REUSE_SESSION_TOKEN} needs an open/today/held session to "
+            f"reuse, and this archive has none right now -- start one, or "
+            f"pass a real session id")
+        sys.exit(1)
+    args.run_id = got
 
 
 if __name__ == "__main__":

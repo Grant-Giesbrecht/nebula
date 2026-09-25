@@ -581,12 +581,16 @@ Without the Navigator GUI installed (a headless machine, an SSH session),
 
 ```
 $ nebula browse postdoc
-/postdoc> cd S-26-0152
+/postdoc> ls
+    1. collections/
+    2. assets/
+    3. S-26-0152  2026-04-11  [closed ]  RP23D  scope sweep
+/postdoc> cd 3
 /postdoc/S-26-0152> show -u -t
-  - raw.csv                        me@repo@a1b2c3d4
-      uri: nebula://grant@ncsu.edu/postdoc~0fe/S-26-0152/raw.csv
-      tags: RP23D
-/postdoc/S-26-0152> reveal raw.csv        # or: open raw.csv
+    1. raw.csv                        me@repo@a1b2c3d4
+        uri: nebula://grant@ncsu.edu/postdoc~0fe/S-26-0152/raw.csv
+        tags: RP23D
+/postdoc/S-26-0152> reveal 1        # or: open 1 / open raw.csv
 /postdoc/S-26-0152> cd ../../assets
 /postdoc/assets> cd AF-26-0017
 /postdoc/assets/AF-26-0017> uri
@@ -599,6 +603,38 @@ sibling namespaces (multi-segment paths and `..` chains both work, e.g.
 `nebula show`; `open`/`reveal` hand a file to the OS default app or the
 file manager; `annotate` edits tags/comments without leaving the shell.
 Type `help` for the full command list.
+
+**Every listing is numbered**, and anywhere a name is expected you can
+type the number instead -- `show 1`, `cd 3`, `annotate 1 --add-tags foo`
+-- so a long filename or run id never has to be typed out. A number
+refers to whatever the most recent `ls`/`show` actually printed; moving
+around with `cd` doesn't itself refresh it. URIs and tags are coloured
+throughout the CLI (`nebula show`, `nebula ls`, `browse`, ...) to stand
+out at a glance; colour is skipped automatically when output isn't a
+real terminal (piped, redirected, `NO_COLOR` set), so scripts see plain
+text exactly as before.
+
+### Shortcuts: A! and S!
+
+Two tokens are recognized everywhere an archive or session id is
+accepted, on the command line and inside `browse`:
+
+- **`A!`** means "the archive `nebula default` points at" -- set it once,
+  then skip typing the archive name every time:
+  ```
+  nebula default postdoc      # A! now means postdoc
+  nebula show A! S-26-0152
+  nebula browse A!
+  ```
+- **`S!`** means "the session `nebula.session(archive, reuse=True)` would
+  use" -- the most recent open/today/held session, so you don't have to
+  look up today's run id by hand:
+  ```
+  nebula show postdoc S!
+  nebula annotate A! S! --add-tags reviewed
+  ```
+  in `browse`, the same works as `cd S!`. If the archive has no
+  open/today/held session, `S!` fails loudly rather than guessing.
 
 And a script tells you as it saves:
 
@@ -852,6 +888,7 @@ nebula archives [-l]                               # list registered archives
 nebula register <root> [nickname] [--git-org ORG] [--user WHO]
 nebula register --remove NAME                      # forget an archive (files kept)
 nebula whoami [--set NAME]                         # your name in nebula:// URIs
+nebula default [<archive>]                         # get/set what A! means (see below)
 nebula uri <archive> [<run_id> [<file>]]           # the citable nebula:// URI
 nebula uri <archive> --collection NAME | --asset ID
 nebula uri nebula://<user>/<archive~id>/...        # ...or resolve one to a path

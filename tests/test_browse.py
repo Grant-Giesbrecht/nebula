@@ -234,3 +234,82 @@ def test_start_archive_and_run_id_land_directly_in_the_session(populated_archive
     root, run_id, _ = populated_archive
     out = _run(root, monkeypatch, ["pwd"], start_archive=str(root), start_run_id=run_id)
     assert out.strip().splitlines()[-1].endswith(f"/{run_id}")
+
+
+# ---------------------------------------------------------------------
+# numbered listings, referenced by number
+# ---------------------------------------------------------------------
+
+def test_ls_numbers_entries(populated_archive, monkeypatch):
+    root, run_id, _ = populated_archive
+    out = _run(root, monkeypatch, [f"cd {root}", "ls"])
+    assert "1. collections/" in out
+    assert "2. assets/" in out
+    assert f"3. {run_id}" in out
+
+
+def test_cd_by_number(populated_archive, monkeypatch):
+    root, run_id, _ = populated_archive
+    out = _run(root, monkeypatch, [f"cd {root}", "ls", "cd 3", "pwd"])
+    assert out.strip().splitlines()[-1].endswith(f"/{run_id}")
+
+
+def test_show_and_info_by_number_inside_a_session(populated_archive, monkeypatch):
+    root, run_id, _ = populated_archive
+    out = _run(root, monkeypatch, [
+        f"cd {root}", f"cd {run_id}", "ls", "show 1 -u", "info 1",
+    ])
+    assert "uri:" in out
+    assert "sha256:" in out
+
+
+def test_annotate_by_number(populated_archive, monkeypatch):
+    root, run_id, _ = populated_archive
+    _run(root, monkeypatch, [
+        f"cd {root}", f"cd {run_id}", "ls", "annotate 1 --add-tags numbered",
+    ])
+    from nebula import annotations
+    from nebula.session import _find_session_dir
+
+    session_dir = _find_session_dir(root, run_id)
+    assert "numbered" in annotations.get(session_dir, "raw.csv")["tags"]
+
+
+def test_number_out_of_range_is_treated_as_a_literal_name(populated_archive, monkeypatch):
+    root, run_id, _ = populated_archive
+    out = _run(root, monkeypatch, [f"cd {root}", "ls", "cd 999"])
+    assert "no such session '999'" in out
+
+
+def test_number_refers_to_the_listing_that_was_actually_shown(populated_archive, monkeypatch):
+    """cd changes location without re-listing, so a stale number from a
+    previous `ls` must not silently resolve against the new location."""
+    root, run_id, asset_id = populated_archive
+    out = _run(root, monkeypatch, [
+        f"cd {root}", "ls",       # 3 -> run_id, in the archive listing
+        "cd assets", "ls",        # re-lists: now 1 -> asset_id
+        "cd 1", "pwd",
+    ])
+    assert out.strip().splitlines()[-1].endswith(f"/assets/{asset_id}")
+
+
+# ---------------------------------------------------------------------
+# A!/S! shortcuts inside the shell
+# ---------------------------------------------------------------------
+
+def test_cd_bang_archive(populated_archive, monkeypatch):
+    root, run_id, _ = populated_archive
+    from nebula.registry import get_registry
+
+    reg = get_registry()
+    reg.register("postdoc", root)
+    reg.set_default("postdoc")
+
+    out = _run(root, monkeypatch, ["cd A!", "pwd"])
+    assert out.strip().splitlines()[-1] == "/postdoc"
+
+
+def test_cd_bang_session(populated_archive, monkeypatch):
+    root, run_id, _ = populated_archive
+    out = _run(root, monkeypatch, [f"cd {root}", "cd S!", "pwd"])
+    assert out.strip().splitlines()[-1].endswith(f"/{run_id}")

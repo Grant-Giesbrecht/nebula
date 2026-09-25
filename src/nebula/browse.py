@@ -62,7 +62,10 @@ commands:
   help  ?                       show this help
   exit  quit  (or Ctrl-D)        leave
 -u/--uri, -t/--tag, -l/--long on `ls`/`show` mean the same thing they do
-on `nebula show`. TAB completes names and commands where supported."""
+on `nebula show`. Every listing is numbered -- anywhere a name is expected
+(cd, show, info, open, reveal, uri, annotate) you can type that number
+instead, e.g. `show 7` for whatever `ls` just printed as "7. ...". TAB
+completes names and commands where supported."""
 
 
 @dataclass
@@ -70,6 +73,9 @@ class _State:
     archive_text: Optional[str] = None     # as typed / registry nickname
     archive_root: Optional[Path] = None
     segments: List[str] = field(default_factory=list)   # [] at archive root
+    #: Names from the most recently displayed listing, in the order shown
+    #: -- what a bare number typed afterwards refers to (see _resolve_token).
+    last_listing: List[str] = field(default_factory=list)
 
     @property
     def at_root(self) -> bool:
@@ -102,11 +108,31 @@ class _State:
 # resolving what's typed
 # ---------------------------------------------------------------------
 
+def _resolve_token(state: _State, token: str) -> str:
+    """A bare number typed after a listing refers to that entry by its
+    1-based position, the way it was just printed -- so `show 7` works
+    instead of typing a long filename or run id. Anything that isn't a
+    valid index into the current listing is passed through unchanged and
+    treated as a literal name."""
+    if token.isdigit():
+        idx = int(token)
+        if 1 <= idx <= len(state.last_listing):
+            return state.last_listing[idx - 1]
+    return token
+
+
 def _try_resolve_archive(text: str):
     """Like cli._resolve_archive_cli, but returns (root, name) or None on
     failure instead of exiting the process -- a bad `cd` should not kill
     the whole shell."""
     from nebula import uris
+    from nebula.cli import DEFAULT_ARCHIVE_TOKEN
+
+    if (text or "").strip().upper() == DEFAULT_ARCHIVE_TOKEN:
+        default = get_registry().default_nickname()
+        if default is None:
+            return None
+        text = default
 
     if uris.is_uri(text):
         try:
@@ -154,7 +180,12 @@ def _session_ids(root) -> List[str]:
 
 
 def _resolve_run_id(root, text: str) -> Optional[str]:
-    from nebula.cli import _run_id_for
+    from nebula.cli import REUSE_SESSION_TOKEN, _run_id_for
+
+    if (text or "").strip().upper() == REUSE_SESSION_TOKEN:
+        from nebula.session_select import reuse_candidate
+
+        return reuse_candidate(root)
 
     candidate = _run_id_for(root, text)
     conn = index.open_fresh(root)
@@ -195,40 +226,68 @@ def _fmt_bytes(n) -> str:
     return _f(n)
 
 
+#: Colour for the leading "N." on every numbered listing line -- dim, so
+#: it reads as an index rather than data, the same visual role dim plays
+#: for a closed session's status.
+_NUM_STYLE = "dim"
+
+
+def _num(i: int, color: bool) -> str:
+    return paint(f"{i:>3}.", _NUM_STYLE, color)
+
+
 def _list_here(state: _State, *, uri=False, tags=False, long=False) -> None:
+    from nebula.cli import _RUNID_STYLE, _STATUS_STYLE, _TAG_STYLE, _DIM_STYLE, _HELD_STYLE
+    from nebula.session import _hold_value_active
+
+    color = color_enabled(sys.stdout)
     kind = state.kind
     if kind == "root":
         names = _archive_names()
+        state.last_listing = names
         if not names:
             print("(no archives registered)")
             return
-        for n in names:
-            print(f"  {n}/")
+        for i, n in enumerate(names, 1):
+            print(f"  {_num(i, color)} {n}/")
         return
 
     if kind == "archive":
-        print("  collections/")
-        print("  assets/")
-        for row in _session_rows(state.archive_root):
-            row_tags = ", ".join(json.loads(row["tags"])) or "-"
-            print(f"  {row['run_id']}  {row['created'][:16]}  "
-                  f"[{row['status']:7}]  {row_tags:20}  {row['description']}")
+        entries = ["collections", "assets"]
+        print(f"  {_num(1, color)} collections/")
+        print(f"  {_num(2, color)} assets/")
+        rows = _session_rows(state.archive_root)
+        for i, row in enumerate(rows, start=3):
+            row_tags_list = json.loads(row["tags"])
+            row_tags = ", ".join(paint(t, _TAG_STYLE, color) for t in row_tags_list) \
+                if row_tags_list else paint("-", _DIM_STYLE, color)
+            status_padded = f"{row['status']:7}"
+            held = paint("  HELD", _HELD_STYLE, color) \
+                if _hold_value_active(row["hold_until"]) else ""
+            print(f"  {_num(i, color)} {paint(row['run_id'], _RUNID_STYLE, color)}  "
+                  f"{row['created'][:16]}  "
+                  f"[{paint(status_padded, _STATUS_STYLE.get(row['status'], ''), color)}]  "
+                  f"{row_tags}  {row['description']}{held}")
+            entries.append(row["run_id"])
+        state.last_listing = entries
         return
 
     if kind == "session":
-        _show_session(state, state.segments[0], uri=uri, tags=tags, long=long)
+        state.last_listing = _show_session(state, state.segments[0],
+                                           uri=uri, tags=tags, long=long)
         return
 
     if kind == "collections":
         from nebula import collection as collection_mod
 
         colls = collection_mod.list_all(state.archive_root)
+        state.last_listing = [c.name for c in colls]
         if not colls:
             print("  (no collections in this archive)")
             return
-        for c in colls:
+        for i, c in enumerate(colls, 1):
             title = f"  {c.title}" if c.title else ""
-            print(f"  {c.name:24} {len(c.entries):3} entrie(s){title}")
+            print(f"  {_num(i, color)} {c.name:24} {len(c.entries):3} entrie(s){title}")
         return
 
     if kind == "collection":
@@ -239,15 +298,17 @@ def _list_here(state: _State, *, uri=False, tags=False, long=False) -> None:
         from nebula import assets
 
         ids = assets.list_assets(state.archive_root)
+        state.last_listing = ids
         if not ids:
             print("  (no assets in this archive)")
             return
-        for asset_id in ids:
+        for i, asset_id in enumerate(ids, 1):
             try:
                 meta = assets.read_asset(state.archive_root, asset_id)
             except assets.AssetError:
                 continue
-            print(f"  {meta.id}  {(meta.name or '?'):40.40} {_fmt_bytes(meta.size):>9}")
+            print(f"  {_num(i, color)} {meta.id}  {(meta.name or '?'):40.40} "
+                  f"{_fmt_bytes(meta.size):>9}")
         return
 
     if kind == "asset":
@@ -255,7 +316,10 @@ def _list_here(state: _State, *, uri=False, tags=False, long=False) -> None:
         return
 
 
-def _show_session(state: _State, run_id: str, *, uri=False, tags=False, long=False) -> None:
+def _show_session(state: _State, run_id: str, *, uri=False, tags=False, long=False) -> List[str]:
+    """Print the session and its artifacts, numbered, and return the
+    filenames in the order shown -- what a following bare number refers
+    to (see _resolve_token)."""
     root = state.archive_root
     conn = index.open_fresh(root)
     try:
@@ -264,12 +328,19 @@ def _show_session(state: _State, run_id: str, *, uri=False, tags=False, long=Fal
         ).fetchone()
         if row is None:
             err(f"no session {run_id!r} in index")
-            return
-        from nebula.cli import _fmt_ref_row, _print_artifact_row
+            return []
+        from nebula.cli import (_DIM_STYLE, _RUNID_STYLE, _STATUS_STYLE,
+                                _TAG_STYLE, _fmt_ref_row, _print_artifact_row)
 
-        print(f"{row['run_id']}  [{row['status']}]")
+        color = color_enabled(sys.stdout)
+        status = row["status"]
+        print(f"{paint(row['run_id'], _RUNID_STYLE, color)}  "
+              f"[{paint(status, _STATUS_STYLE.get(status, ''), color)}]")
         print(f"  created:     {row['created']}")
-        print(f"  tags:        {', '.join(json.loads(row['tags']))}")
+        row_tags = json.loads(row["tags"])
+        tags_str = ", ".join(paint(t, _TAG_STYLE, color) for t in row_tags) \
+            if row_tags else paint("-", _DIM_STYLE, color)
+        print(f"  tags:        {tags_str}")
         print(f"  description: {row['description']}")
         session_dir = index.session_path(root, row)
         print(f"  path:        {session_dir}")
@@ -291,9 +362,10 @@ def _show_session(state: _State, run_id: str, *, uri=False, tags=False, long=Fal
         print("  artifacts:")
         if not artifacts:
             print("    (none)")
-        for a in artifacts:
+        for i, a in enumerate(artifacts, 1):
             _print_artifact_row(root, run_id, session_dir, a, conn,
-                                uri=uri, tags=tags, long=long)
+                                uri=uri, tags=tags, long=long, number=i)
+        return [a["filename"] for a in artifacts]
     finally:
         conn.close()
 
@@ -416,7 +488,9 @@ def _cmd_uri(state: _State, name: Optional[str]) -> None:
     except uris.UriError as e:
         err(str(e))
         return
-    print(info.uri)
+    from nebula.cli import _URI_STYLE
+
+    print(paint(info.uri, _URI_STYLE, color_enabled(sys.stdout)))
 
 
 def _cmd_search(state: _State, query: str) -> None:
@@ -490,6 +564,7 @@ def _cmd_annotate(state: _State, rest: List[str]) -> None:
     if error:
         err(f"  {error}")
         return
+    name = _resolve_token(state, name)
     session_dir = index.session_path(
         state.archive_root, _session_row(state.archive_root, state.segments[0]))
     target = name
@@ -599,6 +674,12 @@ def _do_cd(state: _State, target: str) -> None:
         state.archive_text = state.archive_root = None
         state.segments = []
         return
+    if target.isdigit():
+        # A bare number is only meaningful as the very next hop -- resolve
+        # it against the listing shown here before treating it as a path
+        # at all (a resolved name may itself contain no "/", so this can't
+        # recurse into the general splitting logic below by accident).
+        target = _resolve_token(state, target)
 
     if target.startswith("/"):
         # A real absolute filesystem path is itself full of "/", so try it
@@ -707,7 +788,7 @@ def run_browse(start_archive: Optional[str] = None, start_run_id: Optional[str] 
                 _list_here(state, uri=uri, tags=tags, long=long_)
             elif cmd == "show":
                 flags = {t for t in rest if t.startswith("-")}
-                names = [t for t in rest if not t.startswith("-")]
+                names = [_resolve_token(state, t) for t in rest if not t.startswith("-")]
                 uri = "-u" in flags or "--uri" in flags
                 tags = "-t" in flags or "--tag" in flags or "--tags" in flags
                 long_ = "-l" in flags or "--long" in flags
@@ -744,10 +825,12 @@ def run_browse(start_archive: Optional[str] = None, start_run_id: Optional[str] 
             elif cmd == "info":
                 if not rest:
                     err("  usage: info <name> [-l]")
-                elif state.kind == "assets":
-                    _show_asset(state, rest[0], long=True)
+                    continue
+                name = _resolve_token(state, rest[0])
+                if state.kind == "assets":
+                    _show_asset(state, name, long=True)
                 elif state.kind == "collections":
-                    _show_collection(state, rest[0])
+                    _show_collection(state, name)
                 elif state.kind == "session":
                     from nebula.cli import _print_artifact_row
 
@@ -757,10 +840,10 @@ def run_browse(start_archive: Optional[str] = None, start_run_id: Optional[str] 
                             "SELECT filename, repo, commit_hash, dirty, entry_point, "
                             "source, origin, sha256 FROM artifacts "
                             "WHERE run_id = ? AND filename = ?",
-                            (state.segments[0], rest[0]),
+                            (state.segments[0], name),
                         ).fetchone()
                         if a is None:
-                            err(f"no such artifact {rest[0]!r}")
+                            err(f"no such artifact {name!r}")
                         else:
                             session_dir = index.session_path(
                                 state.archive_root,
@@ -771,13 +854,13 @@ def run_browse(start_archive: Optional[str] = None, start_run_id: Optional[str] 
                     finally:
                         conn.close()
                 else:
-                    err(f"nothing named {rest[0]!r} here")
+                    err(f"nothing named {name!r} here")
             elif cmd == "open":
-                _cmd_open(state, rest[0] if rest else None, reveal=False)
+                _cmd_open(state, _resolve_token(state, rest[0]) if rest else None, reveal=False)
             elif cmd == "reveal":
-                _cmd_open(state, rest[0] if rest else None, reveal=True)
+                _cmd_open(state, _resolve_token(state, rest[0]) if rest else None, reveal=True)
             elif cmd == "uri":
-                _cmd_uri(state, rest[0] if rest else None)
+                _cmd_uri(state, _resolve_token(state, rest[0]) if rest else None)
             elif cmd == "search":
                 _cmd_search(state, " ".join(rest))
             elif cmd == "tags":

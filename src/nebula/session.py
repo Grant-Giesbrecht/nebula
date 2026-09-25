@@ -1398,14 +1398,14 @@ def session(
         # created today, or held) to append to instead of always making a
         # new one.
         from nebula.registry import resolve_archive
-        from nebula.session_select import _candidate_sessions
+        from nebula.session_select import reuse_candidate
 
         archive_root, _ = resolve_archive(archive)
-        candidates = _candidate_sessions(archive_root)
-        if candidates:
+        run_id = reuse_candidate(archive_root)
+        if run_id:
             s = append_to(
                 archive,
-                candidates[0].run_id,
+                run_id,
                 archive_name=archive_name,
                 on_missing_meta=on_missing_meta,
                 announce=announce,
