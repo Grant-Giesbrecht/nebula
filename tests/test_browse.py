@@ -502,3 +502,89 @@ def test_search_filter_drops_non_matching_records(registered_archive, monkeypatc
     ])
     assert "nothing matches the filter" in out
     assert "s21_sweep.HDF5" not in out
+
+
+# ---------------------------------------------------------------------
+# a bare session id resolves from anywhere in the archive, not just the
+# sessions listing (so `cd`/show/info/etc. never need `cd ..` first)
+# ---------------------------------------------------------------------
+
+def test_cd_bare_session_id_from_inside_a_different_session(registered_archive, monkeypatch):
+    root, run1, run2, uri = registered_archive
+    out = _run(root, monkeypatch, ["cd postdoc", f"cd {run1}", f"cd {run2}", "pwd"])
+    assert out.strip().splitlines()[-1].endswith(f"/postdoc/{run2}")
+
+
+def test_cd_bare_session_id_from_inside_assets(registered_archive, monkeypatch):
+    root, run1, run2, uri = registered_archive
+    out = _run(root, monkeypatch, ["cd postdoc", "cd assets", f"cd {run2}", "pwd"])
+    assert out.strip().splitlines()[-1].endswith(f"/postdoc/{run2}")
+
+
+def test_info_bare_session_ref_from_inside_a_different_session(registered_archive, monkeypatch):
+    root, run1, run2, uri = registered_archive
+    out = _run(root, monkeypatch, [
+        "cd postdoc", f"cd {run1}", f"info {run2}/s21_sweep.HDF5",
+    ])
+    assert "sha256:" in out
+
+
+# ---------------------------------------------------------------------
+# tab completion (_ref_completions) -- exercised directly, the same way
+# readline would call it, rather than driving real terminal keystrokes
+# ---------------------------------------------------------------------
+
+def test_complete_bare_word_offers_session_ids_and_shortcuts(registered_archive):
+    root, run1, run2, uri = registered_archive
+    state = browse._State()
+    browse._do_cd(state, "postdoc")
+    got = set(browse._ref_completions(state, ""))
+    assert {run1, run2, "collections", "assets", "A!", "S!"} <= got
+
+
+def test_complete_session_slash_partial_filename(registered_archive):
+    root, run1, run2, uri = registered_archive
+    state = browse._State()
+    browse._do_cd(state, "postdoc")
+    got = browse._ref_completions(state, f"{run2}/s21")
+    assert got == [f"{run2}/s21_sweep.HDF5"]
+
+
+def test_complete_works_from_a_different_session(registered_archive):
+    """The reported gap: completing `show S-26-0002/pump_` (or here,
+    s21_sweep) while sitting inside a *different* session, not the one
+    named in the partial ref."""
+    root, run1, run2, uri = registered_archive
+    state = browse._State()
+    browse._do_cd(state, "postdoc")
+    browse._do_cd(state, run1)
+    got = browse._ref_completions(state, f"{run2}/s21")
+    assert got == [f"{run2}/s21_sweep.HDF5"]
+
+
+def test_complete_bang_archive_slash_session_slash_partial(registered_archive):
+    root, run1, run2, uri = registered_archive
+    get_registry().register("postdoc", root)
+    get_registry().set_default("postdoc")
+
+    state = browse._State()  # still at the global root
+    got = browse._ref_completions(state, f"A!/{run2}/s21")
+    assert got == [f"A!/{run2}/s21_sweep.HDF5"]
+
+
+def test_complete_unresolvable_prefix_returns_nothing(registered_archive):
+    root, run1, run2, uri = registered_archive
+    state = browse._State()
+    browse._do_cd(state, "postdoc")
+    assert browse._ref_completions(state, "S-26-9999/x") == []
+
+
+def test_complete_does_not_offer_names_for_a_flag(registered_archive):
+    """A word starting with "-" is a flag, not a name -- _install_completer
+    special-cases this itself; here we just confirm _ref_completions
+    isn't what's consulted for one (it would return odd results for "-t"
+    if it were, since nothing starts with a literal dash)."""
+    root, run1, run2, uri = registered_archive
+    state = browse._State()
+    browse._do_cd(state, "postdoc")
+    assert browse._ref_completions(state, "-t") == []

@@ -36,10 +36,10 @@ import shlex
 import sys
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import List, Optional
+from typing import Dict, List, Optional
 
 from nebula import index
-from nebula._termui import color_enabled, err, install_completer, is_interactive, ok, paint, warn
+from nebula._termui import color_enabled, err, is_interactive, ok, paint, warn
 from nebula.registry import get_registry
 
 _COMMANDS = ["cd", "ls", "show", "info", "open", "reveal", "uri", "copy",
@@ -71,12 +71,15 @@ commands:
 thing they do on `nebula show`. Every listing is numbered -- anywhere a
 name is expected you can type that number instead, e.g. `show 7` for
 whatever `ls` just printed as "7. ...". A name can also be any ref nebula
-understands: a bare local filename, `S-26-0152/raw.csv` (another session
-in this archive), or a full `nebula://...` URI (another archive
-entirely) -- `cd` on one lands at the session it names (a URI cannot cd
-into a specific file, only the session holding it); show/info/open/
-reveal/uri/copy act on the file itself. TAB completes names and commands
-where supported."""
+understands, at any level of brevity: a bare local filename, a bare
+session id from anywhere in the archive (not just the sessions listing),
+`S-26-0152/raw.csv` (another session in this archive), `A!/S-26-0152/raw.csv`
+(the default archive, from anywhere), or a full `nebula://...` URI
+(another archive entirely) -- `cd` on one lands at the session it names
+(a URI cannot cd into a specific file, only the session holding it);
+show/info/open/reveal/uri/copy act on the file itself. TAB completes
+commands, names and refs -- including mid-ref, e.g. `A!/S-26-0152/p<TAB>`
+-- where the terminal supports it."""
 
 
 @dataclass
@@ -190,13 +193,97 @@ def _session_ids(root) -> List[str]:
     return [r["run_id"] for r in _session_rows(root)]
 
 
-def _resolve_run_id(root, text: str) -> Optional[str]:
-    from nebula.cli import REUSE_SESSION_TOKEN, _run_id_for
+#: Short-lived cache for tab completion only -- keyed by (kind, archive
+#: root, extra), each entry (fetched_at, value). Typing one ref is many
+#: keystrokes, and each keystroke re-asks "what are this archive's
+#: session ids" / "what files does this session have" via a fresh index
+#: read (a full freshness sweep -- see index.ensure_fresh) even though
+#: the answer cannot have changed since the *previous* keystroke a moment
+#: ago. Every other caller (`ls`, `cd`, `show`, ...) still reads the
+#: index live -- correctness matters there; a completion list a couple of
+#: seconds stale is a fine trade for not re-sweeping the whole archive on
+#: every character typed.
+_COMPLETION_CACHE_TTL = 2.0
+_completion_cache: Dict[tuple, "tuple[float, list]"] = {}
 
-    if (text or "").strip().upper() == REUSE_SESSION_TOKEN:
+
+def _cached(key, compute):
+    import time
+
+    now = time.monotonic()
+    hit = _completion_cache.get(key)
+    if hit is not None and now - hit[0] < _COMPLETION_CACHE_TTL:
+        return hit[1]
+    value = compute()
+    _completion_cache[key] = (now, value)
+    return value
+
+
+def _completion_session_ids(root) -> List[str]:
+    return _cached(("sessions", str(root)), lambda: _session_ids(root))
+
+
+def _completion_artifact_names(root, run_id: str) -> List[str]:
+    def fetch():
+        conn = index.open_fresh(root)
+        try:
+            rows = conn.execute(
+                "SELECT filename FROM artifacts WHERE run_id = ? ORDER BY filename",
+                (run_id,),
+            ).fetchall()
+        finally:
+            conn.close()
+        return [r["filename"] for r in rows]
+
+    return _cached(("artifacts", str(root), run_id), fetch)
+
+
+def _completion_asset_ids(root) -> List[str]:
+    from nebula import assets
+
+    return _cached(("assets", str(root)), lambda: assets.list_assets(root))
+
+
+def _completion_collection_names(root) -> List[str]:
+    from nebula import collection as collection_mod
+
+    return _cached(("collections", str(root)),
+                   lambda: [c.name for c in collection_mod.list_all(root)])
+
+
+def _resolve_run_id(root, text: str, *, cached: bool = False) -> Optional[str]:
+    """Expand/validate a typed session id against the archive.
+
+    `cached=True` (tab completion only -- see _apply_cd/_walk_path) skips
+    every network round-trip: no index freshness sweep, and no
+    archive.yaml read for the id prefix (S- vs I-) -- that's inferred
+    from whatever ids are already in the completion cache instead. On a
+    network-mounted archive this is the difference between a session-id
+    guess costing a round-trip per keystroke and costing nothing after
+    the first one. `cached=False` (real navigation) stays fully live."""
+    text_stripped = (text or "").strip()
+    from nebula.cli import REUSE_SESSION_TOKEN
+
+    if text_stripped.upper() == REUSE_SESSION_TOKEN:
         from nebula.session_select import reuse_candidate
 
         return reuse_candidate(root)
+
+    if cached:
+        ids = _completion_session_ids(root)
+        upper = text_stripped.upper()
+        if upper in ids:
+            return upper
+        if upper.isdigit():
+            import datetime as _dt
+
+            year2 = _dt.datetime.now().year % 100
+            prefix = ids[0].split("-", 1)[0] + "-" if ids else "S-"
+            candidate = f"{prefix}{year2:02d}-{int(upper):04d}"
+            return candidate if candidate in ids else None
+        return None
+
+    from nebula.cli import _run_id_for
 
     candidate = _run_id_for(root, text)
     conn = index.open_fresh(root)
@@ -225,6 +312,24 @@ def _children(state: _State) -> List[str]:
 
         return assets.list_assets(state.archive_root)
     return []  # a session, one collection, or one asset has no further cd targets
+
+
+def _completion_children(state: _State) -> List[str]:
+    """Like _children, but also a session's own artifact filenames --
+    valid completions for show/info/open/reveal/uri/copy even though `cd`
+    has nowhere to go with them (a session has no further cd target).
+
+    Unlike _children (used by `ls`/`cd`, which must stay live), the
+    index-backed lookups here go through the short-lived completion
+    cache -- see _cached's docstring."""
+    kind = state.kind
+    if kind == "archive":
+        return ["collections", "assets"] + _completion_session_ids(state.archive_root)
+    if kind == "session":
+        names = list(_children(state))
+        names.extend(_completion_artifact_names(state.archive_root, state.segments[0]))
+        return names
+    return list(_children(state))
 
 
 # ---------------------------------------------------------------------
@@ -433,15 +538,24 @@ def _session_row(root, run_id):
 
 
 def _looks_like_ref(token: str) -> bool:
-    """True when `token` has structure parse_ref should interpret --
-    a "/", the legacy "|" separator, or a nebula:// URI -- as opposed to a
-    bare word that only makes sense relative to wherever the cursor is
+    """True when `token` has structure parse_ref should interpret -- a
+    "/", the legacy "|" separator, a nebula:// URI, or the unmistakable
+    shape of a session/asset id (S-26-0152, AF-26-0017) -- as opposed to
+    a bare word that only makes sense relative to wherever the cursor is
     (a collection name, an asset id typed while browsing assets/, ...),
-    which parse_ref cannot disambiguate without that context."""
+    which parse_ref cannot disambiguate without that context.
+
+    The session/asset-id case is what lets a bare `cd S-26-0152` (or
+    `show`/`info`/... naming one) work from *anywhere* in the archive --
+    not only from the sessions listing -- so you don't have to `cd ..`
+    back out first just to name a session by id."""
     from nebula import refs as refs_mod
 
-    return (refs_mod.REF_PATH_SEP in token or refs_mod.REF_ARCHIVE_SEP in token
-            or token.lower().startswith(refs_mod.URI_SCHEME))
+    return bool(
+        refs_mod.REF_PATH_SEP in token or refs_mod.REF_ARCHIVE_SEP in token
+        or token.lower().startswith(refs_mod.URI_SCHEME)
+        or refs_mod._SESSION_RE.match(token) or refs_mod._ASSET_RE.match(token)
+    )
 
 
 def _resolve_ref_string(token: str, state: "_State"):
@@ -451,8 +565,25 @@ def _resolve_ref_string(token: str, state: "_State"):
     doesn't parse as a ref at all, or names an archive this machine
     doesn't have registered/mounted. A ref with no archive segment
     resolves against the archive the cursor is currently inside (None if
-    the cursor is at the global root)."""
+    the cursor is at the global root).
+
+    A leading `A!/...` is rewritten to the legacy `<default>|...` spelling
+    before parsing -- nebula.refs has no idea what A! means (it's a
+    browse/cli-only shortcut), but that legacy separator is exactly the
+    bare-archive-name-plus-path grammar A! needs, so this is the only
+    place that has to know the two are related."""
     from nebula import refs as refs_mod
+
+    from nebula.cli import DEFAULT_ARCHIVE_TOKEN
+
+    n = len(DEFAULT_ARCHIVE_TOKEN)
+    if token[:n].upper() == DEFAULT_ARCHIVE_TOKEN.upper() and token[n:n + 1] == "/":
+        from nebula.registry import get_registry
+
+        default = get_registry().default_nickname()
+        if default is None:
+            return None
+        token = f"{default}{refs_mod.REF_ARCHIVE_SEP}{token[n + 1:]}"
 
     try:
         ref = refs_mod.parse_ref(token)
@@ -914,10 +1045,16 @@ def _prompt(state: _State, color: bool, guard: bool) -> str:
     return paint(f"{state.breadcrumb()}>", "bold", color, guard=guard) + " "
 
 
-def _cd_one(state: _State, target: str) -> bool:
+def _cd_one(state: _State, target: str, *, quiet: bool = False) -> bool:
     """Apply one path component to `state` in place. Returns whether it
-    resolved -- `_do_cd` uses this to walk a multi-segment path like
-    `cd ../../assets` one hop at a time."""
+    resolved -- `_apply_cd` uses this to walk a multi-segment path like
+    `cd ../../assets` one hop at a time. `quiet` suppresses the error
+    message (used when this is a trial resolution for tab completion,
+    not an actual `cd`)."""
+    def report(msg):
+        if not quiet:
+            err(msg)
+
     if target == "/":
         state.archive_text = state.archive_root = None
         state.segments = []
@@ -932,7 +1069,7 @@ def _cd_one(state: _State, target: str) -> bool:
     if state.at_root:
         found = _try_resolve_archive(target)
         if found is None:
-            err(f"no such archive {target!r} (known: {', '.join(_archive_names()) or 'none'})")
+            report(f"no such archive {target!r} (known: {', '.join(_archive_names()) or 'none'})")
             return False
         state.archive_root, state.archive_text = found
         state.segments = []
@@ -945,7 +1082,7 @@ def _cd_one(state: _State, target: str) -> bool:
             return True
         run_id = _resolve_run_id(state.archive_root, target)
         if run_id is None:
-            err(f"no such session {target!r}")
+            report(f"no such session {target!r}")
             return False
         state.segments = [run_id]
         return True
@@ -953,7 +1090,7 @@ def _cd_one(state: _State, target: str) -> bool:
         from nebula import collection as collection_mod
 
         if collection_mod.read(state.archive_root, target) is None:
-            err(f"no such collection {target!r}")
+            report(f"no such collection {target!r}")
             return False
         state.segments = ["collections", target]
         return True
@@ -966,32 +1103,44 @@ def _cd_one(state: _State, target: str) -> bool:
             year2 = _dt.datetime.now().year % 100
             cand = assets.format_asset_id(year2, int(cand))
         if not assets.is_asset_id(cand) or cand not in assets.list_assets(state.archive_root):
-            err(f"no such asset {target!r}")
+            report(f"no such asset {target!r}")
             return False
         state.segments = ["assets", cand]
         return True
-    err(f"nothing to cd into here (you're at {state.breadcrumb()})")
+    report(f"nothing to cd into here (you're at {state.breadcrumb()})")
     return False
 
 
-def _do_cd(state: _State, target: str) -> None:
-    """`cd` proper: handles a multi-segment path (`../../assets`,
-    `collections/paper-2026`, an absolute `/archive/S-26-0001`) one hop at
-    a time, committing only if every hop resolves -- like a real shell, a
-    typo partway through a path leaves the cursor exactly where it started
-    rather than half-moved.
+def _apply_cd(state: _State, target: str, *, quiet: bool = False) -> bool:
+    """`cd`'s actual resolution logic: handles a multi-segment path
+    (`../../assets`, `collections/paper-2026`, an absolute
+    `/archive/S-26-0001`) one hop at a time, mutating `state` in place
+    and returning whether every hop resolved.
 
     A literal-filesystem-path archive identifier is itself full of "/", so
     it has to be tried *whole* before this ever splits on "/" -- otherwise
     "/Users/me/data" would be misread as three path segments named
     "Users", "me" and "data".
+
+    `quiet` suppresses error messages -- used by the tab completer, which
+    calls this against a scratch copy purely to find out where a
+    partially-typed ref's already-typed prefix would land, and must never
+    print anything to the terminal mid-completion. `_do_cd` (the real
+    command) and `_walk_path` (the completer's read-only lookup) are the
+    two callers; both run this against a scratch copy and only `_do_cd`
+    commits the result, so a typo partway through a path -- or a partial
+    one still being typed -- never leaves the real cursor half-moved.
     """
+    def report(msg):
+        if not quiet:
+            err(msg)
+
     if not target or target == ".":
-        return
+        return True
     if target == "/":
         state.archive_text = state.archive_root = None
         state.segments = []
-        return
+        return True
     if target.isdigit():
         # A bare number is only meaningful as the very next hop -- resolve
         # it against the listing shown here before treating it as a path
@@ -1001,13 +1150,14 @@ def _do_cd(state: _State, target: str) -> None:
 
     if (not target.startswith("/") and not target.startswith(".")
             and _looks_like_ref(target)):
-        # A nebula:// URI, the legacy archive|session/file spelling, or a
-        # same-archive session/file shorthand -- exactly what a search hit
-        # or a derived_from line prints back. Try it as a ref before ever
-        # falling back to the plain "/"-splitting below, which would
-        # otherwise misread "S-26-0002/raw.csv" as two path segments (a
-        # session to cd into, then a nonexistent further hop named
-        # "raw.csv") instead of landing on the session that holds it.
+        # A nebula:// URI, the legacy archive|session/file spelling, A!
+        # (the default-archive shortcut), or a same-archive session/file
+        # shorthand -- exactly what a search hit or a derived_from line
+        # prints back. Try it as a ref before ever falling back to the
+        # plain "/"-splitting below, which would otherwise misread
+        # "S-26-0002/raw.csv" as two path segments (a session to cd into,
+        # then a nonexistent further hop named "raw.csv") instead of
+        # landing on the session that holds it.
         loc = _resolve_ref_string(target, state)
         if loc is not None:
             archive_root, archive_display, ref = loc
@@ -1016,15 +1166,15 @@ def _do_cd(state: _State, target: str) -> None:
                 state.archive_root = archive_root
                 state.archive_text = archive_display
                 state.segments = segments
-                return
+                return True
             if ref.archive or ref.archive_id or ref.user:
-                # Named a *different* archive explicitly (a nebula:// URI
-                # or the legacy archive|... spelling) -- the old
+                # Named a *different* archive explicitly (a nebula:// URI,
+                # A!, or the legacy archive|... spelling) -- the old
                 # same-archive splitting logic below cannot make sense of
                 # that string at all, so report it here rather than
                 # falling through to a confusing mismatched error.
-                err(f"no such session/asset/collection: {target!r}")
-                return
+                report(f"no such session/asset/collection: {target!r}")
+                return False
             # Same-archive shorthand that parsed but doesn't check out
             # (e.g. a typo, or a bare file with no session of its own) --
             # fall through to the ordinary splitting logic below, which
@@ -1038,46 +1188,182 @@ def _do_cd(state: _State, target: str) -> None:
         if found is not None:
             state.archive_root, state.archive_text = found
             state.segments = []
-            return
+            return True
         # Not a path that exists on disk: read the leading "/" as "start
         # over at the global root", then resolve the rest relative to
         # that (e.g. "/postdoc/S-26-0001").
         state.archive_text = state.archive_root = None
         state.segments = []
-        return _do_cd(state, target[1:])
+        return _apply_cd(state, target[1:], quiet=quiet)
 
     if state.at_root:
         found = _try_resolve_archive(target)
         if found is not None:
             state.archive_root, state.archive_text = found
             state.segments = []
-            return
+            return True
         if "/" in target:
             first, rest = target.split("/", 1)
             found = _try_resolve_archive(first)
             if found is not None:
                 state.archive_root, state.archive_text = found
                 state.segments = []
-                _do_cd(state, rest)
-                return
-        err(f"no such archive {target!r} (known: {', '.join(_archive_names()) or 'none'})")
-        return
+                return _apply_cd(state, rest, quiet=quiet)
+        report(f"no such archive {target!r} (known: {', '.join(_archive_names()) or 'none'})")
+        return False
 
     # Already inside an archive: navigation is purely virtual from here
     # (session ids, collection/asset names, ".."), so splitting on "/" is
     # unambiguous.
     tokens = [t for t in target.split("/") if t not in ("", ".")]
     if not tokens:
-        return
-    scratch = _State(archive_text=state.archive_text,
-                     archive_root=state.archive_root,
-                     segments=list(state.segments))
+        return True
     for tok in tokens:
-        if not _cd_one(scratch, tok):
-            return
-    state.archive_text = scratch.archive_text
-    state.archive_root = scratch.archive_root
-    state.segments = scratch.segments
+        if not _cd_one(state, tok, quiet=quiet):
+            return False
+    return True
+
+
+def _scratch_state(state: _State) -> _State:
+    """A copy of `state` safe to mutate speculatively -- including
+    last_listing, since _resolve_token (bare-number substitution) reads
+    it, and a scratch copy that silently dropped it would make `cd 3`
+    stop resolving the number the moment it went through a scratch hop."""
+    return _State(archive_text=state.archive_text, archive_root=state.archive_root,
+                  segments=list(state.segments), last_listing=list(state.last_listing))
+
+
+def _do_cd(state: _State, target: str) -> None:
+    """The `cd` command: resolves `target` against a scratch copy of
+    `state` and commits it only on full success, so a typo partway
+    through a multi-segment path leaves the cursor exactly where it
+    started rather than half-moved."""
+    scratch = _scratch_state(state)
+    if _apply_cd(scratch, target, quiet=False):
+        state.archive_text = scratch.archive_text
+        state.archive_root = scratch.archive_root
+        state.segments = scratch.segments
+
+
+def _walk_path(state: _State, target: str) -> Optional[_State]:
+    """Resolve `target` exactly the way `cd` would, without mutating
+    `state` or printing anything. Used by tab completion to find out
+    what a partially-typed ref's already-typed prefix (everything before
+    the last "/") resolves to, so it can list *that* location's children
+    as candidates for what comes next. Returns None if `target` doesn't
+    resolve to anything (in which case there's nothing to complete
+    against)."""
+    scratch = _scratch_state(state)
+    if not target:
+        return scratch
+    return scratch if _apply_cd(scratch, target, quiet=True) else None
+
+
+# ---------------------------------------------------------------------
+# tab completion -- any name/ref argument, at any level of brevity
+# ---------------------------------------------------------------------
+
+def _ref_completions(state: _State, text: str) -> List[str]:
+    """Completions for one name/ref argument (cd/show/info/open/reveal/
+    uri/copy/annotate's first word), matching everything those commands
+    themselves accept as input -- not just a bare name local to wherever
+    the cursor happens to be:
+
+      - no "/" yet: local children of here, PLUS (if inside an archive)
+        every session id in it and the collections/assets sibling names,
+        PLUS A!/S! -- so a session can be named by id from anywhere, not
+        only while looking at the sessions listing.
+      - a "/" already typed: resolve everything before the last "/" the
+        same way `cd` would (_walk_path -- so A!/..., a full nebula://
+        URI, or a same-archive session/file shorthand all work), then
+        offer that location's children for what comes after.
+    """
+    if "/" in text:
+        prefix, _, partial = text.rpartition("/")
+        loc_state = _walk_path(state, prefix)
+        if loc_state is None:
+            return []
+        try:
+            names = _completion_children(loc_state)
+        except Exception:
+            return []
+        return [f"{prefix}/{n}" for n in names if n.startswith(partial)]
+
+    candidates = set(_completion_children(state))
+    # _completion_children already includes every session id (plus
+    # collections/assets) when the cursor is at the sessions listing
+    # itself -- only fetch them again when it's sitting somewhere else,
+    # to avoid a second redundant index read on every keystroke.
+    if state.archive_root is not None and state.kind != "archive":
+        try:
+            candidates.update(_completion_session_ids(state.archive_root))
+        except Exception:
+            pass
+        candidates.update(("collections", "assets"))
+    if state.at_root:
+        candidates.update(_archive_names())
+    from nebula.cli import DEFAULT_ARCHIVE_TOKEN, REUSE_SESSION_TOKEN
+
+    candidates.add(DEFAULT_ARCHIVE_TOKEN)
+    candidates.add(REUSE_SESSION_TOKEN)
+    return sorted(c for c in candidates if c.startswith(text))
+
+
+def _install_completer(state: _State):
+    """Wire up TAB completion against the *current* `state` -- a closure,
+    not a fixed word list, so candidates are computed fresh on every
+    keystroke and this only needs installing once per session rather than
+    reinstalled every time the cursor moves (contrast
+    _termui.install_completer, built for a fixed option list).
+
+    The first word on the line completes against _COMMANDS; anything
+    after that (unless it starts with "-", a flag) completes via
+    _ref_completions. Same libedit-vs-GNU-readline handling as
+    _termui.install_completer -- see that function's docstring for why."""
+    try:
+        import readline
+    except ImportError:
+        return (lambda: None), False
+
+    # readline/libedit calls the completer once per candidate it wants
+    # (state=0, then 1, then 2, ...) for what is, to us, a single
+    # completion request -- so without this, listing N matches means
+    # recomputing the *entire* candidate set (each of which may touch the
+    # index) N times over. A single-slot cache, invalidated the instant
+    # the request actually changes (a different line, or the cursor
+    # having moved since), turns that back into one real computation.
+    cache = {"key": None, "matches": []}
+
+    def complete(text, idx):
+        line = readline.get_line_buffer()
+        before = line[:readline.get_begidx()]
+        key = (line, state.breadcrumb())
+        if key != cache["key"]:
+            if before.strip() == "":
+                matches = [c for c in _COMMANDS if c.startswith(text)]
+            elif text.startswith("-"):
+                matches = []
+            else:
+                matches = _ref_completions(state, text)
+            cache["key"] = key
+            cache["matches"] = matches
+        matches = cache["matches"]
+        return matches[idx] if idx < len(matches) else None
+
+    prev_completer = readline.get_completer()
+    prev_delims = readline.get_completer_delims()
+    readline.set_completer(complete)
+    readline.set_completer_delims(" \t\n,")
+    if "libedit" in (getattr(readline, "__doc__", "") or ""):
+        readline.parse_and_bind("bind ^I rl_complete")
+    else:
+        readline.parse_and_bind("tab: complete")
+
+    def restore():
+        readline.set_completer(prev_completer)
+        readline.set_completer_delims(prev_delims)
+
+    return restore, True
 
 
 def run_browse(start_archive: Optional[str] = None, start_run_id: Optional[str] = None) -> None:
@@ -1102,11 +1388,10 @@ def run_browse(start_archive: Optional[str] = None, start_run_id: Optional[str] 
     print(paint("nebula browse -- cd/ls/show/info/open/reveal/uri/search/tags/"
                 "annotate; `help` for details, `exit` to leave.", "dim", color))
 
-    restore, have_rl = install_completer(_COMMANDS)
+    restore, have_rl = _install_completer(state)
     try:
         while True:
             try:
-                install_completer(_COMMANDS + _children(state))
                 line = input(_prompt(state, color, have_rl)).strip()
             except EOFError:
                 print()

@@ -609,16 +609,28 @@ command list.
 **Any name can be a ref, not just a local one.** Everywhere a name is
 expected (`cd`, `show`, `info`, `open`, `reveal`, `uri`, `copy`), you can
 paste anything `nebula` itself would recognize as a ref instead of a bare
-local name: `S-26-0152/raw.csv` (another session in this archive -- the
-exact spelling a `search` hit or a `derived_from` line prints back), or a
-full `nebula://...` URI (another archive entirely). `cd` on one lands at
-the session it names (a URI can't cd into a specific file, only the
-session holding it); the other commands act on the file itself:
+local name -- at any level of brevity, and from anywhere in the archive,
+not only while looking at the exact thing it names:
 
 ```
-/postdoc/S-26-0001> cd S-26-0152/raw.csv
+/postdoc/S-26-0001> cd S-26-0002              # a bare session id works
+/postdoc/S-26-0002> cd S-26-0152/raw.csv      # another session's file, from here
 /postdoc/S-26-0152> info nebula://kai@lab/shared~1a2/S-26-0002/cal.json
+/postdoc/S-26-0152> copy A!/S-26-0002/raw.csv --path   # the default archive
 ```
+
+`S-26-0152/raw.csv` is the exact spelling a `search` hit or a
+`derived_from` line prints back, and `A!/...` reaches into whatever
+archive `nebula default` points at without leaving the current one.
+`cd` on a ref lands at the session it names (a URI can't cd into a
+specific file, only the session holding it); the other commands act on
+the file itself.
+
+**TAB-completion understands all of this too**, not just local names --
+it resolves whatever's typed so far (`A!/S-26-01`, a bare `S-26-`, a
+session/file shorthand) the same way the command itself would, and
+offers what comes next at that exact point, including mid-word after a
+partial filename (`A!/S-26-0152/pump_<TAB>`).
 
 **`search`** takes `--tag`/`--comment` to print that under each hit, and
 a trailing `| text` narrows the results afterward the way grep would --
