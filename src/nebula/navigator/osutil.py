@@ -77,3 +77,38 @@ def open_path(path) -> bool:
     except OSError:
         return False
     return True
+
+
+#: Clipboard commands to try, in order, on a non-macOS/Windows platform --
+#: `wl-copy` for Wayland, `xclip`/`xsel` for X11. All three read the text
+#: from stdin, so one call shape covers them.
+_LINUX_CLIPBOARD_COMMANDS = (
+    ["wl-copy"],
+    ["xclip", "-selection", "clipboard"],
+    ["xsel", "--clipboard", "--input"],
+)
+
+
+def copy_to_clipboard(text: str) -> bool:
+    """Copy `text` to the system clipboard. Best-effort: returns False --
+    never raises -- when nothing on this platform can reach it, most
+    commonly a headless/SSH Linux session with no clipboard utility
+    installed, so a caller (the CLI's `copy` command) can fall back to
+    just printing the text for the user to select by hand."""
+    if sys.platform == "darwin":
+        candidates = (["pbcopy"],)
+    elif sys.platform.startswith("win"):
+        candidates = (["clip"],)
+    else:
+        candidates = _LINUX_CLIPBOARD_COMMANDS
+
+    data = text.encode("utf-8")
+    for cmd in candidates:
+        try:
+            proc = subprocess.run(cmd, input=data, stdout=subprocess.DEVNULL,
+                                  stderr=subprocess.DEVNULL)
+        except (OSError, FileNotFoundError):
+            continue
+        if proc.returncode == 0:
+            return True
+    return False

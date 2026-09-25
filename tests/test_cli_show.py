@@ -81,3 +81,26 @@ def test_show_flags_combine(tmp_path, capsys):
     assert "uri:" in out
     assert "tags: a, b" in out
     assert "sha256:" in out
+
+
+def test_show_comment_flag(tmp_path, capsys):
+    from nebula import annotations
+
+    root = _archive(tmp_path / "postdoc")
+    s = _session(root)
+    annotations.set_annotation(s.path, "raw.csv", comment="a note")
+    main(["show", "postdoc", s.id, "-c"])
+    out = capsys.readouterr().out
+    assert "comment: a note" in out
+    # the per-artifact tags line (indented under the artifact) should be
+    # absent since -t wasn't passed; the session-level "tags:" line above
+    # it is unrelated and always printed.
+    assert "    tags:" not in out
+
+
+def test_show_comment_flag_placeholder_when_none(tmp_path, capsys):
+    root = _archive(tmp_path / "postdoc")
+    s = _session(root)
+    main(["show", "postdoc", s.id, "-c"])
+    out = capsys.readouterr().out
+    assert "comment: -" in out

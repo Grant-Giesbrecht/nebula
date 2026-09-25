@@ -268,10 +268,11 @@ def cmd_ls(args):
 
 
 def _print_artifact_row(root, run_id, session_dir, a, conn, *,
-                         uri=False, tags=False, long=False, indent="    ",
-                         number=None):
+                         uri=False, tags=False, long=False, comment=False,
+                         indent="    ", number=None):
     """Print one artifact line from a `show`/`browse` listing, plus
-    whichever of its URI / tags / sha256+size the caller asked for.
+    whichever of its URI / tags / sha256+size / comment the caller asked
+    for.
 
     `a` is a row from the `artifacts` table (or anything with the same
     keys: filename, repo, commit_hash, dirty, entry_point, source,
@@ -279,6 +280,8 @@ def _print_artifact_row(root, run_id, session_dir, a, conn, *,
     for the derived_from lookup so callers don't reopen it per artifact.
     `number`, when given (browse's numbered listings), replaces the plain
     "-" bullet with "<N>." so the line can be referred back to by number.
+    `tags=True` already prints a comment alongside the tags (it always
+    has); `comment=True` is for wanting the comment without the tags.
     """
     color = color_enabled(sys.stdout)
     if a["source"] == "external":
@@ -309,17 +312,20 @@ def _print_artifact_row(root, run_id, session_dir, a, conn, *,
         except uris.UriError as e:
             print(f"{indent}    uri: (unavailable: {e})")
 
-    if tags:
+    if tags or comment:
         from nebula import annotations
 
         note = annotations.get(session_dir, a["filename"])
-        if note["tags"]:
-            tag_list = ", ".join(paint(t, _TAG_STYLE, color) for t in note["tags"])
-        else:
-            tag_list = paint("-", _DIM_STYLE, color)
-        print(f"{indent}    tags: {tag_list}")
+        if tags:
+            if note["tags"]:
+                tag_list = ", ".join(paint(t, _TAG_STYLE, color) for t in note["tags"])
+            else:
+                tag_list = paint("-", _DIM_STYLE, color)
+            print(f"{indent}    tags: {tag_list}")
         if note.get("comment"):
             print(f"{indent}    comment: {note['comment']}")
+        elif comment and not tags:
+            print(f"{indent}    comment: {paint('-', _DIM_STYLE, color)}")
 
     if long:
         sha = (a["sha256"] or "-")
@@ -386,7 +392,8 @@ def cmd_show(args):
     session_dir = index.session_path(root, session_row)
     for a in artifacts:
         _print_artifact_row(root, args.run_id, session_dir, a, conn,
-                            uri=args.uri, tags=args.tags, long=args.long)
+                            uri=args.uri, tags=args.tags, long=args.long,
+                            comment=args.comment)
 
     history = json.loads(session_row["history"] or "[]")
     if history:
@@ -2008,6 +2015,8 @@ def main(argv=None):
                    help="print each artifact's tags")
     p.add_argument("-l", "--long", action="store_true",
                    help="print sha256/size alongside each artifact")
+    p.add_argument("-c", "--comment", action="store_true",
+                   help="print each artifact's comment")
     p.set_defaults(func=cmd_show)
 
     p = sub.add_parser(

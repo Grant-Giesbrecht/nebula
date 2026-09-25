@@ -599,20 +599,44 @@ nebula://grant@ncsu.edu/postdoc~0fe/assets/AF-26-0017
 
 `cd` moves between archives, sessions, and the `collections/`/`assets/`
 sibling namespaces (multi-segment paths and `..` chains both work, e.g.
-`cd ../../assets`); `show`/`info` take the same `-u`/`-t`/`-l` flags as
-`nebula show`; `open`/`reveal` hand a file to the OS default app or the
-file manager; `annotate` edits tags/comments without leaving the shell.
-Type `help` for the full command list.
+`cd ../../assets`); `show`/`info` take the same `-u`/`-t`/`-l`/`-c` flags
+as `nebula show` (`-c`: comment); `open`/`reveal` hand a file to the OS
+default app or the file manager; `copy` puts its URI on the clipboard
+(`copy 7 --path` for the on-disk path instead); `annotate` edits
+tags/comments without leaving the shell. Type `help` for the full
+command list.
+
+**Any name can be a ref, not just a local one.** Everywhere a name is
+expected (`cd`, `show`, `info`, `open`, `reveal`, `uri`, `copy`), you can
+paste anything `nebula` itself would recognize as a ref instead of a bare
+local name: `S-26-0152/raw.csv` (another session in this archive -- the
+exact spelling a `search` hit or a `derived_from` line prints back), or a
+full `nebula://...` URI (another archive entirely). `cd` on one lands at
+the session it names (a URI can't cd into a specific file, only the
+session holding it); the other commands act on the file itself:
+
+```
+/postdoc/S-26-0001> cd S-26-0152/raw.csv
+/postdoc/S-26-0152> info nebula://kai@lab/shared~1a2/S-26-0002/cal.json
+```
+
+**`search`** takes `--tag`/`--comment` to print that under each hit, and
+a trailing `| text` narrows the results afterward the way grep would --
+useful after a tag search turns up more than you wanted:
+
+```
+/postdoc> search --tag RP23D | s21
+```
 
 **Every listing is numbered**, and anywhere a name is expected you can
-type the number instead -- `show 1`, `cd 3`, `annotate 1 --add-tags foo`
--- so a long filename or run id never has to be typed out. A number
-refers to whatever the most recent `ls`/`show` actually printed; moving
-around with `cd` doesn't itself refresh it. URIs and tags are coloured
-throughout the CLI (`nebula show`, `nebula ls`, `browse`, ...) to stand
-out at a glance; colour is skipped automatically when output isn't a
-real terminal (piped, redirected, `NO_COLOR` set), so scripts see plain
-text exactly as before.
+type the number instead -- `show 1`, `cd 3`, `copy 1 --path`,
+`annotate 1 --add-tags foo` -- so a long filename or run id never has to
+be typed out. A number refers to whatever the most recent `ls`/`show`
+actually printed; moving around with `cd` doesn't itself refresh it.
+URIs and tags are coloured throughout the CLI (`nebula show`,
+`nebula ls`, `browse`, ...) to stand out at a glance; colour is skipped
+automatically when output isn't a real terminal (piped, redirected,
+`NO_COLOR` set), so scripts see plain text exactly as before.
 
 ### Shortcuts: A! and S!
 
@@ -876,9 +900,10 @@ nebula index <archive> [--rebuild]                 # index status + freshness sw
 nebula seal <archive> <year> [--force]             # declare a year finished (sweeps skip it)
 nebula unseal <archive> <year>                     # go back to checking it every time
 nebula ls <archive> [--tag T] [--status S] [--today]
-nebula show <archive> <run_id> [-u/--uri] [-t/--tag] [-l/--long]
+nebula show <archive> <run_id> [-u/--uri] [-t/--tag] [-l/--long] [-c/--comment]
                                                    # full detail incl. derived_from graph;
-                                                   # -u/-t/-l add per-artifact URI/tags/sha256+size
+                                                   # -u/-t/-l/-c add per-artifact URI/tags/
+                                                   # sha256+size/comment
 nebula browse [archive [run_id]]                   # interactive cd/ls-style shell (no GUI needed)
 nebula upstream <archive> <run_id> <file>          # trace an artifact back to its inputs
 nebula downstream <archive> <run_id> <file> [--also-search ARCHIVE ...]
