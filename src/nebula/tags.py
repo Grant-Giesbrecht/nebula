@@ -8,9 +8,11 @@ is a drop-in replacement for input() that lets the user browse and search
 the archive's existing tags (/list, /search) and TAB-complete them, so
 they reuse an existing tag instead of inventing a near-duplicate.
 
-Tags are read straight from the session.yaml files (the source of truth),
-not the SQLite index -- so a tag you created five minutes ago shows up
-without anyone having to rebuild the index first.
+Tags are read straight from each session's session.yaml and
+annotations.yaml (the source of truth), not the SQLite index -- so a tag
+you created five minutes ago shows up without anyone having to rebuild
+the index first. Both files count: a script that tags its files with
+artifact_tags= and never sets session tags still builds up a vocabulary.
 """
 
 from __future__ import annotations
@@ -25,6 +27,7 @@ from nebula._termui import (
     install_completer as _install_completer,
     paint as _paint,
 )
+from nebula.annotations import read_annotations
 from nebula.index import _iter_session_dirs
 from nebula.registry import resolve_archive
 from nebula.sidecar import read_session_yaml
@@ -44,20 +47,28 @@ def collect_tags(archive: "str | object") -> Counter:
             archive name, a Path is used literally.
 
     Returns:
-        A Counter mapping every tag used anywhere in the archive to the
-        number of sessions carrying it.
+        A Counter mapping every tag used anywhere in the archive -- on a
+        session, or on any artifact in it (session.yaml tags plus
+        annotations.yaml session and artifact tags) -- to the number of
+        sessions carrying it. A session counts once per tag however many
+        of its files carry that tag.
     """
     archive_root, _ = resolve_archive(archive)
     counter: Counter = Counter()
     for session_dir in _iter_session_dirs(archive_root):
+        found = set()
         try:
-            meta = read_session_yaml(session_dir)
+            found.update(read_session_yaml(session_dir).tags)
         except Exception:
             # A single unreadable/half-written session.yaml shouldn't sink
             # the whole tag listing -- skip it and carry on.
-            continue
-        for tag in meta.tags:
-            counter[tag] += 1
+            pass
+        # read_annotations never raises; a missing file is just empty.
+        notes = read_annotations(session_dir)
+        found.update(notes["session"].get("tags") or [])
+        for entry in notes["artifacts"].values():
+            found.update(entry.get("tags") or [])
+        counter.update(found)
     return counter
 
 

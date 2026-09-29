@@ -25,6 +25,24 @@ def test_collect_tags_counts_across_sessions(tmp_path):
     assert "missing" not in counts
 
 
+def test_collect_tags_includes_artifact_and_annotation_tags(tmp_path):
+    # A script that only uses artifact_tags= (no session tags) must still
+    # build up a vocabulary for input_tag to offer next time.
+    archive = tmp_path / "archive"
+    for _ in range(2):
+        with nebula.session(archive, artifact_tags=["Ruby", "waterfall"]) as s:
+            for name in ("a.txt", "b.txt"):
+                with s.artifact(name) as fn:
+                    fn.write_text("x")
+    s.annotate(tags=["paper-2026"])
+
+    counts = collect_tags(archive)
+    # Two files per session carry the tag, but each session counts once.
+    assert counts["Ruby"] == 2
+    assert counts["waterfall"] == 2
+    assert counts["paper-2026"] == 1
+
+
 def test_collect_tags_empty_archive(tmp_path):
     # A not-yet-created archive root is fine -- no tags, no error.
     assert collect_tags(tmp_path / "nope") == {}
