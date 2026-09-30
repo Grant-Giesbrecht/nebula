@@ -241,6 +241,8 @@ async function loadArchive(arc) {
     renderArchiveSelect();
     $("wtitle").textContent = `Nebula Navigator — ${label}`;
     $("appArcLabel").textContent = arc;
+    $("appArcChip").title = `Active archive: ${arc}`;
+    $("appArcChip").classList.toggle("hidden", !arc);
     await reload();
     await loadArchiveKind();
     if (railTab === "collections") await loadCollections();
@@ -1216,6 +1218,50 @@ function wireTagChips(root) {
 // cannot be referred to unambiguously once a fragment of it leaves this
 // machine. Worth a standing warning rather than a surprise later.
 let identity = { user: "", set: false, path: "" };
+
+// ---- build stamp ----------------------------------------------------------
+// The app shell (stamped by build.rs) and the bridge (stamped by
+// build-sidecar) are built separately, so either can be stale. Show the
+// app's build, and flag it when the bridge came from a different commit.
+function buildLine(who, b) {
+  if (!b || !b.version) return `${who}: unknown`;
+  const when = b.built ? `, built ${new Date(b.built * 1000).toLocaleString()}`
+    : b.source === "git" ? ", live from git checkout" : "";
+  return `${who}: ${b.version}${when}`;
+}
+
+// "0.1.0-dev.77+970093a.dirty" -> "dev.77+970093a.dirty": the base version
+// never changes between dev builds, so it's just width.
+function shortBuild(b) {
+  if (!b || !b.version) return "?";
+  return b.base && b.version.startsWith(`${b.base}-`)
+    ? b.version.slice(b.base.length + 1) : b.version;
+}
+
+async function loadBuildInfo() {
+  const [app, br] = await Promise.all([
+    invoke("app_build_info", {}).catch(() => null),
+    call("build_info").catch(() => null),
+  ]);
+  if (!app || !app.version) return;      // not running under the real shell
+  const chip = $("buildChip");
+  // Compare the commit, not the whole string: a dirty flag on one side
+  // alone is worth seeing in the tooltip but isn't a different build.
+  const mismatch = !!(br && br.sha && app.sha && br.sha !== app.sha);
+  chip.textContent = mismatch
+    ? `app ${shortBuild(app)} ≠ bridge ${shortBuild(br)}` : shortBuild(app);
+  chip.classList.toggle("mismatch", mismatch);
+  const details = [buildLine("App", app), buildLine("Bridge", br)].join("\n");
+  chip.title = details
+    + (mismatch ? "\n\nThe app and its bridge were built from different commits "
+       + "— rebuild the sidecar, then the app." : "")
+    + "\n\nClick to copy.";
+  chip.onclick = async () => {
+    try { await navigator.clipboard.writeText(details); toast("Build info copied."); }
+    catch { toast(details); }
+  };
+  chip.classList.remove("hidden");
+}
 
 async function loadIdentity() {
   try { identity = await call("identity", {}); } catch (e) { identity = { user: "", set: false }; }
@@ -6386,6 +6432,7 @@ async function boot() {
   verify = viewCfg.verify;
   syncViewOptions();
   loadIdentity();
+  loadBuildInfo();
   showCal = LS.get("nebula.showCal", false);
   // keepLocation: there is no tab yet for the rail to act on, and the
   // restored tabs decide below what is actually on screen.

@@ -157,16 +157,19 @@
         Export
       </button>
       <div class="vdiv"></div>
-      <button class="tbtn" id="arcBtn" title="Archive management">
-        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="4" width="20" height="5" rx="1"/><path d="M4 9v9a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V9"/><line x1="10" y1="13" x2="14" y2="13"/></svg>
-        Archive
+      <button class="tbtn" id="arcBtn" title="Archive info and management">
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="18" height="7" rx="1.5"/><rect x="3" y="14" width="18" height="7" rx="1.5"/><line x1="7" y1="6.5" x2="7.01" y2="6.5"/><line x1="7" y1="17.5" x2="7.01" y2="17.5"/></svg>
+        Archive info
       </button>
       <button class="tbtn" id="codeStoreBtn" title="Browse the captured code store  (F5)">
         <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="16 18 22 12 16 6"/><polyline points="8 6 2 12 8 18"/></svg>
-        Code
+        Browse code
       </button>
       <div class="spacer"></div>
-      <span class="app-arc" id="appArcLabel"></span>
+      <span class="app-arc hidden" id="appArcChip" title="Active archive">
+        <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><ellipse cx="12" cy="5" rx="8" ry="3"/><path d="M4 5v14c0 1.7 3.6 3 8 3s8-1.3 8-3V5"/><path d="M4 12c0 1.7 3.6 3 8 3s8-1.3 8-3"/></svg>
+        <span id="appArcLabel"></span>
+      </span>
       <span class="kind-badge hidden" id="kindBadge"></span>
       <span class="user-badge hidden" id="userBadge"
             title="You, in nebula:// refs — click to change">
@@ -174,6 +177,7 @@
         <span id="userBadgeName"></span>
       </span>
       <span class="no-user hidden" id="noUserWarn" title="Click to set your name">no user set</span>
+      <span class="build-chip hidden" id="buildChip"></span>
       <button class="theme-toggle" id="themeBtn">◐ Theme</button>
       <span class="wtitle-sr" id="wtitle"></span>
     </div>

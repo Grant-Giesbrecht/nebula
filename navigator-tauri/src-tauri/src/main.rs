@@ -613,6 +613,29 @@ fn send_to_window(app: tauri::AppHandle, label: String,
 struct PendingUris(Mutex<Vec<String>>);
 
 /// Hand over every URL received so far, and forget them.
+/// Which build this app shell is, stamped by build.rs. Same shape as the
+/// bridge's `build_info` op so the front end can compare the two: a sidecar
+/// rebuilt without the app (or the reverse) shows up as a mismatch.
+#[tauri::command]
+fn app_build_info() -> Value {
+    let base = env!("CARGO_PKG_VERSION");
+    let count: Option<u64> = env!("NEBULA_BUILD_COUNT").parse().ok();
+    let sha = env!("NEBULA_BUILD_SHA");
+    let dirty = env!("NEBULA_BUILD_DIRTY") == "true";
+    let built: Option<u64> = env!("NEBULA_BUILD_TIME").parse().ok();
+    let version = match count {
+        Some(n) if !sha.is_empty() => {
+            format!("{base}-dev.{n}+{sha}{}", if dirty { ".dirty" } else { "" })
+        }
+        _ => base.to_string(),
+    };
+    serde_json::json!({
+        "version": version, "base": base, "count": count,
+        "sha": if sha.is_empty() { None } else { Some(sha) },
+        "dirty": dirty, "built": built, "source": "app",
+    })
+}
+
 #[tauri::command]
 fn take_uris(state: tauri::State<PendingUris>) -> Vec<String> {
     let mut queue = state.0.lock().unwrap();
@@ -671,7 +694,8 @@ fn main() {
         .manage(PendingUris(Mutex::new(Vec::new())))
         .invoke_handler(tauri::generate_handler![
             bridge, new_window, window_at_cursor, send_to_window,
-            open_panel_window, main_window_label, broadcast, take_uris
+            open_panel_window, main_window_label, broadcast, take_uris,
+            app_build_info
         ])
         .setup(|_app| {
             #[cfg(target_os = "macos")]

@@ -98,6 +98,14 @@ def op_ping(args: Dict[str, Any]) -> Dict[str, Any]:
     return {"protocol": PROTOCOL_VERSION, "pid": None}
 
 
+def op_build_info(args: Dict[str, Any]) -> Dict[str, Any]:
+    """Which build this bridge is, so the app can show it next to its own
+    and flag a mismatch (a sidecar rebuilt without the app, or vice versa)."""
+    from nebula.buildinfo import build_info
+
+    return build_info()
+
+
 def op_resolve(args: Dict[str, Any]) -> Dict[str, Any]:
     root, label = model.resolve(args["archive"])
     return {"root": str(root), "label": label}
@@ -960,6 +968,7 @@ def op_asset_settings_preview(args: Dict[str, Any]) -> Dict[str, Any]:
 
 
 OPS = {
+    "build_info": op_build_info,
     "list_assets": op_list_assets,
     "asset_info": op_asset_info,
     "asset_preview": op_asset_preview,

@@ -51,10 +51,23 @@ error: PyInstaller not available for $Python. Install it with:
     exit 1
 }
 
+# Stamp the build (commit count + hash) so the app can say which bridge it
+# is running. The frozen binary has no .git to ask; see nebula/buildinfo.py.
+$StampDir = "build\sidecar\stamp"
+$env:PYTHONPATH = (Resolve-Path ..\src).Path
+$Stamp = & $Python -m nebula.buildinfo --write "$StampDir\nebula_build_stamp.py"
+Remove-Item Env:PYTHONPATH
+if ($LASTEXITCODE -ne 0) {
+    Write-Error "error: could not write the build stamp"
+    exit 1
+}
+Write-Host "==> build stamp: $Stamp"
+
 # --paths ..\src: import `nebula` from the repo checkout rather than relying
 #   on it being pip-installed for this interpreter.
 # --hidden-import yaml: nebula's only runtime dependency; it is imported
 #   lazily in places PyInstaller's static analysis does not follow.
+# --hidden-import nebula_build_stamp: the stamp above, imported lazily too.
 & $Python -m PyInstaller `
     --onefile `
     --console `
@@ -62,7 +75,9 @@ error: PyInstaller not available for $Python. Install it with:
     --noconfirm `
     --name $Name `
     --paths ..\src `
+    --paths $StampDir `
     --hidden-import yaml `
+    --hidden-import nebula_build_stamp `
     --distpath build\sidecar\dist `
     --workpath build\sidecar\work `
     --specpath build\sidecar `

@@ -1975,8 +1975,25 @@ def cmd_unlock(args):
         print("it was not locked")
 
 
+class _VersionAction(argparse.Action):
+    """--version, computed only when asked for: working out the build stamp
+    runs git, which every other command has no reason to pay for."""
+
+    def __init__(self, option_strings, dest, **kwargs):
+        super().__init__(option_strings, dest, nargs=0, **kwargs)
+
+    def __call__(self, parser, namespace, values, option_string=None):
+        from nebula.buildinfo import build_info
+
+        info = build_info()
+        print(f"nebula {info['version']}")
+        parser.exit()
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(prog="nebula")
+    parser.add_argument("-V", "--version", action=_VersionAction,
+                        help="show which build of nebula this is and exit")
     sub = parser.add_subparsers(dest="command", required=True)
 
     p = sub.add_parser(
