@@ -4,3 +4,4 @@ __pycache__/
 .pytest_cache/
 index.db
 index.db.tmp
+navigator-tauri/src-tauri/binaries/nebula-bridge-aarch64-apple-darwin
