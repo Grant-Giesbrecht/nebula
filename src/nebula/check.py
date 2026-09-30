@@ -86,17 +86,49 @@ def _read_sidecars(session_dir: Path):
 # Reference scans (also used by the delete guards)
 # ---------------------------------------------------------------------
 
+def _local_ref_test(archive_root: Path, label: Optional[str]):
+    """A predicate: does this ref point into the archive at archive_root?
+
+    A bare ref (no archive) always does. A qualified one does when it names
+    this archive -- by id when both sides carry one, since that survives a
+    rename, else by name. Scripts commonly write fully qualified refs
+    ("arch_postdoc_2026~676|S-26-0003/x.HDF5") even to their own archive,
+    so treating every qualified ref as foreign hides real dependents.
+    `label` is None when the caller passed a path rather than a registered
+    name; archive.yaml's own name is used then.
+    """
+    from nebula import archive_id as archive_id_mod
+    from nebula.config import read_settings
+
+    try:
+        settings = read_settings(Path(archive_root), apply_env=False)
+        my_id, my_names = settings.id, {label, settings.name}
+    except Exception:           # noqa: BLE001 -- fall back to the label alone
+        my_id, my_names = None, {label}
+    my_names.discard(None)
+
+    def is_local(ref) -> bool:
+        if ref.archive is None and ref.archive_id is None:
+            return True
+        if ref.archive_id and my_id:
+            return archive_id_mod.same_id(my_id, ref.archive_id)
+        return ref.archive in my_names
+
+    return is_local
+
+
 def dependents_of(archive: "str | Path", run_id: str, filename: str) -> List[str]:
     """Same-archive artifacts whose derived_from points at run_id/filename.
     Scans the filesystem (not the index), so it's trustworthy even when the
     index is stale. Cross-archive dependents can't be found from here."""
-    archive_root, _ = resolve_archive(archive)
+    archive_root, label = resolve_archive(archive)
+    is_local = _local_ref_test(archive_root, label)
     hits: List[str] = []
     for session_dir in _iter_all_session_dirs(archive_root):
         r = session_dir.name
         for artifact, meta in _read_sidecars(session_dir):
             for ref in meta.derived_from_refs():
-                if ref.archive is not None or ref.file != filename:
+                if ref.file != filename or not is_local(ref):
                     continue
                 target_session = ref.session or r  # None = same session
                 if target_session == run_id:
@@ -107,7 +139,8 @@ def dependents_of(archive: "str | Path", run_id: str, filename: str) -> List[str
 def inbound_to_session(archive: "str | Path", run_id: str) -> List[str]:
     """Things in OTHER same-archive sessions that reference this session --
     via an artifact's derived_from or a session's related_runs."""
-    archive_root, _ = resolve_archive(archive)
+    archive_root, label = resolve_archive(archive)
+    is_local = _local_ref_test(archive_root, label)
     hits: List[str] = []
     for session_dir in _iter_all_session_dirs(archive_root):
         r = session_dir.name
@@ -115,7 +148,7 @@ def inbound_to_session(archive: "str | Path", run_id: str) -> List[str]:
             continue
         for artifact, meta in _read_sidecars(session_dir):
             for ref in meta.derived_from_refs():
-                if ref.archive is None and ref.session == run_id:
+                if ref.session == run_id and is_local(ref):
                     hits.append(f"{r}/{artifact} derives from {run_id}/{ref.file}")
         if (session_dir / SESSION_FILE).exists():
             try:
@@ -123,7 +156,7 @@ def inbound_to_session(archive: "str | Path", run_id: str) -> List[str]:
             except Exception:
                 continue
             for rr in smeta.related_run_refs():
-                if rr.archive is None and rr.session == run_id:
+                if rr.session == run_id and is_local(rr):
                     hits.append(f"{r} related_run -> {run_id}")
     return hits
 

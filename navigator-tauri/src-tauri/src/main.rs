@@ -31,7 +31,8 @@ const STDERR_KEEP: usize = 40;
 /// hasn't been run) we fall back to a real interpreter.
 fn sidecar_path() -> Option<std::path::PathBuf> {
     let exe = std::env::current_exe().ok()?;
-    let candidate = exe.parent()?.join("nebula-bridge");
+    let name = if cfg!(windows) { "nebula-bridge.exe" } else { "nebula-bridge" };
+    let candidate = exe.parent()?.join(name);
     candidate.is_file().then_some(candidate)
 }
 
@@ -60,28 +61,38 @@ fn candidate_pythons() -> Vec<String> {
     // PATH first: honours an activated venv when run from a terminal.
     push("python3".to_string());
 
-    // python.org framework builds, newest-looking first.
-    let framework = "/Library/Frameworks/Python.framework/Versions";
-    if let Ok(entries) = std::fs::read_dir(framework) {
-        let mut versions: Vec<String> = entries
-            .filter_map(|e| e.ok())
-            .filter_map(|e| e.file_name().into_string().ok())
-            .collect();
-        versions.sort();
-        versions.reverse();
-        for v in versions {
-            push(format!("{framework}/{v}/bin/python3"));
+    if cfg!(windows) {
+        // Windows python.org installs (and venvs) name the executable
+        // `python`, not `python3`; the py launcher is the other common
+        // entry point. Neither of the macOS-specific paths below exist
+        // here, so skip straight past them.
+        push("python".to_string());
+        push("py".to_string());
+    } else {
+        // python.org framework builds, newest-looking first.
+        let framework = "/Library/Frameworks/Python.framework/Versions";
+        if let Ok(entries) = std::fs::read_dir(framework) {
+            let mut versions: Vec<String> = entries
+                .filter_map(|e| e.ok())
+                .filter_map(|e| e.file_name().into_string().ok())
+                .collect();
+            versions.sort();
+            versions.reverse();
+            for v in versions {
+                push(format!("{framework}/{v}/bin/python3"));
+            }
         }
-    }
 
-    // Homebrew (Apple silicon, then Intel), then the system stub as a
-    // last resort -- it will normally fail the import probe, which is fine.
-    for p in [
-        "/opt/homebrew/bin/python3",
-        "/usr/local/bin/python3",
-        "/usr/bin/python3",
-    ] {
-        push(p.to_string());
+        // Homebrew (Apple silicon, then Intel), then the system stub as a
+        // last resort -- it will normally fail the import probe, which is
+        // fine.
+        for p in [
+            "/opt/homebrew/bin/python3",
+            "/usr/local/bin/python3",
+            "/usr/bin/python3",
+        ] {
+            push(p.to_string());
+        }
     }
 
     out
@@ -602,6 +613,29 @@ fn send_to_window(app: tauri::AppHandle, label: String,
 struct PendingUris(Mutex<Vec<String>>);
 
 /// Hand over every URL received so far, and forget them.
+/// Which build this app shell is, stamped by build.rs. Same shape as the
+/// bridge's `build_info` op so the front end can compare the two: a sidecar
+/// rebuilt without the app (or the reverse) shows up as a mismatch.
+#[tauri::command]
+fn app_build_info() -> Value {
+    let base = env!("CARGO_PKG_VERSION");
+    let count: Option<u64> = env!("NEBULA_BUILD_COUNT").parse().ok();
+    let sha = env!("NEBULA_BUILD_SHA");
+    let dirty = env!("NEBULA_BUILD_DIRTY") == "true";
+    let built: Option<u64> = env!("NEBULA_BUILD_TIME").parse().ok();
+    let version = match count {
+        Some(n) if !sha.is_empty() => {
+            format!("{base}-dev.{n}+{sha}{}", if dirty { ".dirty" } else { "" })
+        }
+        _ => base.to_string(),
+    };
+    serde_json::json!({
+        "version": version, "base": base, "count": count,
+        "sha": if sha.is_empty() { None } else { Some(sha) },
+        "dirty": dirty, "built": built, "source": "app",
+    })
+}
+
 #[tauri::command]
 fn take_uris(state: tauri::State<PendingUris>) -> Vec<String> {
     let mut queue = state.0.lock().unwrap();
@@ -660,7 +694,8 @@ fn main() {
         .manage(PendingUris(Mutex::new(Vec::new())))
         .invoke_handler(tauri::generate_handler![
             bridge, new_window, window_at_cursor, send_to_window,
-            open_panel_window, main_window_label, broadcast, take_uris
+            open_panel_window, main_window_label, broadcast, take_uris,
+            app_build_info
         ])
         .setup(|_app| {
             #[cfg(target_os = "macos")]

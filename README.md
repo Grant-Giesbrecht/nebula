@@ -575,6 +575,103 @@ to **stderr**, so it can be captured: `URI=$(nebula uri postdoc 152 raw.csv)`.
 In the Navigator, right-click any session, artifact, collection or asset →
 **Get URI**.
 
+Without the Navigator GUI installed (a headless machine, an SSH session),
+`nebula browse` is the other way to poke around and grab one: a `cd`/`ls`
+-style shell over an archive's sessions, collections and assets.
+
+```
+$ nebula browse postdoc
+/postdoc> ls
+    1. collections/
+    2. assets/
+    3. S-26-0152  2026-04-11  [closed ]  RP23D  scope sweep
+/postdoc> cd 3
+/postdoc/S-26-0152> show -u -t
+    1. raw.csv                        me@repo@a1b2c3d4
+        uri: nebula://grant@ncsu.edu/postdoc~0fe/S-26-0152/raw.csv
+        tags: RP23D
+/postdoc/S-26-0152> reveal 1        # or: open 1 / open raw.csv
+/postdoc/S-26-0152> cd ../../assets
+/postdoc/assets> cd AF-26-0017
+/postdoc/assets/AF-26-0017> uri
+nebula://grant@ncsu.edu/postdoc~0fe/assets/AF-26-0017
+```
+
+`cd` moves between archives, sessions, and the `collections/`/`assets/`
+sibling namespaces (multi-segment paths and `..` chains both work, e.g.
+`cd ../../assets`); `show`/`info` take the same `-u`/`-t`/`-l`/`-c` flags
+as `nebula show` (`-c`: comment); `open`/`reveal` hand a file to the OS
+default app or the file manager; `copy` puts its URI on the clipboard
+(`copy 7 --path` for the on-disk path instead); `annotate` edits
+tags/comments without leaving the shell. Type `help` for the full
+command list.
+
+**Any name can be a ref, not just a local one.** Everywhere a name is
+expected (`cd`, `show`, `info`, `open`, `reveal`, `uri`, `copy`), you can
+paste anything `nebula` itself would recognize as a ref instead of a bare
+local name -- at any level of brevity, and from anywhere in the archive,
+not only while looking at the exact thing it names:
+
+```
+/postdoc/S-26-0001> cd S-26-0002              # a bare session id works
+/postdoc/S-26-0002> cd S-26-0152/raw.csv      # another session's file, from here
+/postdoc/S-26-0152> info nebula://kai@lab/shared~1a2/S-26-0002/cal.json
+/postdoc/S-26-0152> copy A!/S-26-0002/raw.csv --path   # the default archive
+```
+
+`S-26-0152/raw.csv` is the exact spelling a `search` hit or a
+`derived_from` line prints back, and `A!/...` reaches into whatever
+archive `nebula default` points at without leaving the current one.
+`cd` on a ref lands at the session it names (a URI can't cd into a
+specific file, only the session holding it); the other commands act on
+the file itself.
+
+**TAB-completion understands all of this too**, not just local names --
+it resolves whatever's typed so far (`A!/S-26-01`, a bare `S-26-`, a
+session/file shorthand) the same way the command itself would, and
+offers what comes next at that exact point, including mid-word after a
+partial filename (`A!/S-26-0152/pump_<TAB>`).
+
+**`search`** takes `--tag`/`--comment` to print that under each hit, and
+a trailing `| text` narrows the results afterward the way grep would --
+useful after a tag search turns up more than you wanted:
+
+```
+/postdoc> search --tag RP23D | s21
+```
+
+**Every listing is numbered**, and anywhere a name is expected you can
+type the number instead -- `show 1`, `cd 3`, `copy 1 --path`,
+`annotate 1 --add-tags foo` -- so a long filename or run id never has to
+be typed out. A number refers to whatever the most recent `ls`/`show`
+actually printed; moving around with `cd` doesn't itself refresh it.
+URIs and tags are coloured throughout the CLI (`nebula show`,
+`nebula ls`, `browse`, ...) to stand out at a glance; colour is skipped
+automatically when output isn't a real terminal (piped, redirected,
+`NO_COLOR` set), so scripts see plain text exactly as before.
+
+### Shortcuts: A! and S!
+
+Two tokens are recognized everywhere an archive or session id is
+accepted, on the command line and inside `browse`:
+
+- **`A!`** means "the archive `nebula default` points at" -- set it once,
+  then skip typing the archive name every time:
+  ```
+  nebula default postdoc      # A! now means postdoc
+  nebula show A! S-26-0152
+  nebula browse A!
+  ```
+- **`S!`** means "the session `nebula.session(archive, reuse=True)` would
+  use" -- the most recent open/today/held session, so you don't have to
+  look up today's run id by hand:
+  ```
+  nebula show postdoc S!
+  nebula annotate A! S! --add-tags reviewed
+  ```
+  in `browse`, the same works as `cd S!`. If the archive has no
+  open/today/held session, `S!` fails loudly rather than guessing.
+
 And a script tells you as it saves:
 
 ```
@@ -815,7 +912,11 @@ nebula index <archive> [--rebuild]                 # index status + freshness sw
 nebula seal <archive> <year> [--force]             # declare a year finished (sweeps skip it)
 nebula unseal <archive> <year>                     # go back to checking it every time
 nebula ls <archive> [--tag T] [--status S] [--today]
-nebula show <archive> <run_id>                     # full detail incl. derived_from graph
+nebula show <archive> <run_id> [-u/--uri] [-t/--tag] [-l/--long] [-c/--comment]
+                                                   # full detail incl. derived_from graph;
+                                                   # -u/-t/-l/-c add per-artifact URI/tags/
+                                                   # sha256+size/comment
+nebula browse [archive [run_id]]                   # interactive cd/ls-style shell (no GUI needed)
 nebula upstream <archive> <run_id> <file>          # trace an artifact back to its inputs
 nebula downstream <archive> <run_id> <file> [--also-search ARCHIVE ...]
 nebula stale <archive> [--hours N]                 # find abandoned "open" sessions
@@ -824,6 +925,7 @@ nebula archives [-l]                               # list registered archives
 nebula register <root> [nickname] [--git-org ORG] [--user WHO]
 nebula register --remove NAME                      # forget an archive (files kept)
 nebula whoami [--set NAME]                         # your name in nebula:// URIs
+nebula default [<archive>]                         # get/set what A! means (see below)
 nebula uri <archive> [<run_id> [<file>]]           # the citable nebula:// URI
 nebula uri <archive> --collection NAME | --asset ID
 nebula uri nebula://<user>/<archive~id>/...        # ...or resolve one to a path

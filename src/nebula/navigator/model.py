@@ -779,6 +779,7 @@ class _Lineage:
         self._conn = None
         self._up: Dict[tuple, list] = {}
         self._down: Dict[tuple, list] = {}
+        self._is_local = None
         try:
             from nebula import index as index_mod
 
@@ -826,15 +827,24 @@ class _Lineage:
     def _children_indexed(self, run_id, filename):
         # The reverse edge, which idx_derived_from_ref exists for. A child's
         # ref may name this session explicitly or leave it implicit (same
-        # session), and may or may not name this archive.
+        # session), and may or may not name this archive -- a qualified ref
+        # to this same archive is still a local child, so the archive test
+        # is done in Python, where rename-proof id matching lives.
+        from nebula.check import _local_ref_test
+
+        if self._is_local is None:
+            self._is_local = _local_ref_test(self.root, None)
         rows = self._conn.execute(
             """
-            SELECT run_id, filename FROM derived_from
+            SELECT run_id, filename, ref_archive, ref_archive_id
+            FROM derived_from
             WHERE ref_file = ?
-              AND ref_archive IS NULL
               AND (ref_session = ? OR (ref_session IS NULL AND run_id = ?))
             """, (filename, run_id, run_id)).fetchall()
-        return [{"run_id": r["run_id"], "filename": r["filename"]} for r in rows]
+        return [{"run_id": r["run_id"], "filename": r["filename"]} for r in rows
+                if self._is_local(Ref(archive=r["ref_archive"],
+                                      archive_id=r["ref_archive_id"],
+                                      session=None, file=filename))]
 
     # -- filesystem fallback ---------------------------------------------
     def _parents_scanned(self, run_id, filename):

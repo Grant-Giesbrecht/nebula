@@ -287,9 +287,17 @@ class Registry:
     cross-archive refs can't be resolved until one is created.
     """
 
+    #: Reserved registry-file key for the default-archive marker (see
+    #: default_nickname/set_default) -- not a valid nickname (register()
+    #: rejects "~", but not "_", hence the leading "__"), so it can share
+    #: the same top-level YAML map as the per-archive entries without ever
+    #: colliding with one a user picks.
+    _DEFAULT_KEY = "__default__"
+
     def __init__(self, path: Optional[Path] = None):
         self.path = Path(path) if path else default_registry_path()
         self._archives: Dict[str, ArchiveConfig] = {}
+        self._default: Optional[str] = None
         self._loaded = False
 
     def _load(self) -> None:
@@ -301,6 +309,9 @@ class Registry:
         with open(self.path, "r") as f:
             raw = yaml.safe_load(f) or {}
         for nickname, cfg in raw.items():
+            if nickname == self._DEFAULT_KEY:
+                self._default = (cfg or {}).get("nickname")
+                continue
             self._archives[nickname] = ArchiveConfig(
                 nickname=nickname,
                 locations=_read_locations(nickname, cfg, self.path),
@@ -691,8 +702,33 @@ class Registry:
             }
             for nickname, cfg in self._archives.items()
         }
+        if self._default:
+            raw[self._DEFAULT_KEY] = {"nickname": self._default}
         with open(self.path, "w") as f:
             yaml.safe_dump(raw, f, sort_keys=True)
+
+    def default_nickname(self) -> Optional[str]:
+        """The nickname `A!` refers to, or None if nothing was set with
+        `set_default`."""
+        self._load()
+        return self._default
+
+    def set_default(self, nickname: Optional[str]) -> None:
+        """Set (or, with None, clear) the archive `A!` refers to.
+
+        Stores the nickname rather than the resolved root, so a re-mounted
+        or relocated archive (a new Location added to the same entry)
+        keeps working -- the same reason refs resolve by archive id rather
+        than path.
+        """
+        self._load()
+        if nickname is not None:
+            # Normalize to the entry's actual nickname, so passing a
+            # declared name or archive id still ends up stored as the key
+            # A! looks up directly. Raises KeyError if none matches.
+            nickname = self.resolve_one(nickname).nickname
+        self._default = nickname
+        self._save()
 
 
 _default_registry: Optional[Registry] = None

@@ -795,9 +795,28 @@ body.marquee-on, body.marquee-on * { user-select:none; }
 .apptoolbar { display:flex; align-items:center; gap:6px; padding:6px 10px;
               border-bottom:1px solid var(--border); background:var(--rail); }
 .apptoolbar > * { flex:0 0 auto; }
-.apptoolbar .app-arc { font-size:11.5px; color:var(--text-faint); margin-right:4px;
-                       overflow:hidden; text-overflow:ellipsis; white-space:nowrap;
-                       max-width:40vw; }
+/* Must out-rank the rule above, or the spacer collapses and the right-hand
+   group (archive, user, theme) packs up against the buttons. */
+.apptoolbar > .spacer { flex:1 1 auto; }
+/* The active archive, as a chip shaped like the user badge but neutral in
+   colour: it is context, not an identity claim. */
+.apptoolbar .app-arc {
+  display:inline-flex; align-items:center; gap:5px; min-width:0; max-width:40vw;
+  font-size:11px; font-weight:650; letter-spacing:.01em;
+  padding:2px 8px; border-radius:11px;
+  background:var(--miss-bg); color:var(--text-dim); border:1px solid var(--border);
+}
+.apptoolbar .app-arc svg { opacity:.85; flex:0 0 auto; }
+/* Which build this is (app + bridge), so two machines can be compared.
+   Quiet unless the app and its bridge disagree. */
+.apptoolbar .build-chip {
+  font-family:var(--mono); font-size:10.5px; color:var(--text-faint);
+  padding:2px 6px; border-radius:6px; border:1px solid transparent;
+  cursor:pointer; white-space:nowrap; -webkit-app-region:no-drag;
+}
+.apptoolbar .build-chip:hover { border-color:var(--border); color:var(--text-dim); }
+.apptoolbar .build-chip.mismatch { background:var(--warn-bg); color:var(--warn); }
+.apptoolbar .app-arc #appArcLabel { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
 
 /* tag + comment marks in the lists */
 .rowchips { display:inline-flex; align-items:center; gap:4px; margin-left:7px;

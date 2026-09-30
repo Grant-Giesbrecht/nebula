@@ -3,6 +3,7 @@ import json
 
 import nebula
 from nebula.navigator import model
+from nebula.refs import Ref
 from nebula.sidecar import read_session_yaml, write_session_yaml, SessionMeta
 
 
@@ -466,6 +467,35 @@ def test_lineage_downstream_across_sessions(tmp_path):
     lin = model.lineage(archive, src.path, "raw.csv")
     assert [d["ref"] for d in lin["downstream"]] == [f"{other.id}/fit.json"]
     assert lin["downstream"][0]["same_session"] is False
+
+
+def test_lineage_downstream_with_qualified_ref_to_same_archive(tmp_path):
+    """A child that names its parent fully qualified -- archive name and
+    id included, as scripts commonly write it -- is still a local child.
+    Skipping every ref with an archive on it hid these entirely."""
+    from nebula import transfer
+    from nebula.config import read_settings
+
+    archive = tmp_path / "archive"
+    transfer.init_archive(archive, kind="standard", name="postdoc",
+                          user="g@ncsu.edu")
+    arch_id = read_settings(archive, apply_env=False).id
+    src = _session_with(archive, {"raw.h5": "x"})
+    other = nebula.new(archive, description="plots")
+    for name, ref in [("by_name.png", f"postdoc|{src.id}/raw.h5"),
+                      ("by_id.png", Ref(archive="renamed-since", archive_id=arch_id,
+                                        session=src.id, file="raw.h5")),
+                      ("foreign.png", f"elsewhere|{src.id}/raw.h5")]:
+        with other.artifact(name, derived_from=[ref]) as fn:
+            fn.write_text("p")
+    other.close()
+
+    lin = model.lineage(archive, src.path, "raw.h5")
+    assert sorted(d["filename"] for d in lin["downstream"]) == ["by_id.png",
+                                                              "by_name.png"]
+    lin_idx = model._Lineage(archive)
+    assert sorted(c["filename"] for c in lin_idx.children(src.id, "raw.h5")) \
+        == ["by_id.png", "by_name.png"]
 
 
 def test_lineage_flags_missing_target(tmp_path):

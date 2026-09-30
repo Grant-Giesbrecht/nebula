@@ -133,7 +133,7 @@ async function main() {
 
   console.log("three ways in: toolbar button, F5, and the menu action");
   run('archive = "postdoc";');
-  ok($("codeStoreBtn"), "the toolbar has a Code button");
+  ok($("codeStoreBtn"), "the toolbar has a Browse code button");
   await $("codeStoreBtn").onclick();
   ok($("codeStoreScrim").classList.contains("show"), "the toolbar button opens it");
   $("storeClose").onclick();

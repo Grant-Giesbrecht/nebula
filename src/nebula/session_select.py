@@ -83,6 +83,15 @@ def _candidate_sessions(archive_root: Path) -> List[SessionMeta]:
     return out
 
 
+def reuse_candidate(archive_root: "str | Path") -> Optional[str]:
+    """The run_id `nebula.session(archive, reuse=True)` would pick: the
+    most recent unlocked session (open, created today, or held), or None
+    if this archive has none right now. Also what the CLI's `S!` shortcut
+    resolves to (see cli.py's post-parse hook)."""
+    candidates = _candidate_sessions(Path(archive_root))
+    return candidates[0].run_id if candidates else None
+
+
 def _all_sessions(archive_root: Path) -> List[SessionMeta]:
     """Every session in the archive, newest first -- the superset /list -a
     and /list -d draw from."""

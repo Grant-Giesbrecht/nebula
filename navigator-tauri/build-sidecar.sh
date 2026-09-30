@@ -35,10 +35,17 @@ echo "==> freezing $NAME for $TRIPLE using $PYTHON"
     exit 1
 }
 
+# Stamp the build (commit count + hash) so the app can say which bridge it
+# is running. The frozen binary has no .git to ask; see nebula/buildinfo.py.
+STAMP_DIR=build/sidecar/stamp
+echo "==> build stamp: $(PYTHONPATH=../src "$PYTHON" -m nebula.buildinfo \
+    --write "$STAMP_DIR/nebula_build_stamp.py")"
+
 # --paths ../src: import `nebula` from the repo checkout rather than relying
 #   on it being pip-installed for this interpreter.
 # --hidden-import yaml: nebula's only runtime dependency; it is imported
 #   lazily in places PyInstaller's static analysis does not follow.
+# --hidden-import nebula_build_stamp: the stamp above, imported lazily too.
 "$PYTHON" -m PyInstaller \
     --onefile \
     --console \
@@ -46,7 +53,9 @@ echo "==> freezing $NAME for $TRIPLE using $PYTHON"
     --noconfirm \
     --name "$NAME" \
     --paths ../src \
+    --paths "$STAMP_DIR" \
     --hidden-import yaml \
+    --hidden-import nebula_build_stamp \
     --distpath build/sidecar/dist \
     --workpath build/sidecar/work \
     --specpath build/sidecar \

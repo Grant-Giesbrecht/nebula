@@ -273,3 +273,66 @@ def test_try_get_is_quiet_about_an_ambiguous_name(tmp_path):
     assert _reg().try_get("shared") is None
     with pytest.raises(KeyError):
         _reg().get("shared")
+
+
+# ---------------------------------------------------------------------
+# default archive (A!)
+# ---------------------------------------------------------------------
+
+def test_default_nickname_starts_unset(tmp_path):
+    reg = Registry(path=tmp_path / "archives.yaml")
+    assert reg.default_nickname() is None
+
+
+def test_set_default_and_read_it_back(tmp_path):
+    reg = Registry(path=tmp_path / "archives.yaml")
+    reg.register("postdoc", tmp_path / "postdoc-data")
+    reg.set_default("postdoc")
+    assert reg.default_nickname() == "postdoc"
+
+
+def test_default_persists_across_instances(tmp_path):
+    path = tmp_path / "archives.yaml"
+    reg1 = Registry(path=path)
+    reg1.register("postdoc", tmp_path / "postdoc-data")
+    reg1.set_default("postdoc")
+
+    reg2 = Registry(path=path)
+    assert reg2.default_nickname() == "postdoc"
+
+
+def test_default_survives_alongside_other_archives(tmp_path):
+    """The reserved __default__ key must not be mistaken for an archive
+    entry by _load(), and must not show up in all()/lookup()."""
+    reg = Registry(path=tmp_path / "archives.yaml")
+    reg.register("postdoc", tmp_path / "postdoc-data")
+    reg.register("other", tmp_path / "other-data")
+    reg.set_default("other")
+
+    reg2 = Registry(path=tmp_path / "archives.yaml")
+    assert set(reg2.all()) == {"postdoc", "other"}
+    assert reg2.default_nickname() == "other"
+
+
+def test_set_default_normalizes_to_the_real_nickname(tmp_path):
+    """Passing a declared name (or anything resolve_one accepts) stores
+    the nickname A! actually looks up by, not whatever text was typed."""
+    reg = Registry(path=tmp_path / "archives.yaml")
+    reg.register("nick", tmp_path / "data", declared_name="declared")
+    reg.set_default("declared")
+    assert reg.default_nickname() == "nick"
+
+
+def test_set_default_rejects_unknown_archive(tmp_path):
+    reg = Registry(path=tmp_path / "archives.yaml")
+    with pytest.raises(KeyError):
+        reg.set_default("nonexistent")
+    assert reg.default_nickname() is None
+
+
+def test_clear_default(tmp_path):
+    reg = Registry(path=tmp_path / "archives.yaml")
+    reg.register("postdoc", tmp_path / "postdoc-data")
+    reg.set_default("postdoc")
+    reg.set_default(None)
+    assert reg.default_nickname() is None
