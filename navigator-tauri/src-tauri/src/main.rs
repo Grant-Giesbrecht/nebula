@@ -318,12 +318,14 @@ fn bridge(op: String, args: Option<Value>, state: State<BridgeState>) -> Result<
 /// MENU_ACTIONS in main.js.
 #[cfg(target_os = "macos")]
 fn install_menu(app: &tauri::App) -> tauri::Result<()> {
-    use tauri::menu::{AboutMetadata, MenuBuilder, MenuItemBuilder, SubmenuBuilder};
+    use tauri::menu::{MenuBuilder, MenuItemBuilder, SubmenuBuilder};
 
     let identity_item = MenuItemBuilder::with_id("menu:identity", "Set Your Name…")
         .build(app)?;
+    let about_item = MenuItemBuilder::with_id("menu:about", "About Nebula Navigator")
+        .build(app)?;
     let app_menu = SubmenuBuilder::new(app, "Nebula Navigator")
-        .about(Some(AboutMetadata::default()))
+        .item(&about_item)
         .separator()
         .item(&identity_item)
         .separator()
@@ -481,6 +483,23 @@ fn install_menu(app: &tauri::App) -> tauri::Result<()> {
     let menu = MenuBuilder::new(app)
         .items(&[&app_menu, &file_menu, &edit_menu, &view_menu, &window_menu])
         .build()?;
+    app.set_menu(menu)?;
+    Ok(())
+}
+
+/// Windows/Linux: a menu bar holding only Help > About.
+///
+/// There is no app menu to put About in here, and the full macOS menu would
+/// duplicate shortcuts the front-end already handles itself. Same id as the
+/// macOS item, so it takes the same `menu://action` route to `openAbout`.
+#[cfg(not(target_os = "macos"))]
+fn install_help_menu(app: &tauri::App) -> tauri::Result<()> {
+    use tauri::menu::{MenuBuilder, MenuItemBuilder, SubmenuBuilder};
+
+    let about_item = MenuItemBuilder::with_id("menu:about", "About Nebula Navigator")
+        .build(app)?;
+    let help_menu = SubmenuBuilder::new(app, "Help").item(&about_item).build()?;
+    let menu = MenuBuilder::new(app).items(&[&help_menu]).build()?;
     app.set_menu(menu)?;
     Ok(())
 }
@@ -700,6 +719,8 @@ fn main() {
         .setup(|_app| {
             #[cfg(target_os = "macos")]
             install_menu(_app)?;
+            #[cfg(not(target_os = "macos"))]
+            install_help_menu(_app)?;
             {
                 use tauri_plugin_deep_link::DeepLinkExt;
 

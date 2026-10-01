@@ -807,15 +807,6 @@ body.marquee-on, body.marquee-on * { user-select:none; }
   background:var(--miss-bg); color:var(--text-dim); border:1px solid var(--border);
 }
 .apptoolbar .app-arc svg { opacity:.85; flex:0 0 auto; }
-/* Which build this is (app + bridge), so two machines can be compared.
-   Quiet unless the app and its bridge disagree. */
-.apptoolbar .build-chip {
-  font-family:var(--mono); font-size:10.5px; color:var(--text-faint);
-  padding:2px 6px; border-radius:6px; border:1px solid transparent;
-  cursor:pointer; white-space:nowrap; -webkit-app-region:no-drag;
-}
-.apptoolbar .build-chip:hover { border-color:var(--border); color:var(--text-dim); }
-.apptoolbar .build-chip.mismatch { background:var(--warn-bg); color:var(--warn); }
 .apptoolbar .app-arc #appArcLabel { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
 
 /* tag + comment marks in the lists */

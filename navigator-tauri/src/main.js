@@ -1230,38 +1230,30 @@ function buildLine(who, b) {
   return `${who}: ${b.version}${when}`;
 }
 
-// "0.1.0-dev.77+970093a.dirty" -> "dev.77+970093a.dirty": the base version
-// never changes between dev builds, so it's just width.
-function shortBuild(b) {
-  if (!b || !b.version) return "?";
-  return b.base && b.version.startsWith(`${b.base}-`)
-    ? b.version.slice(b.base.length + 1) : b.version;
-}
 
-async function loadBuildInfo() {
+// Shown in the About dialog (app menu), not the toolbar.
+async function openAbout() {
+  showDialog("aboutScrim");
   const [app, br] = await Promise.all([
     invoke("app_build_info", {}).catch(() => null),
     call("build_info").catch(() => null),
   ]);
-  if (!app || !app.version) return;      // not running under the real shell
-  const chip = $("buildChip");
-  // Compare the commit, not the whole string: a dirty flag on one side
-  // alone is worth seeing in the tooltip but isn't a different build.
-  const mismatch = !!(br && br.sha && app.sha && br.sha !== app.sha);
-  chip.textContent = mismatch
-    ? `app ${shortBuild(app)} ≠ bridge ${shortBuild(br)}` : shortBuild(app);
-  chip.classList.toggle("mismatch", mismatch);
   const details = [buildLine("App", app), buildLine("Bridge", br)].join("\n");
-  chip.title = details
-    + (mismatch ? "\n\nThe app and its bridge were built from different commits "
-       + "— rebuild the sidecar, then the app." : "")
-    + "\n\nClick to copy.";
-  chip.onclick = async () => {
+  // Compare the commit, not the whole string: a dirty flag on one side
+  // alone isn't a different build.
+  const mismatch = !!(br && br.sha && app && app.sha && br.sha !== app.sha);
+  $("aboutVersion").textContent = app && app.version ? app.version : "unknown";
+  $("aboutDetail").textContent = details;
+  $("aboutWarn").textContent = mismatch
+    ? "App and bridge were built from different commits — rebuild the sidecar, then the app."
+    : "";
+  $("aboutWarn").classList.toggle("hidden", !mismatch);
+  $("aboutCopy").onclick = async () => {
     try { await navigator.clipboard.writeText(details); toast("Build info copied."); }
     catch { toast(details); }
   };
-  chip.classList.remove("hidden");
 }
+$("aboutOk").onclick = () => $("aboutScrim").classList.remove("show");
 
 async function loadIdentity() {
   try { identity = await call("identity", {}); } catch (e) { identity = { user: "", set: false }; }
@@ -6025,6 +6017,7 @@ const MENU_ACTIONS = {
   "export": () => exportSelection({
     sessions: curSession ? [curSession.run_id] : null,
     label: curSession ? curSession.run_id : "archive" }),
+  about: openAbout,
   identity: () => openIdentityDialog(),
   "close-tab": () => closeTab(activeTab),
   "duplicate-tab": duplicateTab,
@@ -6432,7 +6425,6 @@ async function boot() {
   verify = viewCfg.verify;
   syncViewOptions();
   loadIdentity();
-  loadBuildInfo();
   showCal = LS.get("nebula.showCal", false);
   // keepLocation: there is no tab yet for the rail to act on, and the
   // restored tabs decide below what is actually on screen.

@@ -177,7 +177,6 @@
         <span id="userBadgeName"></span>
       </span>
       <span class="no-user hidden" id="noUserWarn" title="Click to set your name">no user set</span>
-      <span class="build-chip hidden" id="buildChip"></span>
       <button class="theme-toggle" id="themeBtn">◐ Theme</button>
       <span class="wtitle-sr" id="wtitle"></span>
     </div>
@@ -605,6 +604,22 @@
         <div class="spacer"></div>
         <button class="dbtn ghost" id="assetImpCancel">Cancel</button>
         <button class="btn-primary" id="assetImpOk" title="⌘/Ctrl-Enter">Add assets</button>
+      </div>
+    </div>
+  </div>
+
+  <div class="scrim" id="aboutScrim">
+    <div class="dialog" role="dialog" aria-modal="true" aria-labelledby="aboutHead">
+      <div class="dlg-head" id="aboutHead">About Nebula Navigator</div>
+      <div class="dlg-body">
+        <div class="dlg-arc">Version <b id="aboutVersion">…</b></div>
+        <div class="dlg-arc" id="aboutDetail" style="white-space:pre-line"></div>
+        <div class="dlg-arc hidden" id="aboutWarn"></div>
+      </div>
+      <div class="dlg-actions">
+        <button class="dbtn ghost" id="aboutCopy">Copy</button>
+        <div class="spacer"></div>
+        <button class="btn-primary" id="aboutOk">OK</button>
       </div>
     </div>
   </div>
