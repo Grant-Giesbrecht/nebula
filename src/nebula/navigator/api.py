@@ -28,7 +28,7 @@ import json
 import sys
 import traceback
 from pathlib import Path
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 
 from nebula import manual
 from nebula.navigator import model, osutil
@@ -135,17 +135,20 @@ def op_session_info(args: Dict[str, Any]) -> Dict[str, Any]:
     return model.session_info(args["session_path"])
 
 
-def _search_result_to_dict(res: Dict[str, Any]) -> Dict[str, Any]:
+def _search_result_to_dict(res: Dict[str, Any], archive: Optional[str] = None) -> Dict[str, Any]:
     """Flatten each hit into an item dict plus the session context the
     results table shows alongside it. Shared by search and saved views, so
-    both render through exactly the same path."""
+    both render through exactly the same path. ``archive`` stamps each hit
+    with the archive it came from (set for all-archive searches)."""
     return {
         "items": [
             dict(_item_to_dict(hit["item"]),
                  run_id=hit["run_id"],
                  session_path=hit["session_path"],
                  session_description=hit["session_description"],
-                 tags=hit["tags"])
+                 tags=hit["tags"],
+                 **({"archive": hit.get("archive", archive)}
+                    if hit.get("archive", archive) else {}))
             for hit in res["items"]
         ],
         "truncated": res.get("truncated", False),
@@ -155,15 +158,37 @@ def _search_result_to_dict(res: Dict[str, Any]) -> Dict[str, Any]:
 
 
 def op_search_items(args: Dict[str, Any]) -> Dict[str, Any]:
-    res = model.search_items(
-        args["archive"], args.get("query") or "",
-        fields=args.get("fields") or None,
-        date_from=args.get("date_from") or None,
-        date_to=args.get("date_to") or None,
-        sources=args.get("sources") or None,
-        limit=int(args.get("limit") or 1000),
-    )
-    return _search_result_to_dict(res)
+    limit = int(args.get("limit") or 1000)
+    kw = dict(fields=args.get("fields") or None,
+              date_from=args.get("date_from") or None,
+              date_to=args.get("date_to") or None,
+              sources=args.get("sources") or None)
+    query = args.get("query") or ""
+    try:
+        if not args.get("all_archives"):
+            return _search_result_to_dict(
+                model.search_items(args["archive"], query, limit=limit, **kw))
+        # Global search: every registered archive that is actually mounted.
+        merged = {"items": [], "truncated": False, "n_sessions": 0, "n_scanned": 0}
+        for arc in model.registered_archives():
+            if not arc["exists"] or len(merged["items"]) >= limit:
+                continue
+            res = model.search_items(arc["name"], query,
+                                     limit=limit - len(merged["items"]), **kw)
+            for hit in res["items"]:
+                hit["archive"] = arc["name"]
+            merged["items"] += res["items"]
+            merged["truncated"] = merged["truncated"] or res["truncated"]
+            merged["n_sessions"] += res["n_sessions"]
+            merged["n_scanned"] += res["n_scanned"]
+        if len(merged["items"]) >= limit:
+            merged["truncated"] = True
+        return _search_result_to_dict(merged)
+    except model.SearchSyntaxError as e:
+        # A half-typed query (the search runs as you type) is not a
+        # failure worth a popup; hand the message back for the status bar.
+        return {"items": [], "truncated": False, "n_sessions": 0,
+                "n_scanned": 0, "error": str(e)}
 
 
 def op_lineage(args: Dict[str, Any]) -> Dict[str, Any]:

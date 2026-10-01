@@ -194,8 +194,11 @@ def run(archive_root, name: str, *, limit: int = 1000) -> dict:
     if view is None:
         raise ViewError(f"no view {name!r} in this archive")
     args = view.search_args()
-    res = model.search_items(Path(archive_root), args["query"],
-                             fields=args["fields"], date_from=args["date_from"],
-                             date_to=args["date_to"], limit=limit)
+    try:
+        res = model.search_items(Path(archive_root), args["query"],
+                                 fields=args["fields"], date_from=args["date_from"],
+                                 date_to=args["date_to"], limit=limit)
+    except model.SearchSyntaxError as e:
+        raise ViewError(f"view {name!r} has a bad query: {e}")
     res["view"] = view.to_dict()
     return res

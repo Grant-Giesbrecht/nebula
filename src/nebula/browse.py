@@ -59,6 +59,9 @@ commands:
   copy <name> [--path]         copy its URI (or --path: on-disk path) to
                                 the clipboard
   search <query> [--tag] [--comment] [| text]
+                                query: words, field:term (tag, filename,
+                                type, date, ...), && || ! ( ); e.g.
+                                tag:"TWPA*" && type:py || date:today-5d:today
                                 search artifacts in the current archive;
                                 --tag/--comment print that under each hit;
                                 `| text` filters the results (grep-like)
@@ -927,7 +930,11 @@ def _cmd_search(state: _State, rest: List[str]) -> None:
 
     from nebula.navigator import model as model_mod
 
-    result = model_mod.search_items(state.archive_root, query)
+    try:
+        result = model_mod.search_items(state.archive_root, query)
+    except model_mod.SearchSyntaxError as e:
+        err(f"  bad query: {e}")
+        return
     hits = result.get("items", [])
     if not hits:
         print("  (no matches)")
@@ -1429,6 +1436,10 @@ def run_browse(start_archive: Optional[str] = None, start_run_id: Optional[str] 
             except ValueError as e:
                 err(f"  {e}")
                 continue
+            if parts[0] == "search":
+                # Quotes carry meaning in a query ('x' vs "x" vs x), so
+                # keep them rather than letting shlex strip them.
+                parts = shlex.split(line, posix=False)
             cmd, rest = parts[0], parts[1:]
 
             if cmd in ("exit", "quit"):

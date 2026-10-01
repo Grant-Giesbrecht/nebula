@@ -66,7 +66,7 @@ let sessCfg = { titles: true, ids: true, tags: true, userTags: true,
                 open: true, closed: true, crashed: true, clean: true, dirty: true };
 // from/to are stored as ISO (YYYY-MM-DD) for the backend but shown as
 // YYYY/MM/DD; `dates` is the master switch for the whole date filter.
-let itemCfg = { name: true, tags: true, origin: true, session: true,
+let itemCfg = { global: false, name: true, tags: true, origin: true, session: true,
                 userTags: true, comments: true,
                 dates: false, from: "", to: "",
                 // "How it got here". All three on means no restriction;
@@ -2575,6 +2575,11 @@ async function runView(name) {
     searchMode = true;
     searchMeta = res;
     items = res.items;
+    if (res.error) {
+      applyItemView();
+      $("statusbar").textContent = `${activeLabel()} — search: ${res.error}`;
+      return;
+    }
     selected = null; selectedIsSidecar = false;
     // Show what is being run, so the results aren't unexplained.
     $("itemSearch").value = (res.view && res.view.query) || "";
@@ -2658,7 +2663,7 @@ function scheduleItemSearch() {
 
 async function runItemSearch() {
   $("itemSearchClear").classList.toggle("hidden", !itemSearchActive());
-  $("itemCfgBtn").classList.toggle("on", datesOn() || sourcesOn());
+  $("itemCfgBtn").classList.toggle("on", datesOn() || sourcesOn() || !!itemCfg.global);
   if (!archive) return;
   if (!itemSearchActive()) { await exitSearch(); return; }
 
@@ -2668,6 +2673,7 @@ async function runItemSearch() {
   try {
     const res = await call("search_items", {
       archive, query: $("itemSearch").value, fields,
+      all_archives: !!itemCfg.global,
       date_from: (itemCfg.dates && itemCfg.from) || null,
       date_to: (itemCfg.dates && itemCfg.to) || null,
       sources: sourcesOn() ? selectedSources() : null,
@@ -2839,8 +2845,10 @@ function wireSort() {
 // In search mode the same table gains a Session column, since results come
 // from all over the archive rather than one open session.
 function sessionCell(it) {
+  const where = it.archive ? `${it.archive} · ` : "";
   return `<td class="c-sess"><span class="sesslink" data-jump="${escapeHtml(it.run_id)}"
-    title="${escapeHtml(it.session_description || "")} — go to this session">${escapeHtml(it.run_id)}</span></td>`;
+    data-arch="${escapeHtml(it.archive || "")}"
+    title="${escapeHtml(it.session_description || "")} — go to this session">${escapeHtml(where + it.run_id)}</span></td>`;
 }
 
 function listHTML() {
@@ -2924,7 +2932,17 @@ function wireItems() {
     };
     el.onclick = (ev) => {
       const jump = ev.target.getAttribute && ev.target.getAttribute("data-jump");
-      if (jump) { ev.stopPropagation(); jumpToSession(jump); return; }
+      if (jump) {
+        ev.stopPropagation();
+        const arch = ev.target.getAttribute("data-arch");
+        (async () => {
+          // A global hit may live in another archive; run ids are
+          // per-archive, so switch first.
+          if (arch && arch !== archive) await loadArchive(arch);
+          jumpToSession(jump);
+        })();
+        return;
+      }
       selectItem(it, isSc, ev);
     };
     el.ondblclick = () => activate(it, isSc);
@@ -3346,7 +3364,7 @@ async function loadLineage(it) {
   const sessionPath = it.session_path || (curSession && curSession.path);
   if (!archive || !sessionPath) return;
   try {
-    const lin = await call("lineage", { archive, session_path: sessionPath, filename: it.name });
+    const lin = await call("lineage", { archive: it.archive || archive, session_path: sessionPath, filename: it.name });
     if (scInfo && scInfo.itemName === it.name) {
       scInfo.lineage = lin;
       renderSidecarPanel();
@@ -5820,7 +5838,7 @@ function saveItemCfg() { LS.set("nebula.itemCfg", itemCfg); }
 const SESS_BOXES = { sfTitle: "titles", sfId: "ids", sfTag: "tags",
                      sfUserTag: "userTags", ssOpen: "open",
                      ssClosed: "closed", ssCrashed: "crashed", sqClean: "clean", sqDirty: "dirty" };
-const ITEM_BOXES = { ifName: "name", ifTag: "tags", ifOrigin: "origin",
+const ITEM_BOXES = { ifGlobal: "global", ifName: "name", ifTag: "tags", ifOrigin: "origin",
                      ifSession: "session", ifUserTags: "userTags",
                      ifComments: "comments", ifSrcScript: "srcScript",
                      ifSrcExternal: "srcExternal",
@@ -6388,8 +6406,17 @@ $("themeBtn").onclick = () => {
   const r = document.documentElement;
   const cur = r.getAttribute("data-theme") ||
     (matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light");
-  r.setAttribute("data-theme", cur === "dark" ? "light" : "dark");
+  const next = cur === "dark" ? "light" : "dark";
+  r.setAttribute("data-theme", next);
+  try { localStorage.setItem("nebula.theme", next); } catch (e) { /* not fatal */ }
 };
+// Restore the last explicit choice; with none saved, follow the OS.
+try {
+  const savedTheme = localStorage.getItem("nebula.theme");
+  if (savedTheme === "dark" || savedTheme === "light") {
+    document.documentElement.setAttribute("data-theme", savedTheme);
+  }
+} catch (e) { /* storage unavailable: default theme */ }
 
 // ---- boot ---------------------------------------------------------------
 async function boot() {

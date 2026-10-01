@@ -226,6 +226,8 @@
           <button class="s-x hidden" id="sessSearchClear" title="Clear">✕</button>
           <button class="abtn" id="sessCfgBtn" title="Search options">⚙</button>
           <div class="pop hidden" id="sessCfg">
+          <div class="pop-h">Where</div>
+          <label class="check"><input type="checkbox" id="ifGlobal" /> All archives <span class="hint">not just this one</span></label>
           <div class="pop-h">Search in</div>
           <label class="check"><input type="checkbox" id="sfTitle" checked /> Titles</label>
           <label class="check"><input type="checkbox" id="sfId" checked /> IDs</label>
@@ -399,7 +401,7 @@
             <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><circle cx="11" cy="11" r="7"/><line x1="16.5" y1="16.5" x2="21" y2="21"/></svg>
           </span>
           <input id="itemSearch" placeholder="Search artefacts — try tag:'twpa*' or &quot;exact-name&quot;…"
-                 title="Bare words: substring match. 'word': exact match, case-insensitive. &quot;word&quot;: exact match, case-sensitive. * and ? are wildcards inside quotes. Prefix with a field name to scope the match, e.g. tag:'twpa*'." spellcheck="false" />
+                 title="Bare words: substring match. 'word': exact match, case-insensitive. &quot;word&quot;: exact match, case-sensitive. * and ? are wildcards inside quotes. Prefix with a field name to scope the match, e.g. tag:'twpa*'. Also type:csv, date:today-5d:today, and && || ! ( ) to combine." spellcheck="false" />
           <button class="s-x hidden" id="itemSearchClear" title="Clear search">✕</button>
           <button class="abtn wide-btn" id="itemCfgBtn" title="Advanced search options">⚙ Advanced</button>
           <div class="pop right hidden" id="itemCfg">
@@ -410,7 +412,12 @@
             <code>"word"</code> exact match, case-sensitive<br>
             <code>*</code> / <code>?</code> wildcards inside quotes<br>
             <code>tag:'twpa*'</code> scope to one field
-            <div class="hint">fields: filename, tag(s), origin, session, user_tag(s), comment(s)</div>
+            <div class="hint">fields: filename, tag(s), origin, session, user_tag(s), comment(s), type, date</div>
+            <code>type:csv</code> / <code>type:csv,h5</code> file extension<br>
+            <code>date:2026/09/12:today</code> date range<br>
+            <code>date:today-5d:today</code> last 5 days<br>
+            <code>date:now-3h:now</code> last 3 hours<br>
+            <code>&amp;&amp;</code> <code>||</code> <code>!</code> <code>( )</code> combine clauses (space = &amp;&amp;)
           </div>
           <div class="pop-h">Search in</div>
           <label class="check"><input type="checkbox" id="ifName" checked /> Filenames</label>

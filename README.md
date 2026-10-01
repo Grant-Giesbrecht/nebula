@@ -744,7 +744,7 @@ nebula collection <archive> list | rm | remove
 
 `nebula search` walks every session in an archive and matches artefacts
 against a query -- the same one the Navigator GUI's search bar takes, since
-both call `search_items`. A query is whitespace-separated clauses, ANDed:
+both call `search_items`. A query is clauses, ANDed by whitespace (or combined explicitly, below):
 
 | clause | matches |
 |---|---|
@@ -753,6 +753,15 @@ both call `search_items`. A query is whitespace-separated clauses, ANDed:
 | `"word"` | exact match of the whole field value, case-sensitive |
 | `'wo*d'`, `"wo?d"` | same, but `*`/`?` are glob wildcards inside the quotes |
 | `field:term` | scope any of the above to one field, e.g. `tag:'twpa*'` |
+| `type:csv`, `type:csv,h5` | file extension (whole-extension, case-insensitive; wildcards ok; also `ext:`/`filetype:`) |
+| `date:A:B` | created between A and B, inclusive; either end may be empty |
+| `a && b`, `a \|\| b`, `!a`, `( )` | and / or / not / grouping; `&&` binds tighter than `\|\|`; whitespace means `&&` |
+
+Date endpoints are `YYYY/MM/DD` (or `-`, optionally `THH:MM`), `today`,
+`yesterday`, `now`, with offsets `-5d`, `-3h`, `+1w` (units `s m h d w mo y`;
+`mo`/`y` are 30/365 days). A day endpoint covers the whole day, so
+`date:today-5d:today` is the last five days through the end of today, and
+`date:now-3h:now` is the last three hours.
 
 So an unquoted `twpa-v6` still substring-matches, `"twpa-v6"` matches only
 that exact tag, and `"twpa*"` (or `'twpa*'`, case-insensitively) reaches
@@ -767,6 +776,8 @@ Quote the whole query at the shell so its inner quotes survive, e.g.
 nebula search postdoc diode csv               # AND of two substrings
 nebula search postdoc "tag:'twpa-v6'"          # exact tag, case-insensitive
 nebula search postdoc 'tag:"twpa*"'            # case-sensitive prefix wildcard
+nebula search postdoc "(tag:'TWPA*' && filename:'MP24B_*.py') || date:2026/09/12:today"
+nebula search postdoc "type:csv && date:now-3h:now"
 ```
 
 **Saved searches** are the computed counterpart — a stored query that

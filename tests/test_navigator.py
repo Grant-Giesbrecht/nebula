@@ -1,6 +1,8 @@
 import datetime
 import json
 
+import pytest
+
 import nebula
 from nebula.navigator import model
 from nebula.refs import Ref
@@ -352,11 +354,12 @@ def test_search_wildcards_in_quotes(tmp_path):
 def test_search_field_prefix_scopes_the_match(tmp_path):
     archive = tmp_path / "archive"
     _tagged_sessions(archive)
-    # tag: scopes to the tags field regardless of the fields= filter --
-    # naming a field is a deliberate ask the checkboxes shouldn't defeat
-    res = _search(archive, "tag:'twpa*'", fields=["filename"])
+    # tag: follows the tag boxes (see test_tag_clause_follows_search_in_boxes)
+    res = _search(archive, "tag:'twpa*'", fields=["tags"])
     assert len(res["items"]) == 2
-    res = _search(archive, "tag:'twpa-v6'", fields=[])
+    assert _search(archive, "tag:'twpa*'", fields=["filename"])["items"] == []
+    # other named fields ignore the boxes -- a deliberate ask
+    res = _search(archive, "session:'run six'", fields=["filename"])
     assert [h["item"].name for h in res["items"]] == ["a.csv"]
     # session: matches the run's description exactly
     assert [h["item"].name for h in
@@ -740,3 +743,115 @@ def test_uri_op_reports_a_malformed_ref_as_data(tmp_path):
     root = _owned_archive(tmp_path / "postdoc")
     got = api.dispatch("uri", {"archive": str(root), "ref": "a|b|c"})
     assert got["ok"] is False and got["error"]
+
+
+# ---------------------------------------------------------------------
+# search query syntax: boolean operators, type:, date:
+# ---------------------------------------------------------------------
+
+def _names(res):
+    return sorted(h["item"].name for h in res["items"])
+
+
+def test_search_type_filter(tmp_path):
+    archive = tmp_path / "archive"
+    _session_with(archive, {"a.csv": "x", "b.py": "y", "c.pyc": "z", "d.tar.gz": "w"})
+    assert _names(_search(archive, "type:csv")) == ["a.csv"]
+    assert _names(_search(archive, "type:.PY")) == ["b.py"]          # no hit on pyc
+    assert _names(_search(archive, "type:csv,py")) == ["a.csv", "b.py"]
+    assert _names(_search(archive, "type:'py*'")) == ["b.py", "c.pyc"]
+    assert _names(_search(archive, "type:gz")) == ["d.tar.gz"]
+    assert _names(_search(archive, "type:tar.gz")) == ["d.tar.gz"]
+    assert _names(_search(archive, "ext:csv demo")) == ["a.csv"]
+
+
+def test_search_boolean_operators(tmp_path):
+    archive = tmp_path / "archive"
+    _session_with(archive, {"a.csv": "x", "b.py": "y", "c.txt": "z"})
+    assert _names(_search(archive, "type:csv || type:py")) == ["a.csv", "b.py"]
+    assert _names(_search(archive, "demo && !type:csv")) == ["b.py", "c.txt"]
+    assert _names(_search(archive, "(type:csv || type:py) && filename:'b*'")) == ["b.py"]
+    assert _names(_search(archive, "(type:csv||type:py)&&b")) == ["b.py"]
+    # && binds tighter than ||
+    assert _names(_search(archive, "type:txt || type:csv && b")) == ["c.txt"]
+    # lenient about half-typed input
+    assert _names(_search(archive, "(type:csv || type:py")) == ["a.csv", "b.py"]
+
+
+def test_search_date_clause(tmp_path):
+    archive = tmp_path / "archive"
+    _session_with(archive, {"a.csv": "x"})
+    assert len(_search(archive, "date:today:today")["items"]) == 1
+    assert len(_search(archive, "date:today-5d:today")["items"]) == 1
+    assert len(_search(archive, "date:now-3h:now")["items"]) == 1
+    assert len(_search(archive, "date:today")["items"]) == 1
+    assert len(_search(archive, "date:2000/01/01:")["items"]) == 1
+    assert _search(archive, "date:2000/01/01:2000/01/02")["items"] == []
+    assert _search(archive, "date:yesterday-3d:yesterday")["items"] == []
+    assert len(_search(archive, "(type:py && date:today) || date:2000/01/01:today")["items"]) == 1
+
+
+def test_parse_date_range_semantics():
+    now = datetime.datetime(2026, 10, 1, 15, 30).astimezone()
+    ts = lambda *a: datetime.datetime(*a).astimezone().timestamp()
+    lo, hi = model.parse_date_range("today-5d:today", now)
+    assert lo == ts(2026, 9, 26)                       # start of that day
+    assert hi > ts(2026, 10, 1, 23, 59, 58)            # through end of today
+    lo, hi = model.parse_date_range("now-3h:now", now)
+    assert lo == ts(2026, 10, 1, 12, 30) and hi == ts(2026, 10, 1, 15, 30)
+    lo, hi = model.parse_date_range("2026-09-12T10:30:today", now)
+    assert lo == ts(2026, 9, 12, 10, 30)
+    lo, hi = model.parse_date_range(":yesterday", now)
+    assert lo == float("-inf") and ts(2026, 9, 30, 23, 59, 59) <= hi < ts(2026, 10, 1)
+    lo, hi = model.parse_date_range("2026/09/12..2026/09/13", now)
+    assert lo == ts(2026, 9, 12)
+    for bad in ("garbage", "today-5x:now", "2026/13/45:today"):
+        with pytest.raises(model.SearchSyntaxError):
+            model.parse_date_range(bad, now)
+
+
+def test_search_bad_date_raises(tmp_path):
+    archive = tmp_path / "archive"
+    _session_with(archive, {"a.csv": "x"})
+    with pytest.raises(model.SearchSyntaxError):
+        _search(archive, "date:nonsense")
+
+
+def test_tag_clause_matches_session_and_user_tags(tmp_path):
+    from nebula import annotations
+    archive = tmp_path / "archive"
+    s = _session_with(archive, {"a.csv": "x", "b.csv": "y"})     # session tag "demo"
+    annotations.add_tags(s.path, "a.csv", ["Floquet"])
+    assert _names(_search(archive, "tag:'demo'")) == ["a.csv", "b.csv"]
+    assert _names(_search(archive, "tag:'floquet'")) == ["a.csv"]
+    assert _names(_search(archive, 'tag:"Floquet"')) == ["a.csv"]
+    assert _names(_search(archive, "utag:'floquet'")) == ["a.csv"]
+
+
+def test_tag_clause_follows_search_in_boxes(tmp_path):
+    from nebula import annotations
+    archive = tmp_path / "archive"
+    s = _session_with(archive, {"a.csv": "x"})
+    annotations.add_tags(s.path, "a.csv", ["Floquet"])
+    assert _names(_search(archive, "tag:floquet")) == ["a.csv"]
+    assert _search(archive, "tag:floquet", fields=["filename", "tags"])["items"] == []
+    assert _names(_search(archive, "tag:demo", fields=["user_tags"])) == []
+    # other explicit fields still ignore the boxes
+    assert _names(_search(archive, "utag:floquet", fields=["filename"])) == ["a.csv"]
+
+
+def test_op_search_all_archives(tmp_path, monkeypatch):
+    from nebula.navigator import api
+    archive = tmp_path / "archive"
+    _session_with(archive, {"a.csv": "x"})
+    monkeypatch.setattr(model, "registered_archives", lambda: [
+        {"name": "one", "root": str(archive), "exists": True},
+        {"name": "gone", "root": "/nope", "exists": False}])
+    real = model.search_items
+    monkeypatch.setattr(model, "search_items",
+                        lambda a, q, **kw: real(archive if a == "one" else a, q, **kw))
+    res = api.op_search_items({"archive": "elsewhere", "query": "csv",
+                               "all_archives": True})
+    assert [(i["name"], i["archive"]) for i in res["items"]] == [("a.csv", "one")]
+    assert api.op_search_items({"archive": "elsewhere", "query": "date:zzz",
+                                "all_archives": True})["error"]

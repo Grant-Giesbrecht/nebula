@@ -1430,11 +1430,15 @@ def cmd_search(args):
     query = " ".join(args.query) if args.query else ""
     fields = args.fields.split(",") if args.fields else None
     sources = args.sources if args.sources else None
-    res = model.search_items(
-        args.archive, query, fields=fields,
-        date_from=args.date_from, date_to=args.date_to,
-        sources=sources, limit=args.limit,
-    )
+    try:
+        res = model.search_items(
+            args.archive, query, fields=fields,
+            date_from=args.date_from, date_to=args.date_to,
+            sources=sources, limit=args.limit,
+        )
+    except model.SearchSyntaxError as e:
+        err(f"bad query: {e}")
+        sys.exit(1)
     if args.json:
         print(json.dumps({
             "truncated": res["truncated"], "n_sessions": res["n_sessions"],
@@ -2242,7 +2246,14 @@ def main(argv=None):
                      "bare \"twpa\" reaches neither). Prefix a term with a "
                      "field name to search just that field, e.g. "
                      "tag:'twpa*' -- known fields: filename, tag(s), "
-                     "origin/source, session, user_tag(s), comment(s). "
+                     "origin/source, session, user_tag(s), comment(s), plus "
+                     "type:csv (file extension; type:csv,h5 for several) "
+                     "and date:A:B (a range; A/B are YYYY/MM/DD, today, "
+                     "now, with offsets like today-5d or now-3h, either "
+                     "may be empty), e.g. date:today-5d:today. Combine "
+                     "clauses with && || ! and parentheses (whitespace "
+                     "means &&): \"(tag:'TWPA*' && filename:'MP24B_*.py') "
+                     "|| date:2026/09/12:today\". "
                      "Remember to quote the whole query at the shell so its "
                      "own quotes survive, e.g. nebula search postdoc "
                      "\"tag:'twpa*'\".")

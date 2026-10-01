@@ -1228,13 +1228,23 @@ ITEM_SEARCH_FIELDS = ("filename", "tags", "origin", "session",
 #: users.
 FIELD_ALIASES = {
     "filename": "filename", "file": "filename", "name": "filename",
-    "tag": "tags", "tags": "tags",
+    "tag": "any_tags", "tags": "any_tags",
     "origin": "origin", "source": "origin",
     "session": "session", "run": "session", "run_id": "session",
     "utag": "user_tags", "utags": "user_tags",
     "user_tag": "user_tags", "user_tags": "user_tags",
     "comment": "comments", "comments": "comments",
+    "type": "type", "filetype": "type", "ext": "type", "extension": "type",
+    "date": "date", "created": "date",
 }
+
+#: Fields that are not text matches and so are never in the "search in"
+#: set: ``type`` (file extension) and ``date`` (a time range).
+_SPECIAL_FIELDS = ("type", "date")
+
+
+class SearchSyntaxError(ValueError):
+    """A query that could not be understood (e.g. ``date:garbage``)."""
 
 
 @dataclass
@@ -1262,6 +1272,7 @@ class SearchClause:
     field: Optional[str]
     quote: Optional[str]
     text: str
+    date_range: Optional[tuple] = None   # (lo, hi) epochs, for field "date"
 
 
 def _wildcard_pattern(text: str) -> str:
@@ -1281,29 +1292,197 @@ def _wildcard_pattern(text: str) -> str:
     return "".join(out)
 
 
-def parse_search_query(query: str) -> List[SearchClause]:
-    """Split a search-bar query into clauses.
+_ENDPOINT_RE = re.compile(
+    r"(?:today|now|yesterday|tomorrow"
+    r"|(?P<y>\d{4})[-/](?P<mo>\d{1,2})[-/](?P<d>\d{1,2})"
+    r"(?:[T_](?P<h>\d{1,2})(?::(?P<mi>\d{2}))?(?::(?P<se>\d{2}))?)?)"
+    r"(?P<offs>(?:[+-]\d+(?:\.\d+)?[a-z]+)*)", re.IGNORECASE)
+_OFFSET_RE = re.compile(r"([+-])(\d+(?:\.\d+)?)([a-z]+)", re.IGNORECASE)
+#: unit -> (seconds, keeps day granularity). Months and years are
+#: approximate (30 / 365 days); a "5mo" lookback is a rough window.
+_TIME_UNITS = {
+    "s": (1, False), "sec": (1, False),
+    "m": (60, False), "min": (60, False),
+    "h": (3600, False), "hr": (3600, False),
+    "d": (86400, True), "w": (7 * 86400, True),
+    "mo": (30 * 86400, True), "y": (365 * 86400, True),
+}
 
-    Clauses are whitespace-separated except inside quotes, so a quoted
-    term can contain spaces. Each clause may be prefixed with a known
-    ``field:`` name (see :data:`FIELD_ALIASES`) immediately before the
-    term, with no space -- ``tag:'twpa*'`` is one clause, ``tag: 'twpa*'``
-    is two (an unrecognised bare "tag:" clause, then a quoted one). An
-    unrecognised prefix is left alone and treated as part of the term
-    itself, so a colon in an ordinary word (a URL, say) doesn't silently
-    vanish.
 
-    All returned clauses must match (AND), same as the old whitespace-split
-    behaviour it replaces.
+def _parse_endpoint(text: str, now: datetime.datetime):
+    """One end of a ``date:`` range -> (datetime, day_granular).
+
+    ``today``/``yesterday``/``tomorrow``/``YYYY/MM/DD`` name a whole day;
+    ``now`` and anything with a time of day name an instant. Offsets
+    (``-5d``, ``-3h``, ``+1w``) keep day granularity only for day-sized
+    units, so ``today-5d`` is a day but ``today-3h`` is an instant. A day
+    endpoint opens at 00:00 as a range start and closes at 23:59:59 as a
+    range end -- that is what makes ``date:today-5d:today`` run "through to
+    the end of today".
     """
-    clauses: List[SearchClause] = []
+    m = _ENDPOINT_RE.fullmatch(text)
+    if not m:
+        raise SearchSyntaxError(f"bad date {text!r}")
+    word = text.lower()
+    midnight = now.replace(hour=0, minute=0, second=0, microsecond=0)
+    if m.group("y"):
+        try:
+            base = datetime.datetime(
+                int(m.group("y")), int(m.group("mo")), int(m.group("d")),
+                int(m.group("h") or 0), int(m.group("mi") or 0),
+                int(m.group("se") or 0)).astimezone()
+        except ValueError:
+            raise SearchSyntaxError(f"bad date {text!r}")
+        day = m.group("h") is None
+    elif word.startswith("now"):
+        base, day = now, False
+    else:
+        shift = {"today": 0, "yesterday": -1, "tomorrow": 1}[
+            re.match(r"[a-z]+", word).group(0)]
+        base, day = midnight + datetime.timedelta(days=shift), True
+    for sign, amount, unit in _OFFSET_RE.findall(m.group("offs") or ""):
+        if unit.lower() not in _TIME_UNITS:
+            raise SearchSyntaxError(f"unknown time unit {unit!r} in {text!r}")
+        secs, keeps_day = _TIME_UNITS[unit.lower()]
+        delta = datetime.timedelta(seconds=float(amount) * secs)
+        base = base + delta if sign == "+" else base - delta
+        day = day and keeps_day
+    return base, day
+
+
+def parse_date_range(spec: str, now: Optional[datetime.datetime] = None):
+    """``A:B`` (or ``A..B``) -> inclusive (start_epoch, end_epoch); either
+    end may be empty for an open bound, and a lone ``A`` means that whole
+    day (or instant). See :func:`_parse_endpoint` for the endpoints."""
+    now = now or datetime.datetime.now().astimezone()
+    spec = spec.strip()
+    first = None
+    m = _ENDPOINT_RE.match(spec)
+    if m:
+        first, rest = spec[:m.end()], spec[m.end():]
+    elif spec[:1] in (":", ".") or not spec:
+        first, rest = "", spec
+    else:
+        raise SearchSyntaxError(f"bad date range {spec!r}")
+    if rest == "":
+        second = None
+    elif rest[0] == ":":
+        second = rest[1:]
+    elif rest.startswith(".."):
+        second = rest[2:]
+    else:
+        raise SearchSyntaxError(f"bad date range {spec!r}")
+
+    def start_of(t):
+        dt, day = _parse_endpoint(t, now)
+        return dt.timestamp()
+
+    def end_of(t):
+        dt, day = _parse_endpoint(t, now)
+        if day:
+            dt = dt.replace(hour=23, minute=59, second=59, microsecond=999999)
+        return dt.timestamp()
+
+    if second is None:      # a single value: that whole day / instant
+        return start_of(first), end_of(first)
+    lo = start_of(first) if first else float("-inf")
+    hi = end_of(second) if second else float("inf")
+    return lo, hi
+
+
+def _ext_values(name: str) -> List[str]:
+    """Extensions a filename answers to, lowercased, without the dot:
+    ``run.tar.gz`` -> ``["gz", "tar.gz"]``; no extension -> ``[""]``."""
+    parts = name.lower().split(".")[1:] if name.lstrip(".") else []
+    if not parts:
+        return [""]
+    return [".".join(parts[i:]) for i in range(len(parts))]
+
+
+# Search expression tree: ("clause", SearchClause) | ("not", node)
+# | ("and", [node...]) | ("or", [node...])
+def parse_search_expr(query: str, now: Optional[datetime.datetime] = None):
+    """Parse a search-bar query into an expression tree (None if empty).
+
+    Clauses are whitespace-separated except inside quotes. Each may be
+    prefixed with a known ``field:`` name (see :data:`FIELD_ALIASES`)
+    immediately before the term -- ``tag:'twpa*'`` is one clause,
+    ``tag: 'twpa*'`` is two. An unrecognised prefix is treated as part of
+    the term, so a colon in an ordinary word (a URL, say) survives.
+
+    Clauses combine with ``&&`` (or just whitespace -- the original
+    behaviour), ``||``, ``!`` (not) and parentheses; ``&&`` binds tighter
+    than ``||``. ``type:`` takes file extensions (``type:csv``,
+    ``type:csv,h5``, wildcards allowed) and ``date:`` a range -- see
+    :func:`parse_date_range`. An unbalanced ``(`` is closed implicitly
+    and a stray ``)`` ignored, so half-typed queries do not blow up.
+    """
+    now = now or datetime.datetime.now().astimezone()
     i, n = 0, len(query)
     field_re = re.compile(r"[A-Za-z_]+:")
-    while i < n:
+
+    def skip_ws():
+        nonlocal i
         while i < n and query[i].isspace():
             i += 1
-        if i >= n:
-            break
+
+    def parse_or(depth):
+        nonlocal i
+        parts = [parse_and(depth)]
+        while True:
+            skip_ws()
+            if query.startswith("||", i):
+                i += 2
+                parts.append(parse_and(depth))
+            else:
+                break
+        parts = [p for p in parts if p is not None]
+        if not parts:
+            return None
+        return parts[0] if len(parts) == 1 else ("or", parts)
+
+    def parse_and(depth):
+        nonlocal i
+        parts = []
+        while True:
+            skip_ws()
+            if i >= n or query.startswith("||", i):
+                break
+            if query[i] == ")":
+                if depth > 0:
+                    break
+                i += 1                  # stray ")": ignore
+                continue
+            if query.startswith("&&", i):
+                i += 2
+                continue
+            node = parse_unary(depth)
+            if node is not None:
+                parts.append(node)
+        if not parts:
+            return None
+        return parts[0] if len(parts) == 1 else ("and", parts)
+
+    def parse_unary(depth):
+        nonlocal i
+        if query[i] == "!":
+            i += 1
+            skip_ws()
+            if i >= n:
+                return None
+            inner = parse_unary(depth)
+            return ("not", inner) if inner is not None else None
+        if query[i] == "(":
+            i += 1
+            node = parse_or(depth + 1)
+            skip_ws()
+            if i < n and query[i] == ")":
+                i += 1
+            return node
+        return parse_clause(depth)
+
+    def parse_clause(depth):
+        nonlocal i
         field = None
         m = field_re.match(query, i)
         if m:
@@ -1324,14 +1503,23 @@ def parse_search_query(query: str) -> List[SearchClause]:
                     i += 1
             if i < n:            # skip the closing quote if it was there
                 i += 1
-            clauses.append(SearchClause(field, quote, "".join(buf)))
+            clause = SearchClause(field, quote, "".join(buf))
         else:
             j = i
             while j < n and not query[j].isspace():
+                if query.startswith(("&&", "||"), j):
+                    break
+                if depth > 0 and query[j] == ")":
+                    break
                 j += 1
-            clauses.append(SearchClause(field, None, query[i:j]))
+            clause = SearchClause(field, None, query[i:j])
             i = j
-    return clauses
+        if field == "date" and clause.text:
+            clause.date_range = parse_date_range(clause.text, now)
+        return ("clause", clause)
+
+    root = parse_or(0)
+    return root
 
 
 def _clause_matches(clause: SearchClause, field_values: Dict[str, List[str]],
@@ -1341,10 +1529,30 @@ def _clause_matches(clause: SearchClause, field_values: Dict[str, List[str]],
     *enabled* field (the search-in checkboxes); an explicit ``field:``
     always applies regardless of those checkboxes -- naming a field is a
     deliberate, specific ask that a stale checkbox shouldn't silently
-    defeat."""
+    defeat. The exception is ``tag:``, which stands for two fields and
+    follows the boxes for each."""
     if not clause.text:
         return True
-    candidate_fields = [clause.field] if clause.field else list(enabled_fields)
+    if clause.field == "date":
+        ts = (field_values.get("date") or [None])[0]
+        if ts is None:      # unknown date can't be claimed to be in range
+            return False
+        lo, hi = clause.date_range
+        return lo <= ts <= hi
+    if clause.field == "type":
+        # Extensions are matched whole, case-insensitively, whether or not
+        # quoted ("py" must not hit "pyc"); wildcards and a comma list of
+        # alternatives work either way.
+        wanted = [w.strip().lstrip(".").lower() for w in clause.text.split(",")]
+        rxs = [re.compile(_wildcard_pattern(w)) for w in wanted]
+        return any(rx.match(v) for rx in rxs
+                   for v in field_values.get("type", ()))
+    if clause.field == "any_tags":
+        # ``tag:`` spans session tags and your own, but still obeys the
+        # "Session Tags" / "Your tags" boxes: unticking one drops it.
+        candidate_fields = [f for f in ("tags", "user_tags") if f in enabled_fields]
+    else:
+        candidate_fields = [clause.field] if clause.field else list(enabled_fields)
     if clause.quote is None:
         needle = clause.text.lower()
         for f in candidate_fields:
@@ -1359,6 +1567,17 @@ def _clause_matches(clause: SearchClause, field_values: Dict[str, List[str]],
             if rx.match(v or ""):
                 return True
     return False
+
+
+def _expr_matches(node, field_values, enabled_fields) -> bool:
+    kind = node[0]
+    if kind == "clause":
+        return _clause_matches(node[1], field_values, enabled_fields)
+    if kind == "not":
+        return not _expr_matches(node[1], field_values, enabled_fields)
+    if kind == "and":
+        return all(_expr_matches(c, field_values, enabled_fields) for c in node[1])
+    return any(_expr_matches(c, field_values, enabled_fields) for c in node[1])
 
 
 def _in_date_range(timestamp, date_from, date_to) -> bool:
@@ -1392,18 +1611,25 @@ def search_items(
     """Search artefacts across every session in an archive.
 
     ``query`` is split into clauses on whitespace (see
-    :func:`parse_search_query`), and every clause must match somewhere in
-    the enabled ``fields`` -- AND across clauses, OR across the fields one
-    clause is checked against. Fields:
+    :func:`parse_search_expr`): clauses are ANDed by default, or combined
+    explicitly with ``&&``, ``||``, ``!`` and parentheses. A clause matches
+    if it hits anywhere in the enabled ``fields`` -- OR across the fields
+    one clause is checked against. Fields:
 
         filename  -- the artefact's own name
         tags      -- its *session's* tags (tags live on sessions, not files)
+                     (a ``tag:`` clause checks these *and* your own tags, each only
+                     while its "search in" box is ticked; other ``field:``
+                     clauses ignore the boxes)
         origin    -- the sidecar's free-text origin, plus script/external
         session   -- the run id and session description
         user_tags -- your tags on the item or the session
         comments  -- your comments on the item or the session
+        type      -- file extension, e.g. ``type:csv`` / ``type:'h5,npz'``
+        date      -- ``date:A:B`` range, e.g. ``date:today-5d:today``,
+                     ``date:now-3h:now``, ``date:2026/09/12:today``
 
-    Each clause is a bare word, or a term wrapped in quotes, optionally
+    ``type`` and ``date`` only apply when named explicitly. Each clause is a bare word, or a term wrapped in quotes, optionally
     preceded by ``field:`` (e.g. ``tag:'twpa*'``) to check one field
     instead of every enabled one -- see :data:`FIELD_ALIASES` for the
     names ``field:`` accepts. Bare words keep the old behaviour: a
@@ -1427,7 +1653,7 @@ def search_items(
     archive.
     """
     fields = set(fields or ITEM_SEARCH_FIELDS)
-    clauses = parse_search_query(query or "")
+    expr = parse_search_expr(query or "")
     empty = {"items": [], "truncated": False, "n_sessions": 0, "n_scanned": 0}
     # None means "no source filter"; an explicit empty list means the user
     # unticked every box, which asks for nothing and must not silently read
@@ -1442,7 +1668,7 @@ def search_items(
             return empty
         if wanted == set(SOURCE_FACETS):
             wanted = set()
-    if not clauses and not date_from and not date_to and not wanted:
+    if expr is None and not date_from and not date_to and not wanted:
         return empty
 
     root, _ = resolve(archive)
@@ -1459,7 +1685,7 @@ def search_items(
                 continue
             if wanted and item_source_facet(it) not in wanted:
                 continue
-            if clauses:
+            if expr is not None:
                 # Built for every field regardless of what's enabled, so
                 # an explicit field:term clause still works even if that
                 # field's checkbox is off -- naming a field is a
@@ -1471,8 +1697,10 @@ def search_items(
                     "session": [s.run_id, s.description],
                     "user_tags": list(it.user_tags) + list(session_notes["tags"]),
                     "comments": [it.user_comment, session_notes["comment"]],
+                    "type": _ext_values(it.name),
+                    "date": [_parse_timestamp(it.timestamp)],
                 }
-                if not all(_clause_matches(c, field_values, fields) for c in clauses):
+                if not _expr_matches(expr, field_values, fields):
                     continue
             if len(out) >= limit:
                 truncated = True
