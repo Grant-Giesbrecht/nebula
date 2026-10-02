@@ -1093,3 +1093,31 @@ body.panel-window .p-follow { -webkit-app-region:no-drag; }
 .cv-users .u .nm { font-family:var(--mono); overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
 .cv-users .u .when { font-size:11px; color:var(--text-faint); margin-left:auto; padding-left:10px;
                      white-space:nowrap; }
+
+
+/* ---- quick-look preview (Space / F2) ---- */
+.dialog.preview { width:900px; max-width:96vw; }
+.pv-body { height:min(62vh, 640px); overflow:auto; background:var(--panel); border-top:1px solid var(--border);
+           border-bottom:1px solid var(--border); font-size:12.5px; }
+.pv-body .pv-msg { padding:40px 24px; text-align:center; color:var(--text-faint); }
+.pv-body pre.pv-text { margin:0; padding:12px 16px; font:12px/1.5 ui-monospace, SFMono-Regular, Menlo, monospace;
+                       white-space:pre; tab-size:4; }
+.pv-body .pv-img { display:flex; align-items:center; justify-content:center; min-height:100%; padding:12px;
+                   box-sizing:border-box; background:var(--bg); }
+.pv-body .pv-img img { max-width:100%; max-height:calc(min(62vh, 640px) - 24px); object-fit:contain; }
+table.pv-table { border-collapse:collapse; font-size:12px; font-variant-numeric:tabular-nums; }
+table.pv-table th, table.pv-table td { padding:3px 10px; border-bottom:1px solid var(--border); text-align:left;
+                                       white-space:nowrap; }
+table.pv-table th { position:sticky; top:0; background:var(--panel); color:var(--text-dim); font-weight:600; z-index:1; }
+table.pv-table td.pv-idx { color:var(--text-faint); }
+.pv-hdf { display:flex; height:100%; }
+.pv-tree { width:300px; flex-shrink:0; overflow:auto; border-right:1px solid var(--border); padding:6px 0; }
+.pv-tn { display:flex; align-items:center; gap:5px; padding:2px 8px; cursor:pointer; white-space:nowrap; }
+.pv-tn:hover { background:var(--hover, rgba(127,127,127,.12)); }
+.pv-tn.sel { background:var(--accent-soft, rgba(80,120,255,.18)); }
+.pv-tn .pv-caret { width:12px; text-align:center; color:var(--text-faint); font-size:10px; }
+.pv-tn .pv-meta { color:var(--text-faint); font-size:11px; margin-left:4px; }
+.pv-detail { flex:1; min-width:0; overflow:auto; padding:10px 14px; }
+.pv-detail h4 { margin:0 0 4px; font-size:13px; }
+.pv-detail .pv-sub { color:var(--text-dim); margin-bottom:10px; }
+.pv-detail h5 { margin:12px 0 4px; font-size:11px; text-transform:uppercase; letter-spacing:.04em; color:var(--text-faint); }

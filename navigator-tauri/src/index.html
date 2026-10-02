@@ -615,6 +615,22 @@
     </div>
   </div>
 
+  <!-- Quick-look preview: Space or F2 on the selected file. -->
+  <div class="scrim" id="previewScrim">
+    <div class="dialog preview" role="dialog" aria-modal="true" aria-labelledby="previewTitle">
+      <div class="dlg-head row">
+        <span id="previewTitle">Preview</span>
+        <button class="p-btn" id="previewX" title="Close (Space / Esc)">✕</button>
+      </div>
+      <div class="pv-body" id="previewBody"></div>
+      <div class="dlg-actions">
+        <span class="cv-note" id="previewNote"></span>
+        <button class="dbtn ghost" id="previewOpen">Open with default app</button>
+        <button class="dbtn fill" id="previewClose">Close</button>
+      </div>
+    </div>
+  </div>
+
   <div class="scrim" id="aboutScrim">
     <div class="dialog" role="dialog" aria-modal="true" aria-labelledby="aboutHead">
       <div class="dlg-head" id="aboutHead">About Nebula Navigator</div>

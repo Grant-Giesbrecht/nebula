@@ -992,7 +992,24 @@ def op_asset_settings_preview(args: Dict[str, Any]) -> Dict[str, Any]:
         args["archive"], args.get("changes") or {})
 
 
+def op_preview(args: Dict[str, Any]) -> Dict[str, Any]:
+    """What the space / F2 popup shows for a file (see navigator.preview)."""
+    from nebula.navigator import preview
+    return preview.preview_file(args["path"])
+
+
+def op_preview_hdf_node(args: Dict[str, Any]) -> Dict[str, Any]:
+    """Attributes and values for one node of an HDF5 / tome preview tree."""
+    from nebula.navigator import preview
+    try:
+        return preview.hdf_node(args["path"], args["node"])
+    except Exception as e:
+        return {"error": str(e)}
+
+
 OPS = {
+    "preview": op_preview,
+    "preview_hdf_node": op_preview_hdf_node,
     "build_info": op_build_info,
     "list_assets": op_list_assets,
     "asset_info": op_asset_info,

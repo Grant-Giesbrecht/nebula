@@ -6086,6 +6086,22 @@ function initShortcuts() {
     .catch(() => {});
 
   document.addEventListener("keydown", (e) => {
+    // Preview: Space or F2 toggles it for the selected file. Typing in a
+    // field (a space in the search box) must keep working, so those are
+    // skipped; Escape closes it from anywhere.
+    const typing = e.target && e.target.closest && e.target.closest("input, textarea, select");
+    if (previewIsOpen()) {
+      if (e.key === "Escape" || e.key === " " || e.key === "F2") {
+        e.preventDefault(); closePreview(); return;
+      }
+      if ((e.key === "ArrowDown" || e.key === "ArrowUp") && !typing && handleListKey(e)) {
+        e.preventDefault(); previewSelected(); return;
+      }
+    } else if ((e.key === " " || e.key === "F2") && !typing && !hasMod(e) && !e.altKey
+               && !document.querySelector(".scrim.show")) {
+      const tab = activeTabObj();
+      if ((!tab || tab.kind === "browse") && previewSelected()) { e.preventDefault(); return; }
+    }
     if (e.key === "Escape") {
       if ($("codeStoreScrim").classList.contains("show")) { closeCodeStore(); return; }
       if ($("codeScrim").classList.contains("show")) { closeCodeView(); return; }
@@ -6417,6 +6433,130 @@ try {
     document.documentElement.setAttribute("data-theme", savedTheme);
   }
 } catch (e) { /* storage unavailable: default theme */ }
+
+
+// ---- quick-look preview (Space / F2) ------------------------------------
+// One popup for every previewable file type; the backend (nebula.navigator.
+// preview) decides what a file is and hands back text, a table, an image or
+// an HDF5/tome tree. Up/Down while it is open previews the neighbouring file.
+let previewPath = null, previewSeq = 0;
+
+function previewIsOpen() { return $("previewScrim").classList.contains("show"); }
+
+function closePreview() {
+  $("previewScrim").classList.remove("show");
+  $("previewBody").innerHTML = "";
+  previewPath = null; previewSeq++;
+}
+
+function pvMsg(text) { return `<div class="pv-msg">${escapeHtml(text)}</div>`; }
+
+function pvTable(columns, rows, idxCol) {
+  const head = columns.map((c) => `<th>${escapeHtml(c)}</th>`).join("");
+  const body = rows.map((r) => "<tr>" + r.map((c, i) =>
+    `<td${idxCol && i === 0 ? ' class="pv-idx"' : ""}>${escapeHtml(c)}</td>`).join("") + "</tr>").join("");
+  return `<table class="pv-table"><thead><tr>${head}</tr></thead><tbody>${body}</tbody></table>`;
+}
+
+async function openPreview(it) {
+  const path = it && (it.artifact_path || it.sidecar_path);
+  if (!path) { toast("Nothing to preview for this item."); return; }
+  const seq = ++previewSeq;
+  previewPath = path;
+  $("previewTitle").textContent = it.name || path.split("/").pop();
+  $("previewNote").textContent = "";
+  $("previewBody").innerHTML = pvMsg("Loading…");
+  $("previewScrim").classList.add("show");
+  let res;
+  try { res = await call("preview", { path }); }
+  catch (e) { res = { kind: "none", reason: String(e) }; }
+  if (seq !== previewSeq) return;          // a newer preview superseded this one
+  const body = $("previewBody");
+  if (res.kind === "text") {
+    body.innerHTML = `<pre class="pv-text">${escapeHtml(res.text)}</pre>`;
+  } else if (res.kind === "table") {
+    body.innerHTML = res.columns.length ? pvTable(res.columns, res.rows, false) : pvMsg("(empty)");
+  } else if (res.kind === "image") {
+    body.innerHTML = `<div class="pv-img"><img alt="" src="${res.uri}"></div>`;
+  } else if (res.kind === "hdf") {
+    renderHdfPreview(path, res);
+  } else {
+    body.innerHTML = pvMsg(res.reason || "No preview for this file type.");
+  }
+  if (res.truncated) $("previewNote").textContent = "Truncated — open the file to see the rest.";
+}
+
+function renderHdfPreview(path, res) {
+  const nodes = res.nodes;
+  const kids = {};
+  for (const n of nodes) {
+    const parent = n.path === "/" ? null : (n.path.slice(0, n.path.lastIndexOf("/")) || "/");
+    (kids[parent] = kids[parent] || []).push(n);
+  }
+  const open = new Set(["/"]);
+  let sel = "/";
+  $("previewBody").innerHTML = `<div class="pv-hdf"><div class="pv-tree" id="pvTree"></div>
+    <div class="pv-detail" id="pvDetail"></div></div>`;
+
+  const drawTree = () => {
+    const rows = [];
+    const walk = (n, depth) => {
+      const isGroup = n.kind === "group";
+      const hasKids = isGroup && (kids[n.path] || []).length;
+      const caret = hasKids ? (open.has(n.path) ? "▾" : "▸") : "";
+      const meta = isGroup ? "" : `${n.shape.length ? n.shape.join("×") : "scalar"} ${n.dtype}`;
+      rows.push(`<div class="pv-tn${n.path === sel ? " sel" : ""}" data-p="${escapeHtml(n.path)}"
+        style="padding-left:${8 + depth * 14}px" title="${escapeHtml(n.pytype || "")}">
+        <span class="pv-caret">${caret}</span><span>${isGroup ? "📁" : "▦"}</span>
+        <span>${escapeHtml(n.name)}</span><span class="pv-meta">${escapeHtml(meta)}</span></div>`);
+      if (hasKids && open.has(n.path)) for (const c of kids[n.path]) walk(c, depth + 1);
+    };
+    walk(nodes[0], 0);
+    $("pvTree").innerHTML = rows.join("");
+    $("pvTree").querySelectorAll(".pv-tn").forEach((el) => {
+      el.onclick = () => {
+        const p = el.getAttribute("data-p");
+        if (open.has(p) && sel === p) open.delete(p); else open.add(p);
+        sel = p; drawTree(); showNode(p);
+      };
+    });
+  };
+
+  const showNode = async (p) => {
+    const d = $("pvDetail");
+    d.innerHTML = pvMsg("Loading…");
+    let info;
+    try { info = await call("preview_hdf_node", { path, node: p }); }
+    catch (e) { info = { error: String(e) }; }
+    if (sel !== p || previewPath !== path) return;
+    if (info.error) { d.innerHTML = pvMsg(info.error); return; }
+    let h = `<h4>${escapeHtml(p)}</h4>`;
+    if (info.dtype) {
+      h += `<div class="pv-sub">${escapeHtml(info.dtype)} · shape ${info.shape.length ? "(" + info.shape.join(", ") + ")" : "scalar"}</div>`;
+    } else {
+      h += `<div class="pv-sub">group · ${(info.members || []).length} member(s)</div>`;
+    }
+    if (info.attrs && info.attrs.length) h += `<h5>Attributes</h5>` + pvTable(["name", "value"], info.attrs, false);
+    if (info.scalar !== undefined) h += `<h5>Value</h5><pre class="pv-text" style="padding:0">${escapeHtml(info.scalar)}</pre>`;
+    if (info.columns && info.columns.length) {
+      h += `<h5>Data${info.note ? " — " + escapeHtml(info.note) : ""}</h5>` + pvTable(info.columns, info.rows, true);
+    }
+    d.innerHTML = h;
+  };
+
+  drawTree();
+  showNode("/");
+}
+
+function previewSelected() {
+  if (!selected) return false;
+  openPreview(selectedIsSidecar ? Object.assign({}, selected, { artifact_path: null }) : selected);
+  return true;
+}
+
+$("previewX").onclick = $("previewClose").onclick = closePreview;
+$("previewScrim").addEventListener("mousedown", (e) => { if (e.target === $("previewScrim")) closePreview(); });
+$("previewOpen").onclick = () => { if (previewPath) call("open_path", { path: previewPath }); };
 
 // ---- boot ---------------------------------------------------------------
 async function boot() {
